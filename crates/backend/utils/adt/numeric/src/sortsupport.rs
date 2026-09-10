@@ -173,7 +173,11 @@ fn trace_sort() -> bool {
 fn trace_log(message: String) {
     let _ = elog::ereport(types_error::LOG)
         .errmsg_internal(message)
-        .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "numeric_abbrev_abort"));
+        .finish(types_error::ErrorLocation::new(
+            file!(),
+            line!() as i32,
+            "numeric_abbrev_abort",
+        ));
 }
 
 impl Default for NumericAbbrevState {
@@ -198,12 +202,45 @@ mod tests {
 
     fn corpus() -> Vec<NumericImage> {
         [
-            "NaN", "Infinity", "-Infinity", "0", "0.0", "-0.000", "1", "-1", "2.5", "-2.5",
-            "9999", "10000", "9999.9999", "0.0001", "-0.0001", "123456789012345.678901",
-            "-123456789012345.678901", "1e83", "1e84", "1e100", "-1e100", "1e-44", "1e-45",
-            "1e-200", "-1e-200", "1e300", "-1e300", "42", "42.000", "41.9999999999999999",
-            "3.14159265358979", "-3.14159265358979", "700000000", "700000001",
-            "0.5", "0.4999999999999", "123.456", "123.4560001", "-9999999999.999999",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "0",
+            "0.0",
+            "-0.000",
+            "1",
+            "-1",
+            "2.5",
+            "-2.5",
+            "9999",
+            "10000",
+            "9999.9999",
+            "0.0001",
+            "-0.0001",
+            "123456789012345.678901",
+            "-123456789012345.678901",
+            "1e83",
+            "1e84",
+            "1e100",
+            "-1e100",
+            "1e-44",
+            "1e-45",
+            "1e-200",
+            "-1e-200",
+            "1e300",
+            "-1e300",
+            "42",
+            "42.000",
+            "41.9999999999999999",
+            "3.14159265358979",
+            "-3.14159265358979",
+            "700000000",
+            "700000001",
+            "0.5",
+            "0.4999999999999",
+            "123.456",
+            "123.4560001",
+            "-9999999999.999999",
         ]
         .iter()
         .map(|s| img(s))
@@ -229,7 +266,10 @@ mod tests {
                 let expect = crate::cmp_numerics(a.num(), b.num());
                 assert_eq!(numeric_fast_cmp(a.payload(), b.payload()), expect);
                 let (oa, ob) = (odd(a.payload()), odd(b.payload()));
-                let (sa, sb) = (&oa[oa.len() - a.payload().len()..], &ob[ob.len() - b.payload().len()..]);
+                let (sa, sb) = (
+                    &oa[oa.len() - a.payload().len()..],
+                    &ob[ob.len() - b.payload().len()..],
+                );
                 if sa.as_ptr() as usize & 1 == 1 || sb.as_ptr() as usize & 1 == 1 {
                     assert_eq!(numeric_fast_cmp(sa, sb), expect);
                 }
@@ -244,7 +284,10 @@ mod tests {
         // only as equal abbrevs.
         let mut st = NumericAbbrevState::new();
         let vals = corpus();
-        let abbrevs: Vec<i64> = vals.iter().map(|v| st.convert(v.payload()) as i64).collect();
+        let abbrevs: Vec<i64> = vals
+            .iter()
+            .map(|v| st.convert(v.payload()) as i64)
+            .collect();
         for i in 0..vals.len() {
             for j in 0..vals.len() {
                 let a = if abbrevs[i] < abbrevs[j] {

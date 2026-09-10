@@ -22,8 +22,8 @@ use types_scan::scankey::{
     BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
     BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy, ScanKeyData, StrategyNumber,
     SK_BT_DESC, SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_NEXT, SK_BT_NULLS_FIRST, SK_BT_PRIOR,
-    SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_END, SK_ROW_HEADER,
-    SK_ROW_MEMBER, SK_SEARCHNOTNULL,
+    SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_END, SK_ROW_HEADER, SK_ROW_MEMBER,
+    SK_SEARCHNOTNULL,
 };
 use types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
 use types_snapshot::SnapshotData;
@@ -31,6 +31,7 @@ use types_storage::bufpage::PageRef;
 use types_tuple::itemptr::{ItemPointerCompare, ItemPointerData, ItemPointerGetBlockNumberNoCheck};
 use types_tuple::TupleDescData;
 
+use crate::check_for_interrupts;
 use crate::fcframe::OrderProcFrame;
 use crate::itup::{
     bt_tuple_get_downlink, bt_tuple_get_heap_tid, bt_tuple_get_max_heap_tid, bt_tuple_get_natts,
@@ -43,7 +44,6 @@ use crate::page::{
 use crate::utils::{
     bt_checkkeys, bt_killitems, bt_scanbehind_checkkeys, bt_set_startikey, bt_start_array_keys,
 };
-use crate::check_for_interrupts;
 
 const INVERT_COMPARE_RESULT: fn(i32) -> i32 = |r| if r < 0 { 1 } else { -r };
 const MAXALIGN: fn(usize) -> usize = |l| (l + 7) & !7;
@@ -528,9 +528,16 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
                             keys[bk].sk_flags & SK_BT_MINVAL == 0
                         });
                         let arr = &ctx.so.arrayKeys[a];
-                        let have =
-                            if low { arr.low_compare.is_some() } else { arr.high_compare.is_some() };
-                        chosen = if have { Some(Chosen::Skip(a, low)) } else { None };
+                        let have = if low {
+                            arr.low_compare.is_some()
+                        } else {
+                            arr.high_compare.is_some()
+                        };
+                        chosen = if have {
+                            Some(Chosen::Skip(a, low))
+                        } else {
+                            None
+                        };
                         if !arr.null_elem {
                             implies_nn = Some(bk);
                         } else {
@@ -571,8 +578,12 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
                     Chosen::Idx(k) => &keys[k],
                     Chosen::Skip(a, low) => {
                         let arr = &ctx.so.arrayKeys[a];
-                        if low { arr.low_compare.as_ref() } else { arr.high_compare.as_ref() }
-                            .expect("checked above")
+                        if low {
+                            arr.low_compare.as_ref()
+                        } else {
+                            arr.high_compare.as_ref()
+                        }
+                        .expect("checked above")
                     }
                 };
                 start_keys[keysz] = Some(match chosen.expect("checked above") {
@@ -647,8 +658,12 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
             StartKey::Data(idx) => &ctx.so.keyData[*idx],
             StartKey::SkipCompare(a, low) => {
                 let arr = &ctx.so.arrayKeys[*a];
-                if *low { arr.low_compare.as_ref() } else { arr.high_compare.as_ref() }
-                    .expect("chosen skip compare exists")
+                if *low {
+                    arr.low_compare.as_ref()
+                } else {
+                    arr.high_compare.as_ref()
+                }
+                .expect("chosen skip compare exists")
             }
             StartKey::NotNull(nn) => nn,
         };
@@ -1173,11 +1188,9 @@ fn bt_readpage(
 #[inline(never)]
 fn currtuples_overflow() -> Box<PgError> {
     Box::new(
-        PgError::error(
-            "index tuple size exceeds btree scan-position work area".to_string(),
-        )
-        .with_sqlstate(::types_error::ERRCODE_INDEX_CORRUPTED)
-        .with_hint("Please REINDEX it."),
+        PgError::error("index tuple size exceeds btree scan-position work area".to_string())
+            .with_sqlstate(::types_error::ERRCODE_INDEX_CORRUPTED)
+            .with_hint("Please REINDEX it."),
     )
 }
 
@@ -1206,7 +1219,10 @@ pub(crate) unsafe fn bt_saveitem(
         // fixed BLCKSZ buffer before writing, so corruption is a catchable
         // ERROR rather than a heap overflow.
         let start = so.currPos.nextTupleOffset as usize;
-        if start.checked_add(MAXALIGN(itupsz)).is_none_or(|end| end > curr_tuples.capacity()) {
+        if start
+            .checked_add(MAXALIGN(itupsz))
+            .is_none_or(|end| end > curr_tuples.capacity())
+        {
             return Err(currtuples_overflow());
         }
         item.tupleOffset = so.currPos.nextTupleOffset as u16;
@@ -1246,7 +1262,10 @@ unsafe fn bt_setuppostingitems(
         // a crafted posting offset could be < 8, so floor the checked extent at
         // the 8-byte index-tuple header.
         let start = so.currPos.nextTupleOffset as usize;
-        if start.checked_add(itupsz.max(8)).is_none_or(|end| end > curr_tuples.capacity()) {
+        if start
+            .checked_add(itupsz.max(8))
+            .is_none_or(|end| end > curr_tuples.capacity())
+        {
             return Err(currtuples_overflow());
         }
         item.tupleOffset = so.currPos.nextTupleOffset as u16;

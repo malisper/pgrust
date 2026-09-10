@@ -7,7 +7,8 @@ use adt_acl::{
     ACL_INSERT, ACL_MAINTAIN, ACL_SELECT, ACL_SET, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
 use cache_syscache::cacheinfo::{
-    ATTNUM, AUTHOID, DATABASEOID, EXTENSIONOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, LANGOID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID, TYPEOID,
+    ATTNUM, AUTHOID, DATABASEOID, EXTENSIONOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, LANGOID,
+    PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID, TYPEOID,
 };
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr, SysCacheGetAttrNotNull,
@@ -15,9 +16,8 @@ use cache_syscache::{
 };
 use datum::Datum;
 use types_core::catalog::{
-    BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, EXTENSION_RELATION_ID,
-    LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID,
-    RELATION_RELATION_ID, TYPE_RELATION_ID,
+    BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, EXTENSION_RELATION_ID, LANGUAGE_RELATION_ID,
+    NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_core::Oid;
 use types_error::{
@@ -28,7 +28,7 @@ use types_nodes::parsenodes::ObjectType;
 use types_rel::{RELKIND_SEQUENCE, RELKIND_VIEW};
 
 mod defacl;
-pub use defacl::{get_user_default_acl, ExecAlterDefaultPrivilegesStmt, DefaultAclRelationId};
+pub use defacl::{get_user_default_acl, DefaultAclRelationId, ExecAlterDefaultPrivilegesStmt};
 mod grant;
 pub use grant::{
     get_rolespec_oid, recordExtObjInitPriv, removeExtObjInitPriv, ExecuteGrantStmt,
@@ -78,10 +78,7 @@ thread_local! {
 // DatumGetAclP without the container copy: run `f` over the decoded items of
 // a stored aclitem[]. `d` must come from SysCacheGetAttr on a still-held
 // tuple (non-null).
-pub fn with_acl_datum<R>(
-    d: Datum,
-    f: impl FnOnce(&[AclItem]) -> PgResult<R>,
-) -> PgResult<R> {
+pub fn with_acl_datum<R>(d: Datum, f: impl FnOnce(&[AclItem]) -> PgResult<R>) -> PgResult<R> {
     use types_tuple::varatt;
     let p = d.as_usize() as *const u8;
     // C: DatumGetAclP is PG_DETOAST_DATUM (acl.h) — compressed/external
@@ -146,7 +143,11 @@ pub fn object_aclcheck_ext(
         AclMaskHow::AclmaskAny,
         Some(&mut is_missing),
     )?;
-    let r = if m != 0 { ACLCHECK_OK } else { ACLCHECK_NO_PRIV };
+    let r = if m != 0 {
+        ACLCHECK_OK
+    } else {
+        ACLCHECK_NO_PRIV
+    };
     Ok((r, is_missing))
 }
 
@@ -246,7 +247,13 @@ fn object_aclmask_ext(
     let owner_id = SysCacheGetAttrNotNull(cacheid, &tuple, owner_attnum)?.as_oid();
     let (acl_datum, isnull) = SysCacheGetAttr(cacheid, &tuple, acl_attnum)?;
     let result = if isnull {
-        aclmask(acldefault(objtype, owner_id).as_slice(), roleid, owner_id, mask, how)?
+        aclmask(
+            acldefault(objtype, owner_id).as_slice(),
+            roleid,
+            owner_id,
+            mask,
+            how,
+        )?
     } else {
         with_acl_datum(acl_datum, |acl| aclmask(acl, roleid, owner_id, mask, how))?
     };
@@ -294,8 +301,7 @@ fn pg_type_aclmask_ext(
     };
 
     let typelem = SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPELEM)?.as_oid();
-    let typsubscript =
-        SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPSUBSCRIPT)?.as_oid();
+    let typsubscript = SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPSUBSCRIPT)?.as_oid();
     if typelem != Oid::default() && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER {
         ReleaseSysCache(tuple);
         type_oid = typelem;
@@ -322,8 +328,9 @@ fn pg_type_aclmask_ext(
             SysCacheKey::Value(Datum::from_oid(type_oid)),
         )? {
             Some(range_tuple) => {
-                let r = SysCacheGetAttrNotNull(RANGEMULTIRANGE, &range_tuple, ANUM_PG_RANGE_RNGTYPID)?
-                    .as_oid();
+                let r =
+                    SysCacheGetAttrNotNull(RANGEMULTIRANGE, &range_tuple, ANUM_PG_RANGE_RNGTYPID)?
+                        .as_oid();
                 ReleaseSysCache(range_tuple);
                 r
             }
@@ -376,7 +383,11 @@ pub fn pg_class_aclcheck_ext(table_oid: Oid, roleid: Oid, mode: u64) -> PgResult
         AclMaskHow::AclmaskAny,
         Some(&mut is_missing),
     )?;
-    let r = if m != 0 { ACLCHECK_OK } else { ACLCHECK_NO_PRIV };
+    let r = if m != 0 {
+        ACLCHECK_OK
+    } else {
+        ACLCHECK_NO_PRIV
+    };
     Ok((r, is_missing))
 }
 
@@ -411,8 +422,8 @@ pub fn pg_class_aclmask_ext(
         // arm, granting writes C denies.
         let relnamespace =
             SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELNAMESPACE)?.as_oid();
-        let is_system_class = catalog::IsCatalogRelationOid(table_oid)
-            || catalog::IsToastNamespace(relnamespace);
+        let is_system_class =
+            catalog::IsCatalogRelationOid(table_oid) || catalog::IsToastNamespace(relnamespace);
         if is_system_class && relkind != RELKIND_VIEW && !superuser::superuser_arg(roleid)? {
             mask &= !SYSTEM_WRITE;
         }
@@ -431,7 +442,13 @@ pub fn pg_class_aclmask_ext(
         } else {
             AclObjectType::Table
         };
-        aclmask(acldefault(objtype, owner_id).as_slice(), roleid, owner_id, mask, how)?
+        aclmask(
+            acldefault(objtype, owner_id).as_slice(),
+            roleid,
+            owner_id,
+            mask,
+            how,
+        )?
     } else {
         with_acl_datum(acl_datum, |acl| aclmask(acl, roleid, owner_id, mask, how))?
     };
@@ -444,7 +461,9 @@ pub fn pg_class_aclmask_ext(
         result |= ACL_SELECT;
     }
     const WRITE: u64 = ACL_INSERT | ACL_UPDATE | ACL_DELETE;
-    if mask & WRITE != 0 && result & WRITE == 0 && has_privs_of_role(roleid, ROLE_PG_WRITE_ALL_DATA)?
+    if mask & WRITE != 0
+        && result & WRITE == 0
+        && has_privs_of_role(roleid, ROLE_PG_WRITE_ALL_DATA)?
     {
         result |= mask & WRITE;
     }
@@ -506,7 +525,8 @@ fn pg_namespace_aclmask_ext(
                 .with_sqlstate(types_error::ERRCODE_UNDEFINED_SCHEMA),
         ));
     };
-    let owner_id = SysCacheGetAttrNotNull(NAMESPACEOID, &tuple, ANUM_PG_NAMESPACE_NSPOWNER)?.as_oid();
+    let owner_id =
+        SysCacheGetAttrNotNull(NAMESPACEOID, &tuple, ANUM_PG_NAMESPACE_NSPOWNER)?.as_oid();
     let (acl_datum, isnull) = SysCacheGetAttr(NAMESPACEOID, &tuple, ANUM_PG_NAMESPACE_NSPACL)?;
     let mut result = if isnull {
         aclmask(
@@ -533,7 +553,14 @@ fn pg_namespace_aclmask_ext(
 }
 
 pub fn pg_attribute_aclcheck(table_oid: Oid, attnum: i16, roleid: Oid, mode: u64) -> PgResult<i32> {
-    if pg_attribute_aclmask_ext(table_oid, attnum, roleid, mode, AclMaskHow::AclmaskAny, None)? != 0
+    if pg_attribute_aclmask_ext(
+        table_oid,
+        attnum,
+        roleid,
+        mode,
+        AclMaskHow::AclmaskAny,
+        None,
+    )? != 0
     {
         Ok(ACLCHECK_OK)
     } else {
@@ -557,7 +584,11 @@ pub fn pg_attribute_aclcheck_ext(
         AclMaskHow::AclmaskAny,
         Some(&mut is_missing),
     )?;
-    let r = if m != 0 { ACLCHECK_OK } else { ACLCHECK_NO_PRIV };
+    let r = if m != 0 {
+        ACLCHECK_OK
+    } else {
+        ACLCHECK_NO_PRIV
+    };
     Ok((r, is_missing))
 }
 
@@ -610,7 +641,8 @@ pub fn pg_attribute_aclmask_ext(
         return Ok(0);
     }
 
-    let Some(class_tuple) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(table_oid)))?
+    let Some(class_tuple) =
+        SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(table_oid)))?
     else {
         ReleaseSysCache(att_tuple);
         if let Some(m) = is_missing {
@@ -643,7 +675,8 @@ pub fn pg_attribute_aclcheck_all_ext(
     how: AclMaskHow,
     is_missing: Option<&mut bool>,
 ) -> PgResult<i32> {
-    let Some(class_tuple) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(table_oid)))?
+    let Some(class_tuple) =
+        SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(table_oid)))?
     else {
         if let Some(m) = is_missing {
             *m = true;
@@ -730,9 +763,7 @@ pub(crate) fn pg_aclmask_for_grant(
         ObjectType::OBJECT_STATISTIC_EXT => Err(Box::new(PgError::error(
             "grantable rights not supported for statistics objects".to_string(),
         ))),
-        ObjectType::OBJECT_TYPE => {
-            object_aclmask(TYPE_RELATION_ID, object_oid, roleid, mask, how)
-        }
+        ObjectType::OBJECT_TYPE => object_aclmask(TYPE_RELATION_ID, object_oid, roleid, mask, how),
         ObjectType::OBJECT_TABLESPACE => object_aclmask(
             types_core::catalog::TABLE_SPACE_RELATION_ID,
             object_oid,
@@ -740,9 +771,7 @@ pub(crate) fn pg_aclmask_for_grant(
             mask,
             how,
         ),
-        ObjectType::OBJECT_PARAMETER_ACL => {
-            pg_parameter_acl_aclmask(object_oid, roleid, mask, how)
-        }
+        ObjectType::OBJECT_PARAMETER_ACL => pg_parameter_acl_aclmask(object_oid, roleid, mask, how),
         ObjectType::OBJECT_FDW => object_aclmask(
             types_core::FOREIGN_DATA_WRAPPER_RELATION_ID,
             object_oid,
@@ -750,25 +779,39 @@ pub(crate) fn pg_aclmask_for_grant(
             mask,
             how,
         ),
-        ObjectType::OBJECT_FOREIGN_SERVER => {
-            object_aclmask(types_core::FOREIGN_SERVER_RELATION_ID, object_oid, roleid, mask, how)
-        }
+        ObjectType::OBJECT_FOREIGN_SERVER => object_aclmask(
+            types_core::FOREIGN_SERVER_RELATION_ID,
+            object_oid,
+            roleid,
+            mask,
+            how,
+        ),
         // C elog(ERROR): defensive, unreachable from the GRANT lanes.
         ObjectType::OBJECT_EVENT_TRIGGER => Err(Box::new(PgError::error(
             "grantable rights not supported for event triggers".to_string(),
         ))),
-        other => panic!("pg_aclmask (aclchk.c): object type {} arm unported", other as i32),
+        other => panic!(
+            "pg_aclmask (aclchk.c): object type {} arm unported",
+            other as i32
+        ),
     }
 }
 
 // pg_parameter_acl_aclmask (aclchk.c): by pg_parameter_acl OID, unlike
 // pg_parameter_aclmask's by-name probe.
-fn pg_parameter_acl_aclmask(acl_oid: Oid, roleid: Oid, mask: u64, how: AclMaskHow) -> PgResult<u64> {
+fn pg_parameter_acl_aclmask(
+    acl_oid: Oid,
+    roleid: Oid,
+    mask: u64,
+    how: AclMaskHow,
+) -> PgResult<u64> {
     if superuser::superuser_arg(roleid)? {
         return Ok(mask);
     }
-    let Some(tuple) =
-        SearchSysCache1(PARAMETERACLOID, SysCacheKey::Value(Datum::from_oid(acl_oid)))?
+    let Some(tuple) = SearchSysCache1(
+        PARAMETERACLOID,
+        SysCacheKey::Value(Datum::from_oid(acl_oid)),
+    )?
     else {
         return Err(Box::new(
             PgError::error(format!("parameter ACL with OID {acl_oid} does not exist"))
@@ -786,7 +829,9 @@ fn pg_parameter_acl_aclmask(acl_oid: Oid, roleid: Oid, mask: u64, how: AclMaskHo
             how,
         )?
     } else {
-        with_acl_datum(acl_datum, |acl| aclmask(acl, roleid, BOOTSTRAP_SUPERUSERID, mask, how))?
+        with_acl_datum(acl_datum, |acl| {
+            aclmask(acl, roleid, BOOTSTRAP_SUPERUSERID, mask, how)
+        })?
     };
     ReleaseSysCache(tuple);
     Ok(result)
@@ -863,8 +908,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
                     "cache lookup failed for type {objectid}"
                 ))));
             };
-            let owner =
-                SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPOWNER)?.as_oid();
+            let owner = SysCacheGetAttrNotNull(TYPEOID, &tuple, ANUM_PG_TYPE_TYPOWNER)?.as_oid();
             ReleaseSysCache(tuple);
             owner
         }
@@ -876,8 +920,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
                     "cache lookup failed for relation {objectid}"
                 ))));
             };
-            let owner =
-                SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELOWNER)?.as_oid();
+            let owner = SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELOWNER)?.as_oid();
             ReleaseSysCache(tuple);
             owner
         }
@@ -931,12 +974,9 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
                     "cache lookup failed for tablespace {objectid}"
                 ))));
             };
-            let owner = SysCacheGetAttrNotNull(
-                cache_syscache::cacheinfo::TABLESPACEOID,
-                &tuple,
-                3,
-            )?
-            .as_oid();
+            let owner =
+                SysCacheGetAttrNotNull(cache_syscache::cacheinfo::TABLESPACEOID, &tuple, 3)?
+                    .as_oid();
             ReleaseSysCache(tuple);
             owner
         }
@@ -1026,8 +1066,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
                     "cache lookup failed for function {objectid}"
                 ))));
             };
-            let owner =
-                SysCacheGetAttrNotNull(PROCOID, &tuple, ANUM_PG_PROC_PROOWNER)?.as_oid();
+            let owner = SysCacheGetAttrNotNull(PROCOID, &tuple, ANUM_PG_PROC_PROOWNER)?.as_oid();
             ReleaseSysCache(tuple);
             owner
         }
@@ -1056,9 +1095,12 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             syscache_owner(cache_syscache::cacheinfo::COLLOID, 4, objectid, "collation")?
         }
         #[allow(non_upper_case_globals)] // C-parity name
-        OperatorClassRelationId_own => {
-            syscache_owner(cache_syscache::cacheinfo::CLAOID, 5, objectid, "operator class")?
-        }
+        OperatorClassRelationId_own => syscache_owner(
+            cache_syscache::cacheinfo::CLAOID,
+            5,
+            objectid,
+            "operator class",
+        )?,
         #[allow(non_upper_case_globals)] // C-parity name
         OperatorFamilyRelationId_own => syscache_owner(
             cache_syscache::cacheinfo::OPFAMILYOID,
@@ -1110,9 +1152,12 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
         )?,
         // C object_ownercheck: extension owner is pg_extension.extowner, read
         // via the EXTENSIONOID syscache (get_object_catcache_oid returns it).
-        EXTENSION_RELATION_ID => {
-            syscache_owner(EXTENSIONOID, ANUM_PG_EXTENSION_EXTOWNER, objectid, "extension")?
-        }
+        EXTENSION_RELATION_ID => syscache_owner(
+            EXTENSIONOID,
+            ANUM_PG_EXTENSION_EXTOWNER,
+            objectid,
+            "extension",
+        )?,
         other => panic!("object_ownercheck (aclchk.c): object class {other} arm unported"),
     };
     has_privs_of_role(roleid, owner_id)
@@ -1129,7 +1174,6 @@ fn syscache_owner(cacheid: i32, attnum: i32, objectid: Oid, what: &str) -> PgRes
     ReleaseSysCache(tuple);
     Ok(owner)
 }
-
 
 #[allow(non_upper_case_globals)] // C-parity name
 const ConversionRelationId_own: Oid = 2607;
@@ -1204,7 +1248,9 @@ pub fn aclcheck_error(aclerr: i32, objtype: ObjectType, objectname: &str) -> PgR
                 "permission denied for {} {objectname}",
                 objtype_noun(objtype)?
             ))
-            .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
+            .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            // C aclchk.c:2795 (18.6): the ACLCHECK_NO_PRIV ereport
+            .with_location("aclchk.c", 2795, "aclcheck_error"),
         )),
         ACLCHECK_NOT_OWNER => {
             // C: ownership attaches to the relation for these object types.
@@ -1246,7 +1292,8 @@ fn pg_parameter_aclmask(name: &str, roleid: Oid, mask: u64, how: AclMaskHow) -> 
         return Ok(0);
     };
 
-    let (acl_datum, isnull) = SysCacheGetAttr(PARAMETERACLNAME, &tuple, ANUM_PG_PARAMETER_ACL_PARACL)?;
+    let (acl_datum, isnull) =
+        SysCacheGetAttr(PARAMETERACLNAME, &tuple, ANUM_PG_PARAMETER_ACL_PARACL)?;
     let result = if isnull {
         aclmask(
             acldefault(AclObjectType::ParameterAcl, BOOTSTRAP_SUPERUSERID).as_slice(),
@@ -1278,17 +1325,29 @@ pub fn init_seams() {
     aclchk_seams::pg_parameter_aclcheck::set(pg_parameter_aclcheck);
     aclchk_seams::pg_class_aclcheck_ext::set(pg_class_aclcheck_ext);
     aclchk_seams::pg_class_aclmask::set(|table_oid, roleid, mask, how_all| {
-        let how = if how_all { AclMaskHow::AclmaskAll } else { AclMaskHow::AclmaskAny };
+        let how = if how_all {
+            AclMaskHow::AclmaskAll
+        } else {
+            AclMaskHow::AclmaskAny
+        };
         pg_class_aclmask(table_oid, roleid, mask, how)
     });
     aclchk_seams::pg_attribute_aclcheck::set(pg_attribute_aclcheck);
     aclchk_seams::pg_attribute_aclcheck_all::set(|table_oid, roleid, mode, how_all| {
-        let how = if how_all { AclMaskHow::AclmaskAll } else { AclMaskHow::AclmaskAny };
+        let how = if how_all {
+            AclMaskHow::AclmaskAll
+        } else {
+            AclMaskHow::AclmaskAny
+        };
         pg_attribute_aclcheck_all(table_oid, roleid, mode, how)
     });
     aclchk_seams::pg_attribute_aclcheck_ext::set(pg_attribute_aclcheck_ext);
     aclchk_seams::pg_attribute_aclcheck_all_ext::set(|table_oid, roleid, mode, how_all| {
-        let how = if how_all { AclMaskHow::AclmaskAll } else { AclMaskHow::AclmaskAny };
+        let how = if how_all {
+            AclMaskHow::AclmaskAll
+        } else {
+            AclMaskHow::AclmaskAny
+        };
         let mut is_missing = false;
         let r = pg_attribute_aclcheck_all_ext(table_oid, roleid, mode, how, Some(&mut is_missing))?;
         Ok((r, is_missing))

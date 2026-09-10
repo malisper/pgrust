@@ -1,7 +1,7 @@
 // aclchk.c large-object arms: pg_largeobject_aclmask_snapshot /
 // pg_largeobject_aclcheck_snapshot / object_ownercheck.
 
-use adt_acl::{acldefault, aclmask, has_privs_of_role, AclMaskHow, AclObjectType, AclItem};
+use adt_acl::{acldefault, aclmask, has_privs_of_role, AclItem, AclMaskHow, AclObjectType};
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
@@ -22,7 +22,11 @@ pub(crate) fn pg_largeobject_aclmask_snapshot_current(
 }
 
 // has_lo_priv_byid (acl.c): (result, is_missing).
-pub(crate) fn has_lo_priv_byid(roleid: Oid, lobj_oid: Oid, priv_mode: u64) -> PgResult<(bool, bool)> {
+pub(crate) fn has_lo_priv_byid(
+    roleid: Oid,
+    lobj_oid: Oid,
+    priv_mode: u64,
+) -> PgResult<(bool, bool)> {
     let scratch = mcx::MemoryContext::new("has_lo_priv_byid");
     let mcx = scratch.mcx();
     let snapshot = if priv_mode & adt_acl::ACL_UPDATE != 0 {
@@ -88,8 +92,14 @@ pub fn pg_largeobject_aclcheck_snapshot<'mcx>(
     mode: u64,
     snapshot: Option<pg_largeobject::Snapshot>,
 ) -> PgResult<i32> {
-    if pg_largeobject_aclmask_snapshot(mcx, lobj_oid, roleid, mode, AclMaskHow::AclmaskAny, snapshot)?
-        != 0
+    if pg_largeobject_aclmask_snapshot(
+        mcx,
+        lobj_oid,
+        roleid,
+        mode,
+        AclMaskHow::AclmaskAny,
+        snapshot,
+    )? != 0
     {
         Ok(ACLCHECK_OK)
     } else {

@@ -262,8 +262,11 @@ pub fn assign_backtrace_functions(extra: Option<BacktraceFunctionList>) {
 }
 
 pub fn matches_backtrace_functions(funcname: &str) -> bool {
-    BACKTRACE_FUNCTION_LIST
-        .with(|c| c.borrow().as_ref().is_some_and(|list| list.matches(funcname)))
+    BACKTRACE_FUNCTION_LIST.with(|c| {
+        c.borrow()
+            .as_ref()
+            .is_some_and(|list| list.matches(funcname))
+    })
 }
 
 pub fn check_log_destination(newval: &str) -> PgResult<i32> {

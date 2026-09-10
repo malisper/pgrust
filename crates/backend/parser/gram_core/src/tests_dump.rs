@@ -202,9 +202,7 @@ fn node(out: &mut String, n: Node<'_>) {
                 match v {
                     ValUnion::Integer(i) => out.push_str(&i.ival.to_string()),
                     ValUnion::Float(f) => out.push_str(f.fval),
-                    ValUnion::Boolean(b) => {
-                        out.push_str(if b.boolval { "true" } else { "false" })
-                    }
+                    ValUnion::Boolean(b) => out.push_str(if b.boolval { "true" } else { "false" }),
                     ValUnion::String(s) => {
                         out.push('"');
                         if !s.sval.is_empty() {
@@ -978,7 +976,10 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push_str(&format!(" :indexOid {}", s.indexOid));
         out.push_str(&format!(" :oldNumber {}", s.oldNumber));
         out.push_str(&format!(" :oldCreateSubid {}", s.oldCreateSubid));
-        out.push_str(&format!(" :oldFirstRelfilelocatorSubid {}", s.oldFirstRelfilelocatorSubid));
+        out.push_str(&format!(
+            " :oldFirstRelfilelocatorSubid {}",
+            s.oldFirstRelfilelocatorSubid
+        ));
         bool_field(out, "unique", s.unique);
         bool_field(out, "nulls_not_distinct", s.nulls_not_distinct);
         bool_field(out, "primary", s.primary);
@@ -1437,9 +1438,7 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "restart_seqs", t.restart_seqs);
         int_field(out, "behavior", t.behavior as i32);
         out.push('}');
-    } else if let Some(a) =
-        n.as_variant::<types_nodes::rawnodes::AlterExtensionContentsStmt>()
-    {
+    } else if let Some(a) = n.as_variant::<types_nodes::rawnodes::AlterExtensionContentsStmt>() {
         out.push_str("{ALTEREXTENSIONCONTENTSSTMT");
         string_field(out, "extname", a.extname);
         int_field(out, "action", a.action);
@@ -1905,8 +1904,7 @@ fn node(out: &mut String, n: Node<'_>) {
         string_field(out, "dbname", s.dbname);
         list_field(out, "options", &s.options);
         out.push('}');
-    } else if let Some(s) =
-        n.as_variant::<types_nodes::parsenodes::AlterDatabaseRefreshCollStmt>()
+    } else if let Some(s) = n.as_variant::<types_nodes::parsenodes::AlterDatabaseRefreshCollStmt>()
     {
         out.push_str("{ALTERDATABASEREFRESHCOLLSTMT");
         string_field(out, "dbname", s.dbname);
@@ -2090,7 +2088,10 @@ fn range_var(out: &mut String, rv: &types_nodes::RangeVar<'_>) {
     string_field(out, "relname", rv.relname);
     bool_field(out, "inh", rv.inh);
     out.push_str(" :relpersistence ");
-    out_token(out, Some(std::str::from_utf8(&[rv.relpersistence]).unwrap()));
+    out_token(
+        out,
+        Some(std::str::from_utf8(&[rv.relpersistence]).unwrap()),
+    );
     out.push_str(" :alias ");
     match rv.alias {
         Some(a) => alias(out, a),
@@ -2107,7 +2108,10 @@ fn char_field(out: &mut String, name: &str, c: u8) {
     if c == 0 {
         out.push_str("<>");
     } else {
-        out_token(out, Some(std::str::from_utf8(std::slice::from_ref(&c)).unwrap()));
+        out_token(
+            out,
+            Some(std::str::from_utf8(std::slice::from_ref(&c)).unwrap()),
+        );
     }
 }
 
@@ -2207,8 +2211,7 @@ fn c_reference_vectors() {
         if stmt.is_empty() && want.is_empty() {
             continue;
         }
-        let got = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_one(stmt)))
-        {
+        let got = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_one(stmt))) {
             Ok(g) => g,
             Err(e) => {
                 let msg = e
@@ -2224,5 +2227,10 @@ fn c_reference_vectors() {
             failures.push(format!("stmt {stmt:?}\n  C:    {want}\n  rust: {got}"));
         }
     }
-    assert!(failures.is_empty(), "{} mismatches:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} mismatches:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

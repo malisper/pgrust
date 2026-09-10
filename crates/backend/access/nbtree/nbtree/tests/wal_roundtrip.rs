@@ -11,15 +11,15 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex;
 
-use mcx::{MemoryContext, Mcx, PgVec};
+use mcx::{Mcx, MemoryContext, PgVec};
 use transam_xlog::control_file::{
     FirstNormalUnloggedLSN, FLOATFORMAT_VALUE, PG_CONTROL_FILE_SIZE, PG_CONTROL_VERSION,
     TOAST_MAX_CHUNK_SIZE,
 };
 use transam_xlog::{XLogRecPtrToBytePos, DB_IN_PRODUCTION, RECOVERY_STATE_DONE};
 use types_core::{
-    BackendType, BlockNumber, Buffer, ForkNumber, Oid, TimeLineID,
-    XLogRecPtr, XLogSegNo, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+    BackendType, BlockNumber, Buffer, ForkNumber, Oid, TimeLineID, XLogRecPtr, XLogSegNo, BLCKSZ,
+    INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
 };
 use types_error::PgResult;
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData};
@@ -255,7 +255,10 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         rd_firstRelfilelocatorSubid: Cell::new(0),
         rd_droppedSubid: Cell::new(0),
         rd_lockInfo: LockInfoData {
-            lockRelId: LockRelId { relId: REL_OID, dbId: 5 },
+            lockRelId: LockRelId {
+                relId: REL_OID,
+                dbId: 5,
+            },
         },
         rd_rel: FormData_pg_class {
             relname,
@@ -298,8 +301,8 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
             indxmin: 0,
             indkey,
             has_indpred: false,
-        indexprs_src: None,
-        indpred_src: None,
+            indexprs_src: None,
+            indpred_src: None,
         }),
         rd_opcintype: one(23),
         rd_opfamily: one(1976),
@@ -309,13 +312,16 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         pgstat_enabled: Cell::new(false),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_opcoptions: Default::default(),
         rd_indexlist: Default::default(),
-            rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }
@@ -499,8 +505,12 @@ fn btree_split_wal_roundtrip() {
     let ctl = transam_xlog::ctl::XLogCtl();
     ctl.InsertTimeLineID.store(1, Relaxed);
     ctl.PrevTimeLineID.store(1, Relaxed);
-    ctl.Insert.CurrBytePos.store(XLogRecPtrToBytePos(end_of_log), Relaxed);
-    ctl.Insert.PrevBytePos.store(XLogRecPtrToBytePos(prev_rec), Relaxed);
+    ctl.Insert
+        .CurrBytePos
+        .store(XLogRecPtrToBytePos(end_of_log), Relaxed);
+    ctl.Insert
+        .PrevBytePos
+        .store(XLogRecPtrToBytePos(prev_rec), Relaxed);
     ctl.Insert.fullPageWrites.store(true, Relaxed);
     ctl.Insert.RedoRecPtr.store(prev_rec, Relaxed);
     ctl.RedoRecPtr.store(prev_rec, Relaxed);
@@ -552,17 +562,22 @@ fn btree_split_wal_roundtrip() {
     let right = page_bytes(2);
     let root = page_bytes(3);
     let left_ref = unsafe { PageRef::from_raw(NonNull::new(left.0.as_ptr().cast_mut()).unwrap()) };
-    let right_ref = unsafe { PageRef::from_raw(NonNull::new(right.0.as_ptr().cast_mut()).unwrap()) };
-    let last_lsn = right_ref.lsn().max(root.0.as_ptr() as u64 * 0 + {
-        let r = unsafe { PageRef::from_raw(NonNull::new(root.0.as_ptr().cast_mut()).unwrap()) };
-        r.lsn()
-    });
+    let right_ref =
+        unsafe { PageRef::from_raw(NonNull::new(right.0.as_ptr().cast_mut()).unwrap()) };
+    let last_lsn = right_ref.lsn().max(
+        root.0.as_ptr() as u64 * 0 + {
+            let r = unsafe { PageRef::from_raw(NonNull::new(root.0.as_ptr().cast_mut()).unwrap()) };
+            r.lsn()
+        },
+    );
     transam_xlog::XLogFlush(last_lsn).unwrap();
 
     let reader_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("reader")));
     let mut reader = xlogreader::XLogReaderState::allocate(reader_ctx.mcx(), SEG).unwrap();
     reader.system_identifier = SYS_ID;
-    let mut routine = SegFileRead { wal_dir: dir.join("pg_wal") };
+    let mut routine = SegFileRead {
+        wal_dir: dir.join("pg_wal"),
+    };
     reader.XLogBeginRead(end_of_log + 40);
 
     // record 1: NEWROOT (root creation), block 0 root WILL_INIT, block 2 meta.
@@ -575,7 +590,10 @@ fn btree_split_wal_roundtrip() {
     assert_eq!(u32::from_ne_bytes(main[4..8].try_into().unwrap()), 0); // level
     let md = reader.XLogRecGetBlockData(2).unwrap();
     assert_eq!(md.len(), 28);
-    assert_eq!(u32::from_ne_bytes(md[0..4].try_into().unwrap()), BTREE_VERSION);
+    assert_eq!(
+        u32::from_ne_bytes(md[0..4].try_into().unwrap()),
+        BTREE_VERSION
+    );
     assert_eq!(u32::from_ne_bytes(md[4..8].try_into().unwrap()), 1); // root
 
     // records 2..=nkeys: INSERT_LEAF for each key before the split, with the
@@ -622,15 +640,18 @@ fn btree_split_wal_roundtrip() {
     let hk_id = left_ref.item_id(1); // P_HIKEY
     let (hk_ptr, _) = left_ref.item_raw(hk_id);
     // SAFETY: leaked page image.
-    let hk_live = unsafe {
-        core::slice::from_raw_parts(hk_ptr, (hk_id.lp_len() as usize + 7) & !7)
-    };
+    let hk_live =
+        unsafe { core::slice::from_raw_parts(hk_ptr, (hk_id.lp_len() as usize + 7) & !7) };
     assert_eq!(hk_logged, hk_live);
 
     // block 1 data restores the right page image byte-for-byte.
     let ritems = reader.XLogRecGetBlockData(1).unwrap();
     let restored = restore_page(ritems, &right.0, split_lsn);
-    assert_eq!(restored[..], right.0[..], "restored right page image differs");
+    assert_eq!(
+        restored[..],
+        right.0[..],
+        "restored right page image differs"
+    );
 
     // final record: NEWROOT for the root split; its item stream restores the
     // new root page image.
@@ -643,7 +664,11 @@ fn btree_split_wal_roundtrip() {
     assert_eq!(u32::from_ne_bytes(main[4..8].try_into().unwrap()), 1); // level
     let rootitems = reader.XLogRecGetBlockData(0).unwrap();
     let restored_root = restore_page(rootitems, &root.0, root_lsn);
-    assert_eq!(restored_root[..], root.0[..], "restored root page image differs");
+    assert_eq!(
+        restored_root[..],
+        root.0[..],
+        "restored root page image differs"
+    );
     let md = reader.XLogRecGetBlockData(2).unwrap();
     assert_eq!(u32::from_ne_bytes(md[4..8].try_into().unwrap()), 3); // meta root
     assert_eq!(u32::from_ne_bytes(md[8..12].try_into().unwrap()), 1); // meta level

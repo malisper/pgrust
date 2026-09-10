@@ -184,7 +184,10 @@ pub fn write_syslog(level: i32, line: &str) {
 }
 
 fn memchr_newline(bytes: &[u8], from: usize) -> Option<usize> {
-    bytes[from..].iter().position(|&b| b == b'\n').map(|i| from + i)
+    bytes[from..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| from + i)
 }
 
 fn c_isspace(b: u8) -> bool {

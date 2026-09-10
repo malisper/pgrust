@@ -5,7 +5,9 @@ use adt_acl::{
     ACL_NO_RIGHTS,
 };
 use cache_syscache::cacheinfo::DEFACLROLENSPOBJ;
-use cache_syscache::{ReleaseSysCache, SearchSysCache3, SysCacheGetAttr, SysCacheGetAttrNotNull, SysCacheKey};
+use cache_syscache::{
+    ReleaseSysCache, SearchSysCache3, SysCacheGetAttr, SysCacheGetAttrNotNull, SysCacheKey,
+};
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, NAMESPACE_RELATION_ID};
@@ -56,7 +58,10 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
 // parser_errposition(pstate, defel->location) puts the cursor on the
 // repeated IN SCHEMA / FOR ROLE clause.
 fn conflicting_def_elem(defel: &DefElem<'_>) -> Box<PgError> {
-    let mut e = err("conflicting or redundant options".into(), ERRCODE_SYNTAX_ERROR);
+    let mut e = err(
+        "conflicting or redundant options".into(),
+        ERRCODE_SYNTAX_ERROR,
+    );
     if defel.location >= 0 {
         e.cursor_position = Some(defel.location + 1);
     }
@@ -80,7 +85,9 @@ pub fn ExecAlterDefaultPrivilegesStmt<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &AlterDefaultPrivilegesStmt<'_>,
 ) -> PgResult<()> {
-    let action = stmt.action.expect("AlterDefaultPrivilegesStmt without action");
+    let action = stmt
+        .action
+        .expect("AlterDefaultPrivilegesStmt without action");
 
     let mut dnspnames = None;
     let mut drolespecs = None;
@@ -159,11 +166,16 @@ pub fn ExecAlterDefaultPrivilegesStmt<'mcx>(
                     ERRCODE_INVALID_GRANT_OPERATION,
                 ));
             }
-            let priv_name = privnode.priv_name.expect("AccessPriv node must specify privilege");
+            let priv_name = privnode
+                .priv_name
+                .expect("AccessPriv node must specify privilege");
             let privilege = string_to_privilege(priv_name)?;
             if privilege & !all_privileges != 0 {
                 return Err(err(
-                    format!("invalid privilege type {} for {what}", privilege_to_string(privilege)),
+                    format!(
+                        "invalid privilege type {} for {what}",
+                        privilege_to_string(privilege)
+                    ),
                     ERRCODE_INVALID_GRANT_OPERATION,
                 ));
             }
@@ -378,8 +390,11 @@ fn SetDefaultACL<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'_>) -> PgResu
 
     let mut old_acl: Option<PgVec<'mcx, AclItem>> = None;
     if let Some(tuple) = &tuple {
-        let (acl_datum, is_null) =
-            SysCacheGetAttr(DEFACLROLENSPOBJ, tuple, Anum_pg_default_acl_defaclacl as i32)?;
+        let (acl_datum, is_null) = SysCacheGetAttr(
+            DEFACLROLENSPOBJ,
+            tuple,
+            Anum_pg_default_acl_defaclacl as i32,
+        )?;
         if !is_null {
             old_acl = Some(with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?);
         }
@@ -443,10 +458,8 @@ fn SetDefaultACL<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'_>) -> PgResu
             )?;
             values[Anum_pg_default_acl_oid as usize - 1] = Datum::from_oid(defacl_oid);
             values[Anum_pg_default_acl_defaclrole as usize - 1] = Datum::from_oid(iacls.roleid);
-            values[Anum_pg_default_acl_defaclnamespace as usize - 1] =
-                Datum::from_oid(iacls.nspid);
-            values[Anum_pg_default_acl_defaclobjtype as usize - 1] =
-                Datum::from_i8(objtype as i8);
+            values[Anum_pg_default_acl_defaclnamespace as usize - 1] = Datum::from_oid(iacls.nspid);
+            values[Anum_pg_default_acl_defaclobjtype as usize - 1] = Datum::from_i8(objtype as i8);
             values[Anum_pg_default_acl_defaclacl as usize - 1] =
                 Datum::from_usize(acl_img.as_ptr() as usize);
             let mut newtuple = heaptuple::heap_form_tuple(mcx, rel.descr(), &values, &nulls)?;
@@ -472,7 +485,12 @@ fn SetDefaultACL<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'_>) -> PgResu
         }
 
         if is_new {
-            pg_depend::recordDependencyOnOwner(mcx, DefaultAclRelationId, defacl_oid, iacls.roleid)?;
+            pg_depend::recordDependencyOnOwner(
+                mcx,
+                DefaultAclRelationId,
+                defacl_oid,
+                iacls.roleid,
+            )?;
             if iacls.nspid != InvalidOid {
                 let myself = pg_depend::ObjectAddress {
                     classId: DefaultAclRelationId,
@@ -548,8 +566,11 @@ fn get_default_acl_internal<'mcx>(
     else {
         return Ok(None);
     };
-    let (acl_datum, is_null) =
-        SysCacheGetAttr(DEFACLROLENSPOBJ, &tuple, Anum_pg_default_acl_defaclacl as i32)?;
+    let (acl_datum, is_null) = SysCacheGetAttr(
+        DEFACLROLENSPOBJ,
+        &tuple,
+        Anum_pg_default_acl_defaclacl as i32,
+    )?;
     let result = if is_null {
         None
     } else {

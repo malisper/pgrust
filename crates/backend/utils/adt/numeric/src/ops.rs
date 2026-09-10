@@ -8,8 +8,7 @@ use crate::var::{
 };
 use crate::{
     division_by_zero_error, numeric_can_be_short, Num, NumericDigit, DEC_DIGITS,
-    NUMERIC_DSCALE_MASK,
-    NUMERIC_DSCALE_MAX, NUMERIC_INF_SIGN_MASK, NUMERIC_NEG, NUMERIC_POS,
+    NUMERIC_DSCALE_MASK, NUMERIC_DSCALE_MAX, NUMERIC_INF_SIGN_MASK, NUMERIC_NEG, NUMERIC_POS,
     NUMERIC_SHORT_DSCALE_MASK, NUMERIC_SHORT_DSCALE_SHIFT, NUMERIC_SHORT_SIGN_MASK,
     NUMERIC_WEIGHT_MAX, VARHDRSZ,
 };
@@ -31,7 +30,8 @@ pub fn make_numeric_typmod_safe(
             -1,
             PgError::error(format!(
                 "NUMERIC precision {} must be between 1 and {}",
-                precision, crate::NUMERIC_MAX_PRECISION
+                precision,
+                crate::NUMERIC_MAX_PRECISION
             ))
             .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
         );
@@ -42,7 +42,9 @@ pub fn make_numeric_typmod_safe(
             -1,
             PgError::error(format!(
                 "NUMERIC scale {} must be between {} and {}",
-                scale, crate::NUMERIC_MIN_SCALE, crate::NUMERIC_MAX_SCALE
+                scale,
+                crate::NUMERIC_MIN_SCALE,
+                crate::NUMERIC_MAX_SCALE
             ))
             .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
         );
@@ -524,7 +526,8 @@ pub fn numeric_apply_typmod(num: Num<'_>, typmod: i32) -> PgResult<NumericImage>
         let mut img = NumericImage::from_num(num);
         let hdr_word = num.header();
         let new_hdr = if num.is_short() {
-            (hdr_word & !NUMERIC_SHORT_DSCALE_MASK) | ((dscale as u16) << NUMERIC_SHORT_DSCALE_SHIFT)
+            (hdr_word & !NUMERIC_SHORT_DSCALE_MASK)
+                | ((dscale as u16) << NUMERIC_SHORT_DSCALE_SHIFT)
         } else {
             num.sign() | (dscale as u16 & NUMERIC_DSCALE_MASK)
         };
@@ -808,9 +811,8 @@ pub fn numeric_float8_no_overflow_any(payload: &[u8]) -> f64 {
     }
     let mut buf = vec![0u16; payload.len().div_ceil(2)];
     // SAFETY: the u16 buffer reinterpreted as bytes, sized to cover payload.
-    let dst = unsafe {
-        core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), payload.len())
-    };
+    let dst =
+        unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), payload.len()) };
     dst.copy_from_slice(payload);
     numeric_float8_no_overflow(Num::from_payload(dst))
 }
@@ -1100,11 +1102,11 @@ pub fn in_range_numeric_numeric(
     less: bool,
 ) -> PgResult<bool> {
     if offset.is_nan() || offset.is_ninf() || offset.sign() == NUMERIC_NEG {
-        return Err(PgError::error(
-            "invalid preceding or following size in window function",
-        )
-        .with_sqlstate(::types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE)
-        .into());
+        return Err(
+            PgError::error("invalid preceding or following size in window function")
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE)
+                .into(),
+        );
     }
     // NaN sorts after non-NaN (cf cmp_numerics); the offset cannot change that.
     let result = if val.is_nan() {

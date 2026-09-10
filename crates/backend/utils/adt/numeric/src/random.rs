@@ -31,11 +31,7 @@ fn check_bound(num: Num<'_>, which: &'static str) -> PgResult<()> {
     Ok(())
 }
 
-pub fn random_numeric(
-    state: &mut PgPrng,
-    rmin: Num<'_>,
-    rmax: Num<'_>,
-) -> PgResult<NumericImage> {
+pub fn random_numeric(state: &mut PgPrng, rmin: Num<'_>, rmax: Num<'_>) -> PgResult<NumericImage> {
     check_bound(rmin, "lower")?;
     check_bound(rmax, "upper")?;
 
@@ -111,8 +107,10 @@ fn random_var(
 
         let mut i = rlen64_ndigits as usize;
         while i + 3 < whole_ndigits {
-            let mut rand =
-                state.u64_range(0, (NBASE as u64) * (NBASE as u64) * (NBASE as u64) * (NBASE as u64) - 1);
+            let mut rand = state.u64_range(
+                0,
+                (NBASE as u64) * (NBASE as u64) * (NBASE as u64) * (NBASE as u64) - 1,
+            );
             res_digits[i] = (rand % NBASE as u64) as NumericDigit;
             rand /= NBASE as u64;
             res_digits[i + 1] = (rand % NBASE as u64) as NumericDigit;

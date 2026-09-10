@@ -8,9 +8,8 @@ use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_
 use types_nodes::parsenodes::AlterTableType;
 use types_nodes::NodeList;
 use types_rel::{
-    InplaceUpdateTupleLock, Relation, LOCKMODE, RELKIND_INDEX, RELKIND_MATVIEW,
+    InplaceUpdateTupleLock, Relation, RowExclusiveLock, LOCKMODE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
-    RowExclusiveLock,
 };
 
 use crate::alter::oid_scankey;
@@ -40,7 +39,15 @@ pub(crate) fn ATExecSetRelOptions<'mcx>(
     if rel.rd_rel.reltoastrelid != InvalidOid {
         let toastid = rel.rd_rel.reltoastrelid;
         let toastrel = table::table_open(mcx, toastid, lockmode)?;
-        update_one(mcx, &pgclass, &toastrel, Some("toast"), def_list, operation, false)?;
+        update_one(
+            mcx,
+            &pgclass,
+            &toastrel,
+            Some("toast"),
+            def_list,
+            operation,
+            false,
+        )?;
         toastrel.close(types_rel::NoLock)?;
     }
 
@@ -60,14 +67,8 @@ fn update_one<'mcx>(
     let relkind = rel.rd_rel.relkind;
     let relam = rel.rd_rel.relam;
     let key = oid_scankey(1, relid);
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        pgclass,
-        catalog::ClassOidIndexId,
-        true,
-        None,
-        &[key],
-    )?;
+    let mut scan =
+        genam::systable_beginscan(mcx, pgclass, catalog::ClassOidIndexId, true, None, &[key])?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .ok_or_else(|| crate::cache_lookup_failed("relation", relid))?;
     // LOCKTAG_TUPLE at InplaceUpdateTupleLock, before any content read that
@@ -164,7 +165,9 @@ fn update_one<'mcx>(
                         format!("cannot set options for relation \"{}\"", rel.name()),
                     )
                     .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
-                    .with_detail(pg_class_seams::errdetail_relkind_not_supported::call(relkind)?),
+                    .with_detail(
+                        pg_class_seams::errdetail_relkind_not_supported::call(relkind)?,
+                    ),
                 ));
             }
         }
@@ -189,7 +192,13 @@ fn update_one<'mcx>(
         lmgr::UnlockTuple(pgclass, &otid, InplaceUpdateTupleLock)?;
     }
     if namspace == Some("toast") {
-        objectaccess::InvokeObjectPostAlterHookArg(RELATION_RELATION_ID, relid, 0, InvalidOid, true)?;
+        objectaccess::InvokeObjectPostAlterHookArg(
+            RELATION_RELATION_ID,
+            relid,
+            0,
+            InvalidOid,
+            true,
+        )?;
     } else {
         objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, relid, 0)?;
     }

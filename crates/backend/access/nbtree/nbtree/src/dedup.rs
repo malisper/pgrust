@@ -6,7 +6,6 @@ use ::mcx::{vec_with_capacity_in, Mcx};
 use ::tableam::{TM_IndexDelete, TM_IndexDeleteOp, TM_IndexStatus};
 use ::types_core::{OffsetNumber, BLCKSZ};
 use ::types_error::{PgError, PgResult};
-use init_small::globals::{EndCriticalSection, StartCriticalSection};
 use ::types_nbtree::dedup::BTDedupState;
 use ::types_nbtree::{
     BTMaxItemSize, BTPageOpaqueData, MaxTIDsPerBTreePage, BTP_HAS_GARBAGE,
@@ -17,10 +16,11 @@ use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
 use ::types_tuple::itemptr::{ItemPointerData, ItemPointerGetBlockNumber};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD};
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 use crate::itup::{
-    bt_tuple_get_max_heap_tid, bt_tuple_get_nposting, bt_tuple_get_posting_n,
-    bt_tuple_is_posting, maxalign, t_tid, ITup, INDEX_SIZE_MASK,
+    bt_tuple_get_max_heap_tid, bt_tuple_get_nposting, bt_tuple_get_posting_n, bt_tuple_is_posting,
+    maxalign, t_tid, ITup, INDEX_SIZE_MASK,
 };
 use crate::page::{page_item, page_of_mut, page_opaque, write_opaque};
 use crate::relation_needs_wal;
@@ -36,7 +36,9 @@ struct TempPage([u8; BLCKSZ]);
 #[cold]
 #[inline(never)]
 fn dedup_add_failed(what: &str) -> Box<PgError> {
-    Box::new(PgError::error(format!("deduplication failed to add {what}")))
+    Box::new(PgError::error(format!(
+        "deduplication failed to add {what}"
+    )))
 }
 
 /// _bt_dedup_pass.
@@ -74,7 +76,11 @@ pub(crate) unsafe fn bt_dedup_pass(
     newpage.init(SizeOfBtreeOpaque);
     core::ptr::copy_nonoverlapping(
         page.as_ptr().add(page.pd_special() as usize),
-        newpage.as_ref().as_ptr().cast_mut().add(BLCKSZ - SizeOfBtreeOpaque),
+        newpage
+            .as_ref()
+            .as_ptr()
+            .cast_mut()
+            .add(BLCKSZ - SizeOfBtreeOpaque),
         SizeOfBtreeOpaque,
     );
     newpage.set_lsn(page.lsn());
@@ -140,11 +146,7 @@ pub(crate) unsafe fn bt_dedup_pass(
     {
         let orig = page_of_mut(buf);
         // SAFETY: whole-page overwrite under the exclusive lock held by caller.
-        core::ptr::copy_nonoverlapping(
-            temp.0.as_ptr(),
-            orig.as_ref().as_ptr().cast_mut(),
-            BLCKSZ,
-        );
+        core::ptr::copy_nonoverlapping(temp.0.as_ptr(), orig.as_ref().as_ptr().cast_mut(), BLCKSZ);
     }
     bufmgr::mark_buffer_dirty::call(buf.buffer())?;
 
@@ -171,9 +173,7 @@ pub(crate) unsafe fn bt_dedup_pass(
     // nbtdedup.c:270
     EndCriticalSection();
 
-    debug_assert!(
-        pagesaving < newitemsz || buf.page().exact_free_space() >= newitemsz
-    );
+    debug_assert!(pagesaving < newitemsz || buf.page().exact_free_space() >= newitemsz);
     Ok(())
 }
 
@@ -287,8 +287,7 @@ unsafe fn bt_bottomupdel_finish_pending(
                 delstate.status.push(TM_IndexStatus {
                     idxoffnum: offnum,
                     knowndeletable: false,
-                    promising: (firstpromising && p == 0)
-                        || (lastpromising && p == nitem - 1),
+                    promising: (firstpromising && p == 0) || (lastpromising && p == nitem - 1),
                     freespace: core::mem::size_of::<ItemPointerData>() as i16, // at worst
                 });
             }

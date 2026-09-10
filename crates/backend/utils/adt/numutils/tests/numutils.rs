@@ -25,7 +25,10 @@ fn parse_boundaries_all_widths() {
 fn parse_error_surface_matches_c() {
     let e = pg_strtoint16("32768").unwrap_err();
     assert_eq!(e.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
-    assert_eq!(e.message(), "value \"32768\" is out of range for type smallint");
+    assert_eq!(
+        e.message(),
+        "value \"32768\" is out of range for type smallint"
+    );
 
     let e = pg_strtoint32("-2147483649").unwrap_err();
     assert_eq!(e.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
@@ -36,7 +39,10 @@ fn parse_error_surface_matches_c() {
 
     let e = pg_strtoint64("junk").unwrap_err();
     assert_eq!(e.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
-    assert_eq!(e.message(), "invalid input syntax for type bigint: \"junk\"");
+    assert_eq!(
+        e.message(),
+        "invalid input syntax for type bigint: \"junk\""
+    );
 
     // Guard trips before the trailing-junk check: overflow-then-junk is
     // out_of_range in C, not invalid_syntax.
@@ -78,7 +84,10 @@ fn parse_whitespace_sign_and_bases() {
 #[test]
 fn parse_underscores_match_c_per_branch() {
     assert_eq!(pg_strtoint32("1_000_000").unwrap(), 1_000_000);
-    assert_eq!(pg_strtoint64("9_223_372_036_854_775_807").unwrap(), i64::MAX);
+    assert_eq!(
+        pg_strtoint64("9_223_372_036_854_775_807").unwrap(),
+        i64::MAX
+    );
     assert!(pg_strtoint32("_1").is_err());
     assert!(pg_strtoint32("1_").is_err());
     assert!(pg_strtoint32("1__0").is_err());
@@ -114,7 +123,10 @@ fn parse_safe_soft_errors() {
         "invalid input syntax for type integer: \"bad\""
     );
     let mut cx = SoftErrorContext::new(false);
-    assert_eq!(pg_strtoint64_safe("9999999999999999999999", Some(&mut cx)).unwrap(), 0);
+    assert_eq!(
+        pg_strtoint64_safe("9999999999999999999999", Some(&mut cx)).unwrap(),
+        0
+    );
     assert!(cx.error_occurred());
     assert!(cx.error().is_none());
 }
@@ -122,15 +134,27 @@ fn parse_safe_soft_errors() {
 #[test]
 fn unsigned_subr_strtoul_base0() {
     assert_eq!(uint32in_subr("42", false, "oid", None).unwrap(), (42, ""));
-    assert_eq!(uint32in_subr("42 rest", true, "oid", None).unwrap(), (42, " rest"));
+    assert_eq!(
+        uint32in_subr("42 rest", true, "oid", None).unwrap(),
+        (42, " rest")
+    );
     assert_eq!(uint32in_subr("010", false, "oid", None).unwrap(), (8, ""));
-    assert_eq!(uint32in_subr("0xffffffff", false, "oid", None).unwrap(), (u32::MAX, ""));
-    assert_eq!(uint32in_subr("-1", false, "oid", None).unwrap(), (u32::MAX, ""));
+    assert_eq!(
+        uint32in_subr("0xffffffff", false, "oid", None).unwrap(),
+        (u32::MAX, "")
+    );
+    assert_eq!(
+        uint32in_subr("-1", false, "oid", None).unwrap(),
+        (u32::MAX, "")
+    );
     assert_eq!(
         uint64in_subr("18446744073709551615  ", false, "xid8", None).unwrap(),
         (u64::MAX, "  ")
     );
-    assert_eq!(uint64in_subr("-1", false, "xid8", None).unwrap(), (u64::MAX, ""));
+    assert_eq!(
+        uint64in_subr("-1", false, "xid8", None).unwrap(),
+        (u64::MAX, "")
+    );
     // bare 0x backtracks: 0 parses, 'x' is the tail.
     assert_eq!(uint32in_subr("0x", true, "oid", None).unwrap(), (0, "x"));
     assert!(uint32in_subr("0x", false, "oid", None).is_err());
@@ -141,7 +165,10 @@ fn unsigned_subr_strtoul_base0() {
     let e = uint32in_subr("12x", false, "oid", None).unwrap_err();
     assert_eq!(e.message(), "invalid input syntax for type oid: \"12x\"");
     let e = uint32in_subr("4294967296", false, "oid", None).unwrap_err();
-    assert_eq!(e.message(), "value \"4294967296\" is out of range for type oid");
+    assert_eq!(
+        e.message(),
+        "value \"4294967296\" is out of range for type oid"
+    );
 }
 
 fn fmt_u32(v: u32) -> String {
@@ -171,8 +198,25 @@ fn fmt_i64(v: i64) -> String {
 #[test]
 fn format_matches_decimal_over_boundaries() {
     for v in [
-        0u32, 1, 9, 10, 99, 100, 999, 1000, 9999, 10000, 99999, 100000, 999999, 1000000,
-        99999999, 100000000, 999999999, 1000000000, u32::MAX,
+        0u32,
+        1,
+        9,
+        10,
+        99,
+        100,
+        999,
+        1000,
+        9999,
+        10000,
+        99999,
+        100000,
+        999999,
+        1000000,
+        99999999,
+        100000000,
+        999999999,
+        1000000000,
+        u32::MAX,
     ] {
         assert_eq!(fmt_u32(v), v.to_string());
     }

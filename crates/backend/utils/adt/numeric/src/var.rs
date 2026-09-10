@@ -3,8 +3,8 @@ use core::cell::RefCell;
 use types_error::PgResult;
 
 use crate::{
-    numeric_can_be_short, numeric_overflow_error, Num, NumericDigit, DEC_DIGITS, HALF_NBASE,
-    NBASE, NUMERIC_DSCALE_MASK, NUMERIC_HDRSZ, NUMERIC_HDRSZ_SHORT, NUMERIC_NAN, NUMERIC_NEG,
+    numeric_can_be_short, numeric_overflow_error, Num, NumericDigit, DEC_DIGITS, HALF_NBASE, NBASE,
+    NUMERIC_DSCALE_MASK, NUMERIC_HDRSZ, NUMERIC_HDRSZ_SHORT, NUMERIC_NAN, NUMERIC_NEG,
     NUMERIC_NINF, NUMERIC_PINF, NUMERIC_POS, NUMERIC_SHORT, NUMERIC_SHORT_DSCALE_SHIFT,
     NUMERIC_SHORT_SIGN_MASK, NUMERIC_SHORT_WEIGHT_MASK, NUMERIC_SHORT_WEIGHT_SIGN_MASK,
     NUMERIC_SIGN_MASK, NUMERIC_SPECIAL, VARHDRSZ,
@@ -26,9 +26,7 @@ const DIGIT_POOL_SLOTS: usize = 16;
 // pub for proofs/numeric-probe (Kani stubs the TLS pool: thread_local
 // destructor registration reaches `_tlv_atexit`, a Kani-unsupported symbol).
 pub fn word_buf_take() -> Vec<u16> {
-    WORD_POOL
-        .with(|p| p.borrow_mut().pop())
-        .unwrap_or_default()
+    WORD_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default()
 }
 
 // pub for proofs/numeric-probe (see word_buf_take).
@@ -310,7 +308,11 @@ impl NumericVar {
             unsafe {
                 let at = |i: i32| buf.offset(off + i as isize);
                 if di == 0 {
-                    carry = if *at(ndigits) as i32 >= HALF_NBASE { 1 } else { 0 };
+                    carry = if *at(ndigits) as i32 >= HALF_NBASE {
+                        1
+                    } else {
+                        0
+                    };
                 } else {
                     let pow10 = ROUND_POWERS[di as usize];
                     ndigits -= 1;

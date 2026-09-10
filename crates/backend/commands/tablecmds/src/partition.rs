@@ -106,11 +106,13 @@ pub(crate) fn compute_partition_key<'mcx>(
                         format!("cannot use system column \"{name}\" in partition key"),
                     )
                     .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
-                    .with_cursor_position(parser_small1::parser_errposition_source(
-                        Some(query_string.as_bytes()),
-                        pelem.location,
-                        mbutils::GetDatabaseEncoding(),
-                    )),
+                    .with_cursor_position(
+                        parser_small1::parser_errposition_source(
+                            Some(query_string.as_bytes()),
+                            pelem.location,
+                            mbutils::GetDatabaseEncoding(),
+                        ),
+                    ),
                 ));
             }
             if attnum == 0 {
@@ -120,11 +122,13 @@ pub(crate) fn compute_partition_key<'mcx>(
                         format!("column \"{name}\" named in partition key does not exist"),
                     )
                     .with_sqlstate(ERRCODE_UNDEFINED_COLUMN)
-                    .with_cursor_position(parser_small1::parser_errposition_source(
-                        Some(query_string.as_bytes()),
-                        pelem.location,
-                        mbutils::GetDatabaseEncoding(),
-                    )),
+                    .with_cursor_position(
+                        parser_small1::parser_errposition_source(
+                            Some(query_string.as_bytes()),
+                            pelem.location,
+                            mbutils::GetDatabaseEncoding(),
+                        ),
+                    ),
                 ));
             }
             info.partattrs.push(attnum);
@@ -181,9 +185,13 @@ pub(crate) fn compute_partition_key<'mcx>(
                 }
                 let att = rel.rd_att.attr(attno as usize - 1);
                 if att.attgenerated != 0 {
-                    let colname = core::str::from_utf8(att.attname.name_str())
-                        .expect("non-UTF-8 attname");
-                    return Err(generated_partition_column(colname, query_string, pelem.location));
+                    let colname =
+                        core::str::from_utf8(att.attname.name_str()).expect("non-UTF-8 attname");
+                    return Err(generated_partition_column(
+                        colname,
+                        query_string,
+                        pelem.location,
+                    ));
                 }
             }
 
@@ -204,7 +212,10 @@ pub(crate) fn compute_partition_key<'mcx>(
                         .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
                     ));
                 }
-                if planned.as_variant::<types_nodes::primnodes::Const>().is_some() {
+                if planned
+                    .as_variant::<types_nodes::primnodes::Const>()
+                    .is_some()
+                {
                     return Err(Box::new(
                         PgError::new(
                             ERROR,
@@ -283,14 +294,17 @@ pub(crate) fn compute_partition_key<'mcx>(
 #[inline(never)]
 fn generated_partition_column(colname: &str, query_string: &str, location: i32) -> Box<PgError> {
     Box::new(
-        PgError::new(ERROR, "cannot use generated column in partition key".to_string())
-            .with_detail(format!("Column \"{colname}\" is a generated column."))
-            .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
-            .with_cursor_position(parser_small1::parser_errposition_source(
-                Some(query_string.as_bytes()),
-                location,
-                mbutils::GetDatabaseEncoding(),
-            )),
+        PgError::new(
+            ERROR,
+            "cannot use generated column in partition key".to_string(),
+        )
+        .with_detail(format!("Column \"{colname}\" is a generated column."))
+        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+        .with_cursor_position(parser_small1::parser_errposition_source(
+            Some(query_string.as_bytes()),
+            location,
+            mbutils::GetDatabaseEncoding(),
+        )),
     )
 }
 
@@ -380,9 +394,7 @@ pub(crate) fn transformPartitionBound<'mcx>(
     parent: &Relation<'mcx>,
     spec_node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    use types_nodes::rawnodes::{
-        PartitionBoundSpec, PartitionRangeDatum, PartitionRangeDatumKind,
-    };
+    use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum, PartitionRangeDatumKind};
     let spec = spec_node
         .as_variant::<PartitionBoundSpec>()
         .expect("transformPartitionBound on non-PartitionBoundSpec");
@@ -419,7 +431,12 @@ pub(crate) fn transformPartitionBound<'mcx>(
                 .expect("wrong number of partition key expressions");
             ruleutils_seams::deparse_expression::call(mcx, expr, parent.rd_id)?
         };
-        Ok((colname, key.parttypid[i], key.parttypmod[i], key.partcollation[i]))
+        Ok((
+            colname,
+            key.parttypid[i],
+            key.parttypmod[i],
+            key.partcollation[i],
+        ))
     };
 
     match strategy {
@@ -499,8 +516,7 @@ pub(crate) fn transformPartitionBound<'mcx>(
                         if key.partattrs[i] == 0 {
                             j += 1;
                         }
-                        let (colname, coltype, coltypmod, partcollation) =
-                            colinfo(i, exprno)?;
+                        let (colname, coltype, coltypmod, partcollation) = colinfo(i, exprno)?;
                         let value = transformPartitionBoundValue(
                             mcx,
                             pstate,
@@ -574,12 +590,8 @@ fn transformPartitionBoundValue<'mcx>(
     part_collation: Oid,
 ) -> PgResult<Node<'mcx>> {
     use parser_small1::ParseExprKind;
-    let value = parse_expr::transformExpr(
-        mcx,
-        pstate,
-        val,
-        ParseExprKind::EXPR_KIND_PARTITION_BOUND,
-    )?;
+    let value =
+        parse_expr::transformExpr(mcx, pstate, val, ParseExprKind::EXPR_KIND_PARTITION_BOUND)?;
     let value = coerce::coerce_to_target_type(
         mcx,
         pstate,
@@ -592,9 +604,18 @@ fn transformPartitionBoundValue<'mcx>(
         -1,
     )?;
     let Some(mut value) = value else {
-        return Err(cannot_cast_bound(mcx, pstate, col_type, col_name, parse_expr::expr_location(val)));
+        return Err(cannot_cast_bound(
+            mcx,
+            pstate,
+            col_type,
+            col_name,
+            parse_expr::expr_location(val),
+        ));
     };
-    if value.as_variant::<types_nodes::primnodes::Const>().is_none() {
+    if value
+        .as_variant::<types_nodes::primnodes::Const>()
+        .is_none()
+    {
         // parse_utilcmd.c:4650-4656: expression_planner, then evaluate_expr
         // unconditionally -- it is what stamps the partition key's collation
         // on the resulting Const (a folded Const keeps the expression's own
@@ -602,7 +623,10 @@ fn transformPartitionBoundValue<'mcx>(
         parse_collate::assign_expr_collations(mcx, pstate, value)?;
         value = clauses::eval_const_expressions(mcx, value)?;
         value = execexpr::evaluate_expr(mcx, value, col_type, col_typmod, part_collation)?;
-        if value.as_variant::<types_nodes::primnodes::Const>().is_none() {
+        if value
+            .as_variant::<types_nodes::primnodes::Const>()
+            .is_none()
+        {
             return Err(Box::new(PgError::error(
                 "could not evaluate partition bound expression",
             )));
@@ -638,8 +662,11 @@ fn invalid_bound_spec(
     pstate: &parser_small1::ParseState<'_, '_>,
     location: i32,
 ) -> Box<PgError> {
-    let mut e = PgError::new(ERROR, format!("invalid bound specification for a {kind} partition"))
-        .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION);
+    let mut e = PgError::new(
+        ERROR,
+        format!("invalid bound specification for a {kind} partition"),
+    )
+    .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION);
     let pos = parser_small1::parser_errposition_source(
         pstate.p_sourcetext,
         location,
@@ -734,14 +761,11 @@ fn cannot_cast_bound(
     location: i32,
 ) -> Box<PgError> {
     let _ = mcx;
-    let tn = format_type::format_type_be(col_type)
-        .unwrap_or_else(|_| format!("type {col_type}"));
+    let tn = format_type::format_type_be(col_type).unwrap_or_else(|_| format!("type {col_type}"));
     Box::new(
         PgError::new(
             ERROR,
-            format!(
-                "specified value cannot be cast to type {tn} for column \"{col_name}\""
-            ),
+            format!("specified value cannot be cast to type {tn} for column \"{col_name}\""),
         )
         .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
         // C parse_utilcmd.c:4623: parser_errposition(pstate, exprLocation(val)).
@@ -878,7 +902,9 @@ pub(crate) fn has_partition_attrs<'mcx>(
 #[cold]
 #[inline(never)]
 pub(crate) fn unexpected_trigger_found(tgname: &str) -> Box<PgError> {
-    Box::new(PgError::error(format!("unexpected trigger \"{tgname}\" found")))
+    Box::new(PgError::error(format!(
+        "unexpected trigger \"{tgname}\" found"
+    )))
 }
 
 #[cfg(test)]

@@ -12,18 +12,14 @@ use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_INVALID_COLUMN_REFERENCE,
 };
-use types_nodes::rawnodes::{Constraint, ConstrType};
+use types_nodes::rawnodes::{ConstrType, Constraint};
 use types_nodes::{Node, NodeList, NodeTag};
 use types_rel::{AccessShareLock, Relation, RowExclusiveLock};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 const Anum_pg_class_relchecks: AttrNumber = 20;
 
-pub(crate) fn eq_key(
-    attno: AttrNumber,
-    func: types_core::RegProcedure,
-    arg: Datum,
-) -> ScanKeyData {
+pub(crate) fn eq_key(attno: AttrNumber, func: types_core::RegProcedure, arg: Datum) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno;
     key.sk_strategy = BTEqualStrategyNumber;
@@ -121,7 +117,12 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
         // The below call to StoreAttrDefault() adds the dependencies on
         // types. We are responsible for checking USAGE.
         if !is_internal {
-            pg_depend::CheckUsageOnTypesInSingleRelExpr(mcx, expr, rel.rd_id, miscinit::GetUserId())?;
+            pg_depend::CheckUsageOnTypesInSingleRelExpr(
+                mcx,
+                expr,
+                rel.rd_id,
+                miscinit::GetUserId(),
+            )?;
         }
         let def_oid = pg_attrdef::StoreAttrDefault(mcx, rel, attnum, expr, is_internal)?;
         cooked.push(CookedCon {
@@ -142,8 +143,7 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
         let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
         if cdef.contype == ConstrType::CONSTR_NOTNULL {
             let colname = cdef.keys.nth(0).as_string().expect("not-null keys").sval;
-            let Some((colnum, _)) =
-                crate::alter::attname_lookup(mcx, rel.rd_id, colname, false)?
+            let Some((colnum, _)) = crate::alter::attname_lookup(mcx, rel.rd_id, colname, false)?
             else {
                 return Err(Box::new(
                     PgError::error(format!(
@@ -386,7 +386,9 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
         if merged[outerpos] {
             continue;
         }
-        let cdef = cons[outerpos].as_variant::<Constraint>().expect("Constraint");
+        let cdef = cons[outerpos]
+            .as_variant::<Constraint>()
+            .expect("Constraint");
         debug_assert!(cdef.contype == ConstrType::CONSTR_NOTNULL);
         let colname = cdef
             .keys
@@ -394,8 +396,7 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
             .as_string()
             .expect("not-null constraint keys")
             .sval;
-        let Some((attnum, _)) =
-            crate::alter::attname_lookup(mcx, rel.rd_id, colname, false)?
+        let Some((attnum, _)) = crate::alter::attname_lookup(mcx, rel.rd_id, colname, false)?
         else {
             return Err(Box::new(
                 PgError::error(format!(
@@ -416,7 +417,9 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
         // duplicates into this one, checking NO INHERIT and name conflicts.
         let mut given_name = cdef.conname;
         for restpos in outerpos + 1..cons.len() {
-            let other = cons[restpos].as_variant::<Constraint>().expect("Constraint");
+            let other = cons[restpos]
+                .as_variant::<Constraint>()
+                .expect("Constraint");
             let other_col = other
                 .keys
                 .nth(0)
@@ -595,7 +598,11 @@ pub fn cook_default<'mcx>(
         },
     )?;
     if attgenerated != 0 {
-        check_nested_generated(pstate, rel.expect("generated default cooks with its relation"), expr)?;
+        check_nested_generated(
+            pstate,
+            rel.expect("generated default cooks with its relation"),
+            expr,
+        )?;
         if clauses::contain_mutable_functions_after_planning(mcx, expr)? {
             return Err(Box::new(
                 PgError::new(
@@ -666,12 +673,10 @@ fn check_nested_generated<'mcx>(
                         .with_cursor_position(cursor),
                     ));
                 }
-                if v.varattno > 0
-                    && self.rel.rd_att.attr(v.varattno as usize - 1).attgenerated != 0
+                if v.varattno > 0 && self.rel.rd_att.attr(v.varattno as usize - 1).attgenerated != 0
                 {
                     let att = self.rel.rd_att.attr(v.varattno as usize - 1);
-                    let name =
-                        core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+                    let name = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
                     return Err(Box::new(
                         PgError::new(
                             types_error::ERROR,
@@ -857,8 +862,16 @@ fn merge_with_existing_constraint<'mcx>(
         buf
     };
     let keys = [
-        eq_key(pg_constraint::Anum_pg_constraint_conrelid, types_core::fmgr::F_OIDEQ, Datum::from_oid(rel.rd_id)),
-        eq_key(pg_constraint::Anum_pg_constraint_contypid, types_core::fmgr::F_OIDEQ, Datum::from_oid(types_core::InvalidOid)),
+        eq_key(
+            pg_constraint::Anum_pg_constraint_conrelid,
+            types_core::fmgr::F_OIDEQ,
+            Datum::from_oid(rel.rd_id),
+        ),
+        eq_key(
+            pg_constraint::Anum_pg_constraint_contypid,
+            types_core::fmgr::F_OIDEQ,
+            Datum::from_oid(types_core::InvalidOid),
+        ),
         eq_key(
             pg_constraint::Anum_pg_constraint_conname,
             types_core::fmgr::F_NAMEEQ,
@@ -902,11 +915,11 @@ fn merge_with_existing_constraint<'mcx>(
         }
         let p = val.as_usize() as *const u8;
         // SAFETY: live varlena text image through its extent.
-        let image =
-            unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
         let payload = varlena::open_image(mcx, image)?;
-        let conbin =
-            core::str::from_utf8(payload.as_bytes()).expect("conbin UTF-8").to_string();
+        let conbin = core::str::from_utf8(payload.as_bytes())
+            .expect("conbin UTF-8")
+            .to_string();
         let existing = readfuncs::stringToNode(mcx, &conbin)?;
         if types_nodes::equal::equal(expr, existing) {
             found = true;
@@ -952,10 +965,19 @@ fn merge_with_existing_constraint<'mcx>(
 
     let mut fields: PgVec<'mcx, (AttrNumber, Datum)> = PgVec::new_in(mcx);
     if rel.rd_rel.relispartition {
-        fields.push((pg_constraint::Anum_pg_constraint_coninhcount, Datum::from_i16(1)));
-        fields.push((pg_constraint::Anum_pg_constraint_conislocal, Datum::from_bool(false)));
+        fields.push((
+            pg_constraint::Anum_pg_constraint_coninhcount,
+            Datum::from_i16(1),
+        ));
+        fields.push((
+            pg_constraint::Anum_pg_constraint_conislocal,
+            Datum::from_bool(false),
+        ));
     } else if is_local {
-        fields.push((pg_constraint::Anum_pg_constraint_conislocal, Datum::from_bool(true)));
+        fields.push((
+            pg_constraint::Anum_pg_constraint_conislocal,
+            Datum::from_bool(true),
+        ));
     } else {
         if coninhcount == i16::MAX {
             return Err(Box::new(
@@ -970,12 +992,21 @@ fn merge_with_existing_constraint<'mcx>(
     }
     if is_no_inherit {
         debug_assert!(is_local);
-        fields.push((pg_constraint::Anum_pg_constraint_connoinherit, Datum::from_bool(true)));
+        fields.push((
+            pg_constraint::Anum_pg_constraint_connoinherit,
+            Datum::from_bool(true),
+        ));
     }
     if is_enforced && !conenforced {
         debug_assert!(is_local);
-        fields.push((pg_constraint::Anum_pg_constraint_conenforced, Datum::from_bool(true)));
-        fields.push((pg_constraint::Anum_pg_constraint_convalidated, Datum::from_bool(true)));
+        fields.push((
+            pg_constraint::Anum_pg_constraint_conenforced,
+            Datum::from_bool(true),
+        ));
+        fields.push((
+            pg_constraint::Anum_pg_constraint_convalidated,
+            Datum::from_bool(true),
+        ));
     }
     pg_constraint::update_constraint_fields(mcx, con_oid, &fields)?;
     Ok(true)
@@ -1171,8 +1202,10 @@ mod tests {
         let raw3 = dummy_expr(mcx);
         let mut elts = NodeList::nil();
         elts.lappend(mcx, coldef(mcx, Some(raw1), None, 0)).unwrap();
-        elts.lappend(mcx, coldef(mcx, None, Some(cooked2), 0)).unwrap();
-        elts.lappend(mcx, coldef(mcx, Some(raw3), None, b's')).unwrap();
+        elts.lappend(mcx, coldef(mcx, None, Some(cooked2), 0))
+            .unwrap();
+        elts.lappend(mcx, coldef(mcx, Some(raw3), None, b's'))
+            .unwrap();
         elts.lappend(mcx, coldef(mcx, None, None, 0)).unwrap();
         let (raw, cooked) = collect_column_defaults(mcx, &elts).unwrap();
         assert_eq!(raw.len(), 2);

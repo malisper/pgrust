@@ -30,7 +30,10 @@ use types_error::PgResult;
 pub enum NumericKeyForm {
     /// `value = mantissa × 10^exp10`; mantissa not divisible by 10 unless 0;
     /// `mantissa == 0 ⇒ exp10 == 0`; `-127 <= exp10 <= 127`.
-    Finite { mantissa: i64, exp10: i32 },
+    Finite {
+        mantissa: i64,
+        exp10: i32,
+    },
     NaN,
     PInf,
     NInf,
@@ -66,7 +69,10 @@ pub fn numeric_key_pack(num: Num<'_>, mant_abs_max: u64) -> Option<NumericKeyFor
     if nd == 0 {
         // Zero: canonical display is "0" (dscale 0); "0.00"-class datums
         // must keep the C path to preserve their output bytes.
-        return (num.dscale() == 0).then_some(NumericKeyForm::Finite { mantissa: 0, exp10: 0 });
+        return (num.dscale() == 0).then_some(NumericKeyForm::Finite {
+            mantissa: 0,
+            exp10: 0,
+        });
     }
     if nd > KEY_MAX_NDIGITS {
         return None;
@@ -106,7 +112,11 @@ pub fn numeric_key_pack(num: Num<'_>, mant_abs_max: u64) -> Option<NumericKeyFor
     {
         return None;
     }
-    let mantissa = if num.sign() == NUMERIC_NEG { -(m as i64) } else { m as i64 };
+    let mantissa = if num.sign() == NUMERIC_NEG {
+        -(m as i64)
+    } else {
+        m as i64
+    };
     debug_assert!(num.sign() == NUMERIC_POS || num.sign() == NUMERIC_NEG);
     Some(NumericKeyForm::Finite { mantissa, exp10: e })
 }
@@ -154,7 +164,9 @@ mod tests {
     // Parse via the production numeric_in path so pack/unpack are tested
     // against PG-canonical images.
     fn img(s: &str) -> NumericImage {
-        crate::io::numeric_in(s, -1, None).expect("parse").expect("non-soft parse")
+        crate::io::numeric_in(s, -1, None)
+            .expect("parse")
+            .expect("non-soft parse")
     }
 
     fn pack_str(s: &str, mant_abs_max: u64) -> Option<NumericKeyForm> {
@@ -167,13 +179,31 @@ mod tests {
     #[test]
     fn canonical_values_roundtrip_byte_identically() {
         for s in [
-            "0", "1", "-1", "59", "9999", "10000", "12345678", "-12345678", "1.5", "-1.5",
-            "0.25", "-0.25", "0.0001", "-0.0001", "123456.789", "3.14159", "-0.07", "300000",
-            "8388607", "-8388607", "10000000000", "0.0000025",
+            "0",
+            "1",
+            "-1",
+            "59",
+            "9999",
+            "10000",
+            "12345678",
+            "-12345678",
+            "1.5",
+            "-1.5",
+            "0.25",
+            "-0.25",
+            "0.0001",
+            "-0.0001",
+            "123456.789",
+            "3.14159",
+            "-0.07",
+            "300000",
+            "8388607",
+            "-8388607",
+            "10000000000",
+            "0.0000025",
         ] {
             let image = img(s);
-            let key =
-                numeric_key_pack(image.num(), M56).unwrap_or_else(|| panic!("{s} must pack"));
+            let key = numeric_key_pack(image.num(), M56).unwrap_or_else(|| panic!("{s} must pack"));
             let back = numeric_key_unpack(key).expect("unpack");
             assert_eq!(back.as_bytes(), image.as_bytes(), "roundtrip bytes for {s}");
         }
@@ -224,11 +254,17 @@ mod tests {
         let max = M24 as i64; // 8388607
         assert_eq!(
             pack_str("8388607", M24),
-            Some(NumericKeyForm::Finite { mantissa: max, exp10: 0 })
+            Some(NumericKeyForm::Finite {
+                mantissa: max,
+                exp10: 0
+            })
         );
         assert_eq!(
             pack_str("-8388607", M24),
-            Some(NumericKeyForm::Finite { mantissa: -max, exp10: 0 })
+            Some(NumericKeyForm::Finite {
+                mantissa: -max,
+                exp10: 0
+            })
         );
         // One past the boundary refuses...
         assert_eq!(pack_str("8388608", M24), None);
@@ -237,7 +273,10 @@ mod tests {
         // range (83886070 = 8388607 × 10^1).
         assert_eq!(
             pack_str("83886070", M24),
-            Some(NumericKeyForm::Finite { mantissa: max, exp10: 1 })
+            Some(NumericKeyForm::Finite {
+                mantissa: max,
+                exp10: 1
+            })
         );
     }
 
@@ -245,12 +284,18 @@ mod tests {
     fn exponent_boundary_is_exact() {
         assert_eq!(
             pack_str("1e127", M56),
-            Some(NumericKeyForm::Finite { mantissa: 1, exp10: 127 })
+            Some(NumericKeyForm::Finite {
+                mantissa: 1,
+                exp10: 127
+            })
         );
         assert_eq!(pack_str("1e128", M56), None);
         assert_eq!(
             pack_str("1e-127", M56),
-            Some(NumericKeyForm::Finite { mantissa: 1, exp10: -127 })
+            Some(NumericKeyForm::Finite {
+                mantissa: 1,
+                exp10: -127
+            })
         );
         assert_eq!(pack_str("1e-128", M56), None);
     }

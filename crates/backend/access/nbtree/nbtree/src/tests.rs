@@ -5,7 +5,7 @@ use std::sync::Once;
 use ::datum::Datum;
 use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_core::{
-    BlockNumber, Buffer, InvalidBuffer, Oid, OffsetNumber, BLCKSZ, INVALID_PROC_NUMBER,
+    BlockNumber, Buffer, InvalidBuffer, OffsetNumber, Oid, BLCKSZ, INVALID_PROC_NUMBER,
     RELPERSISTENCE_PERMANENT,
 };
 use ::types_error::PgResult;
@@ -19,7 +19,7 @@ use ::types_rel::{
     LOCKMODE, RELKIND_INDEX, REPLICA_IDENTITY_DEFAULT,
 };
 use ::types_relscan::{IndexScanDescData, IndexScanOpaque};
-use ::types_scan::scankey::{ScanKeyData, BTEqualStrategyNumber, BTGreaterStrategyNumber};
+use ::types_scan::scankey::{BTEqualStrategyNumber, BTGreaterStrategyNumber, ScanKeyData};
 use ::types_scan::sdir::ForwardScanDirection;
 use ::types_storage::bufpage::SizeOfPageHeaderData;
 use ::types_tuple::itemptr::{ItemPointerData, ItemPointerGetBlockNumber};
@@ -75,7 +75,9 @@ pgsync::process_global! {
 fn take_ereports() -> Vec<::types_error::PgError> {
     let me = std::thread::current().id();
     let mut all = pgsync::lock(&EREPORTS);
-    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *all).into_iter().partition(|e| e.0 == me);
+    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *all)
+        .into_iter()
+        .partition(|e| e.0 == me);
     *all = rest;
     mine.into_iter().map(|e| e.1).collect()
 }
@@ -110,7 +112,11 @@ fn install() {
         genam_seams::build_index_value_description::set(|_, _, _| Ok(None));
         syscache_seams::pg_namespace_nspname::set(|_| Ok(None));
         ::elog_seams::ereport::set(|err| {
-            assert!(err.level().0 < ::types_error::ERROR.0, "ereport seam: {}", err.message());
+            assert!(
+                err.level().0 < ::types_error::ERROR.0,
+                "ereport seam: {}",
+                err.message()
+            );
             pgsync::lock(&EREPORTS).push((std::thread::current().id(), err));
             Ok(())
         });
@@ -268,12 +274,7 @@ fn put_u16(p: &mut FakePage, off: usize, v: u16) {
     p.0[off..off + 2].copy_from_slice(&v.to_ne_bytes());
 }
 
-fn new_page(
-    special_flags: u16,
-    level: u32,
-    prev: BlockNumber,
-    next: BlockNumber,
-) -> Box<FakePage> {
+fn new_page(special_flags: u16, level: u32, prev: BlockNumber, next: BlockNumber) -> Box<FakePage> {
     let mut p = Box::new(FakePage([0u8; BLCKSZ]));
     let special = BLCKSZ - core::mem::size_of::<BTPageOpaqueData>();
     put_u16(&mut p, 12, SizeOfPageHeaderData as u16); // pd_lower
@@ -424,7 +425,10 @@ fn index_rel_opts(mcx: Mcx<'_>, unique: bool) -> Relation<'_> {
         rd_firstRelfilelocatorSubid: Cell::new(0),
         rd_droppedSubid: Cell::new(0),
         rd_lockInfo: LockInfoData {
-            lockRelId: LockRelId { relId: 5000, dbId: 5 },
+            lockRelId: LockRelId {
+                relId: 5000,
+                dbId: 5,
+            },
         },
         rd_rel: FormData_pg_class {
             relname,
@@ -467,8 +471,8 @@ fn index_rel_opts(mcx: Mcx<'_>, unique: bool) -> Relation<'_> {
             indxmin: 0,
             indkey,
             has_indpred: false,
-        indexprs_src: None,
-        indpred_src: None,
+            indexprs_src: None,
+            indpred_src: None,
         }),
         rd_opcintype: one(23),
         rd_opfamily: one(1976),
@@ -478,13 +482,16 @@ fn index_rel_opts(mcx: Mcx<'_>, unique: bool) -> Relation<'_> {
         pgstat_enabled: Cell::new(false),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_opcoptions: Default::default(),
         rd_indexlist: Default::default(),
-            rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }
@@ -599,14 +606,19 @@ fn want_itup_publishes_page_copied_tuples() {
     crate::btrescan(&mut scan, Some(&keys)).unwrap();
     assert!(scan.xs_itupdesc.is_some());
     {
-        let IndexScanOpaque::Btree(so) = &scan.opaque else { unreachable!() };
+        let IndexScanOpaque::Btree(so) = &scan.opaque else {
+            unreachable!()
+        };
         assert!(so.currTuples.is_some() && so.markTuples.is_some());
         assert!(!so.dropPin);
     }
 
     let mut vals = Vec::new();
     while crate::btgettuple(&mut scan, ForwardScanDirection).unwrap() {
-        let itup = scan.xs_itup.expect("xs_want_itup publishes xs_itup").as_ptr();
+        let itup = scan
+            .xs_itup
+            .expect("xs_want_itup publishes xs_itup")
+            .as_ptr();
         let desc = scan.xs_itupdesc.as_deref().unwrap();
         let mut isnull = false;
         // SAFETY: xs_itup points at a MAXALIGNed copy in so.currTuples.
@@ -614,7 +626,9 @@ fn want_itup_publishes_page_copied_tuples() {
         assert!(!isnull);
         // xs_itup is a currTuples copy, not a page pointer.
         {
-            let IndexScanOpaque::Btree(so) = &scan.opaque else { unreachable!() };
+            let IndexScanOpaque::Btree(so) = &scan.opaque else {
+                unreachable!()
+            };
             let buf = so.currTuples.as_ref().unwrap();
             let off = itup as usize - buf.as_ptr() as usize;
             assert!(off < ::types_core::BLCKSZ as usize);
@@ -738,7 +752,7 @@ fn kill_prior_tuple_marks_lp_dead() {
         // SAFETY: leaked page, stable tag.
         let leaf = &unsafe { pages[1].as_ref() }.0;
         let iid_off = SizeOfPageHeaderData + 4; // second line pointer
-        // SAFETY: reading the owned page image.
+                                                // SAFETY: reading the owned page image.
         let iid = unsafe {
             leaf.as_ptr()
                 .add(iid_off)
@@ -795,7 +809,10 @@ fn heap_relation(mcx: Mcx<'_>) -> Relation<'_> {
         rd_firstRelfilelocatorSubid: Cell::new(0),
         rd_droppedSubid: Cell::new(0),
         rd_lockInfo: LockInfoData {
-            lockRelId: LockRelId { relId: HEAP_OID, dbId: 5 },
+            lockRelId: LockRelId {
+                relId: HEAP_OID,
+                dbId: 5,
+            },
         },
         rd_rel: FormData_pg_class {
             relname,
@@ -831,13 +848,16 @@ fn heap_relation(mcx: Mcx<'_>) -> Relation<'_> {
         pgstat_enabled: Cell::new(false),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_opcoptions: Default::default(),
         rd_indexlist: Default::default(),
-            rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }
@@ -1068,7 +1088,8 @@ fn unique_index_rejects_live_duplicate() {
     install();
     build_empty_index(false);
     HEAP_PAGES.with(|p| {
-        p.borrow_mut().push(leak_page(build_heap_page(&[10, 20, 30])));
+        p.borrow_mut()
+            .push(leak_page(build_heap_page(&[10, 20, 30])));
     });
     let cx = MemoryContext::new("t");
     let rel = index_rel_opts(cx.mcx(), true);
@@ -1109,7 +1130,8 @@ fn unique_check_partial_reports_conflict_and_inserts_anyway() {
     install();
     build_empty_index(false);
     HEAP_PAGES.with(|p| {
-        p.borrow_mut().push(leak_page(build_heap_page(&[10, 20, 30])));
+        p.borrow_mut()
+            .push(leak_page(build_heap_page(&[10, 20, 30])));
     });
     let cx = MemoryContext::new("t");
     let rel = index_rel_opts(cx.mcx(), true);
@@ -1147,7 +1169,8 @@ fn unique_check_existing_rechecks_without_inserting() {
     install();
     build_empty_index(false);
     HEAP_PAGES.with(|p| {
-        p.borrow_mut().push(leak_page(build_heap_page(&[10, 20, 30])));
+        p.borrow_mut()
+            .push(leak_page(build_heap_page(&[10, 20, 30])));
     });
     let cx = MemoryContext::new("t");
     let rel = index_rel_opts(cx.mcx(), true);
@@ -1175,7 +1198,11 @@ fn unique_check_existing_rechecks_without_inserting() {
 
     // Recheck of a non-conflicting entry: re-finds itself, inserts nothing.
     assert!(insert(20, tid(0, 2), UNIQUE_CHECK_EXISTING).unwrap());
-    assert_eq!(drain_forward(cx.mcx(), &rel).len(), 3, "recheck never inserts");
+    assert_eq!(
+        drain_forward(cx.mcx(), &rel).len(),
+        3,
+        "recheck never inserts"
+    );
 
     // Recheck that finds another live row under its key: 23505.
     let err = insert(20, tid(0, 3), UNIQUE_CHECK_EXISTING).err().unwrap();
@@ -1362,7 +1389,10 @@ fn dedup_pass_merges_duplicates_onto_one_leaf() {
     }
 
     let infos = wal_infos();
-    let dedups = infos.iter().filter(|i| **i == ::types_nbtree::XLOG_BTREE_DEDUP).count();
+    let dedups = infos
+        .iter()
+        .filter(|i| **i == ::types_nbtree::XLOG_BTREE_DEDUP)
+        .count();
     assert!(dedups >= 1, "expected dedup passes, saw none");
     assert!(
         !infos.contains(&::types_nbtree::XLOG_BTREE_SPLIT_R)
@@ -1373,7 +1403,11 @@ fn dedup_pass_merges_duplicates_onto_one_leaf() {
     let seen = drain_forward(cx.mcx(), &rel);
     assert_eq!(seen.len(), n as usize);
     for (i, t) in seen.iter().enumerate() {
-        assert_eq!(ItemPointerGetBlockNumber(t), i as u32 + 1, "TID order preserved");
+        assert_eq!(
+            ItemPointerGetBlockNumber(t),
+            i as u32 + 1,
+            "TID order preserved"
+        );
     }
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }
@@ -1396,7 +1430,8 @@ fn single_value_strategy_splits_after_six_capped_postings() {
     assert!(infos.iter().any(|i| *i == ::types_nbtree::XLOG_BTREE_DEDUP));
     assert!(infos
         .iter()
-        .any(|i| *i == ::types_nbtree::XLOG_BTREE_SPLIT_R || *i == ::types_nbtree::XLOG_BTREE_SPLIT_L));
+        .any(|i| *i == ::types_nbtree::XLOG_BTREE_SPLIT_R
+            || *i == ::types_nbtree::XLOG_BTREE_SPLIT_L));
 
     let seen = drain_forward(cx.mcx(), &rel);
     assert_eq!(seen.len(), n as usize);
@@ -1552,7 +1587,10 @@ fn mkscankey_builds_insertion_key() {
     assert_eq!(key.scantid, None);
     let keys = key.keys_mut();
     assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].sk_flags & types_scan::scankey::SK_ISNULL, types_scan::scankey::SK_ISNULL);
+    assert_eq!(
+        keys[0].sk_flags & types_scan::scankey::SK_ISNULL,
+        types_scan::scankey::SK_ISNULL
+    );
     assert_eq!(keys[0].sk_func.fn_oid, 351);
 }
 
@@ -1656,7 +1694,11 @@ fn lp_dead_page_fill_runs_simple_deletion_instead_of_split() {
     );
 
     let seen = drain_forward(cx.mcx(), &rel);
-    assert!(seen.len() <= 60, "deleted tuples stay deleted: {}", seen.len());
+    assert!(
+        seen.len() <= 60,
+        "deleted tuples stay deleted: {}",
+        seen.len()
+    );
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }
 
@@ -1697,7 +1739,10 @@ fn upgrademetapage_lifts_v2_meta_to_novac_v3() {
     assert_eq!(on_page.btm_version, ::types_nbtree::BTREE_NOVAC_VERSION);
     assert_eq!(on_page.btm_last_cleanup_num_delpages, 0);
     assert_eq!(on_page.btm_last_cleanup_num_heap_tuples, -1.0);
-    assert!(!on_page.btm_allequalimage, "only a REINDEX can set allequalimage");
+    assert!(
+        !on_page.btm_allequalimage,
+        "only a REINDEX can set allequalimage"
+    );
     // pd_lower re-covers the whole (48B) metadata payload, as
     // _bt_initmetapage lays it out.
     let lower = PAGES.with(|p| {
@@ -1706,7 +1751,10 @@ fn upgrademetapage_lifts_v2_meta_to_novac_v3() {
         let page = unsafe { &*pages[0].as_ptr() };
         u16::from_ne_bytes([page.0[12], page.0[13]]) as usize
     });
-    assert_eq!(lower, SizeOfPageHeaderData + core::mem::size_of::<BTMetaPageData>());
+    assert_eq!(
+        lower,
+        SizeOfPageHeaderData + core::mem::size_of::<BTMetaPageData>()
+    );
     pin.release();
     assert_eq!(PINS.with(Cell::get), 0);
 }
@@ -1726,8 +1774,8 @@ fn upgrademetapage_lifts_v2_meta_to_novac_v3() {
 fn parallel_seize_restore_failure_rolls_back_to_done_and_wakes() {
     use std::sync::Arc;
 
-    use ::types_relscan::parallel::{BTParallelScanShared, BtParallelScanState, BtPsState};
     use ::types_core::InvalidBlockNumber;
+    use ::types_relscan::parallel::{BTParallelScanShared, BtParallelScanState, BtPsState};
 
     use crate::parallel::{arm_restore_arrays_fault, bt_parallel_seize};
 
@@ -1886,7 +1934,10 @@ fn bt_saveitem_rejects_oversized_tuple_instead_of_overflowing() {
     // Only 16 bytes consumed so far: 16 + MAXALIGN(8191) = 8208 > BLCKSZ.
     so.currPos.nextTupleOffset = 16;
     let res = unsafe { crate::search::bt_saveitem(&mut so, 0, 1, itup) };
-    assert!(res.is_err(), "oversized tuple must be rejected, not copied OOB");
+    assert!(
+        res.is_err(),
+        "oversized tuple must be rejected, not copied OOB"
+    );
     assert_eq!(
         so.currPos.nextTupleOffset, 16,
         "rejected save must not advance the work-area cursor"
@@ -1898,7 +1949,10 @@ fn bt_saveitem_rejects_oversized_tuple_instead_of_overflowing() {
     so.currPos.nextTupleOffset = 0;
     let ok = unsafe { crate::search::bt_saveitem(&mut so, 0, 1, ok_img.0.as_ptr()) };
     assert!(ok.is_ok(), "an in-bounds tuple must save normally");
-    assert_eq!(so.currPos.nextTupleOffset, 16, "cursor advances by MAXALIGN(itupsz)");
+    assert_eq!(
+        so.currPos.nextTupleOffset, 16,
+        "cursor advances by MAXALIGN(itupsz)"
+    );
 }
 
 // upstream d560e730e813 (18.5): Fix another empty nbtree index SSI race. A
@@ -1930,7 +1984,11 @@ fn serializable_qualless_scan_rechecks_empty_index_after_relation_lock() {
     ::xact::SetXactIsoLevel(saved_iso);
 
     assert_eq!(PRED_LOCK_RELATION_CALLS.with(Cell::get), 1);
-    assert_eq!(seen, vec![10], "key inserted before the relation lock is seen");
+    assert_eq!(
+        seen,
+        vec![10],
+        "key inserted before the relation lock is seen"
+    );
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }
 
@@ -2017,12 +2075,18 @@ fn index_form_tuple_compresses_varlenas_over_toast_index_target() {
     let big = varlena_datum(mcx, &[b'a'; 1500]);
     let tup = crate::itup::index_form_tuple(mcx, &td, &[big], &[false]).unwrap();
     let sz = unsafe { crate::itup::index_tuple_size(tup.as_ptr()) };
-    assert!(sz < 64, "1500-byte compressible value must be stored compressed, got {sz} bytes");
+    assert!(
+        sz < 64,
+        "1500-byte compressible value must be stored compressed, got {sz} bytes"
+    );
 
     let small = varlena_datum(mcx, &[b'a'; 400]);
     let tup = crate::itup::index_form_tuple(mcx, &td, &[small], &[false]).unwrap();
     let sz = unsafe { crate::itup::index_tuple_size(tup.as_ptr()) };
-    assert!(sz >= 404, "400-byte value is under the target and stays raw, got {sz} bytes");
+    assert!(
+        sz >= 404,
+        "400-byte value is under the target and stays raw, got {sz} bytes"
+    );
 }
 
 // index_truncate_tuple (indextuple.c:591): CreateTupleDescTruncatedCopy
@@ -2043,7 +2107,9 @@ fn index_truncate_tuple_keeps_pg_attribute_for_wide_raw_varlena() {
             (4, true, ::types_tuple::TYPSTORAGE_PLAIN),
         ],
     );
-    let payload: Vec<u8> = (0..2200u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    let payload: Vec<u8> = (0..2200u32)
+        .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+        .collect();
     let wide = varlena_datum(mcx, &payload);
     let src = crate::itup::index_form_tuple(mcx, &td, &[wide, Datum::from_i32(7)], &[false, false])
         .unwrap();
@@ -2104,7 +2170,11 @@ fn every_btree_wal_insert_runs_inside_a_critical_section() {
         assert!(infos.contains(&kind), "scenario must emit xlinfo {kind:#x}");
     }
     assert!(
-        infos.iter().filter(|i| **i == ::types_nbtree::XLOG_BTREE_NEWROOT).count() >= 2,
+        infos
+            .iter()
+            .filter(|i| **i == ::types_nbtree::XLOG_BTREE_NEWROOT)
+            .count()
+            >= 2,
         "root creation (_bt_getroot) and root split (_bt_newlevel)"
     );
     let outside: Vec<u8> = infos
@@ -2117,7 +2187,11 @@ fn every_btree_wal_insert_runs_inside_a_critical_section() {
         outside.is_empty(),
         "btree WAL records inserted with CritSectionCount == 0 (xlinfo): {outside:#x?}"
     );
-    assert_eq!(init_small::globals::CritSectionCount(), 0, "critical sections balanced");
+    assert_eq!(
+        init_small::globals::CritSectionCount(),
+        0,
+        "critical sections balanced"
+    );
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }
 
@@ -2173,7 +2247,11 @@ fn insert_into_a_version3_index_is_a_typed_refusal_not_a_panic() {
     )
     .unwrap_err();
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
-    assert!(err.message().contains("version 2/3"), "message names the on-disk format: {}", err.message());
+    assert!(
+        err.message().contains("version 2/3"),
+        "message names the on-disk format: {}",
+        err.message()
+    );
     assert_eq!(init_small::globals::CritSectionCount(), 0);
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked on the refusal");
 }
@@ -2221,11 +2299,24 @@ fn oversized_tuple_error_carries_errtableconstraint_fields() {
         ))
     };
 
-    let err = unsafe { crate::bt_check_third_page(mcx, &rel, &heap, true, &page.as_ref(), img.0.as_ptr()) }
-        .unwrap_err();
-    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
-    assert_eq!(err.table_name(), Some("t"), "errtableconstraint: heap relation name");
-    assert_eq!(err.constraint_name(), Some("t_idx"), "errtableconstraint: index name as constraint");
+    let err = unsafe {
+        crate::bt_check_third_page(mcx, &rel, &heap, true, &page.as_ref(), img.0.as_ptr())
+    }
+    .unwrap_err();
+    assert_eq!(
+        err.sqlstate(),
+        ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED
+    );
+    assert_eq!(
+        err.table_name(),
+        Some("t"),
+        "errtableconstraint: heap relation name"
+    );
+    assert_eq!(
+        err.constraint_name(),
+        Some("t_idx"),
+        "errtableconstraint: index name as constraint"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2272,7 +2363,12 @@ fn pagedel_logs_half_dead_internal_page_like_c() {
         let mut pages = p.borrow_mut();
         pages.clear();
         pages.push(leak_page(meta_page(1, 1)));
-        pages.push(leak_page(new_page(::types_nbtree::BTP_HALF_DEAD, 1, P_NONE, P_NONE)));
+        pages.push(leak_page(new_page(
+            ::types_nbtree::BTP_HALF_DEAD,
+            1,
+            P_NONE,
+            P_NONE,
+        )));
     });
     let info = vacuum_info(&rel, &heap);
     let mut stats = ::types_nbtree::IndexBulkDeleteResult::default();
@@ -2289,14 +2385,25 @@ fn pagedel_logs_half_dead_internal_page_like_c() {
     let leafbuf = crate::page::bt_getbuf(&rel, 1, ::types_nbtree::BT_WRITE).unwrap();
     let _ = take_ereports();
     crate::pagedel::bt_pagedel(mcx, &rel, leafbuf, &mut vstate).unwrap();
-    assert_eq!(PINS.with(Cell::get), pins_before, "leafbuf released on the abandon path");
+    assert_eq!(
+        PINS.with(Cell::get),
+        pins_before,
+        "leafbuf released on the abandon path"
+    );
 
     let logs = take_ereports();
-    assert_eq!(logs.len(), 1, "exactly one LOG for the half-dead internal page: {logs:?}");
+    assert_eq!(
+        logs.len(),
+        1,
+        "exactly one LOG for the half-dead internal page: {logs:?}"
+    );
     let e = &logs[0];
     assert_eq!(e.level(), ::types_error::LOG);
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INDEX_CORRUPTED);
-    assert_eq!(e.message(), "index \"t_idx\" contains a half-dead internal page");
+    assert_eq!(
+        e.message(),
+        "index \"t_idx\" contains a half-dead internal page"
+    );
     assert_eq!(
         e.hint(),
         Some(
@@ -2304,7 +2411,10 @@ fn pagedel_logs_half_dead_internal_page_like_c() {
         )
     );
     let loc = e.location().expect("C-parity location");
-    assert_eq!((loc.filename.as_deref(), loc.lineno), (Some("nbtpage.c"), 1859));
+    assert_eq!(
+        (loc.filename.as_deref(), loc.lineno),
+        (Some("nbtpage.c"), 1859)
+    );
 }
 
 // nbtree.c:1413 btvacuumpage: a leaf carrying the current cycle ID whose
@@ -2356,7 +2466,11 @@ fn vacuumpage_logs_inconsistent_backtracked_right_sibling_like_c() {
     assert_eq!(PINS.with(Cell::get), pins_before, "every pin released");
 
     let logs = take_ereports();
-    assert_eq!(logs.len(), 1, "exactly one LOG for the inconsistent sibling: {logs:?}");
+    assert_eq!(
+        logs.len(),
+        1,
+        "exactly one LOG for the inconsistent sibling: {logs:?}"
+    );
     let e = &logs[0];
     assert_eq!(e.level(), ::types_error::LOG);
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INDEX_CORRUPTED);
@@ -2365,7 +2479,10 @@ fn vacuumpage_logs_inconsistent_backtracked_right_sibling_like_c() {
         "right sibling 1 of scanblkno 2 unexpectedly in an inconsistent state in index \"t_idx\""
     );
     let loc = e.location().expect("C-parity location");
-    assert_eq!((loc.filename.as_deref(), loc.lineno), (Some("nbtree.c"), 1413));
+    assert_eq!(
+        (loc.filename.as_deref(), loc.lineno),
+        (Some("nbtree.c"), 1413)
+    );
 }
 
 // nbtutils.c:3641-3680 BTreeShmemSize/BTreeShmemInit: the VACUUM cycle-ID

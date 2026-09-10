@@ -7,10 +7,24 @@ pub mod create;
 pub mod drop;
 pub mod partition;
 pub mod truncate;
-pub use truncate::{heap_truncate, heap_truncate_check_FKs, heap_truncate_find_FKs, heap_truncate_one_rel};
-pub use create::{heap_create, heap_create_with_catalog, CheckAttributeNamesTypes, CheckAttributeType, FormExtraData_pg_attribute, InsertPgAttributeTuples, HeapCreateParams, InsertPgClassTuple, take_next_heap_pg_class_relfilenumber, NextToastPgClassOidIsSet, RelationClearMissing, SetAttrMissing, SetNextHeapPgClassOid, SetNextHeapPgClassRelfilenumber, SetNextToastPgClassOid, SetNextToastPgClassRelfilenumber, StoreAttrMissingVal, CHKATYPE_ANYARRAY, CHKATYPE_ANYRECORD, CHKATYPE_IS_PARTKEY, CHKATYPE_IS_VIRTUAL};
-pub use partition::{update_default_partition_oid, RemovePartitionKeyByRelId, StorePartitionBound, StorePartitionKey};
-pub use drop::{heap_drop_with_catalog, CheckTableNotInUse, CopyStatistics, DeleteAttributeTuples, DeleteRelationTuple, DeleteSystemAttributeTuples, RemoveAttributeById, RemoveStatistics};
+pub use create::{
+    heap_create, heap_create_with_catalog, take_next_heap_pg_class_relfilenumber,
+    CheckAttributeNamesTypes, CheckAttributeType, FormExtraData_pg_attribute, HeapCreateParams,
+    InsertPgAttributeTuples, InsertPgClassTuple, NextToastPgClassOidIsSet, RelationClearMissing,
+    SetAttrMissing, SetNextHeapPgClassOid, SetNextHeapPgClassRelfilenumber, SetNextToastPgClassOid,
+    SetNextToastPgClassRelfilenumber, StoreAttrMissingVal, CHKATYPE_ANYARRAY, CHKATYPE_ANYRECORD,
+    CHKATYPE_IS_PARTKEY, CHKATYPE_IS_VIRTUAL,
+};
+pub use drop::{
+    heap_drop_with_catalog, CheckTableNotInUse, CopyStatistics, DeleteAttributeTuples,
+    DeleteRelationTuple, DeleteSystemAttributeTuples, RemoveAttributeById, RemoveStatistics,
+};
+pub use partition::{
+    update_default_partition_oid, RemovePartitionKeyByRelId, StorePartitionBound, StorePartitionKey,
+};
+pub use truncate::{
+    heap_truncate, heap_truncate_check_FKs, heap_truncate_find_FKs, heap_truncate_one_rel,
+};
 
 use types_core::catalog::{CIDOID, OIDOID, TIDOID, XIDOID};
 use types_core::{AttrNumber, InvalidOid, NAMEDATALEN};
@@ -29,7 +43,9 @@ use types_tuple::{
 #[cold]
 #[inline(never)]
 pub(crate) fn relation_lookup_failed(relid: types_core::Oid) -> Box<types_error::PgError> {
-    Box::new(types_error::PgError::error(format!("cache lookup failed for relation {relid}")))
+    Box::new(types_error::PgError::error(format!(
+        "cache lookup failed for relation {relid}"
+    )))
 }
 
 #[cold]
@@ -116,12 +132,54 @@ const fn sysatt(
 }
 
 pub static SysAtt: [FormData_pg_attribute; 6] = [
-    sysatt("ctid", TIDOID, 6, SelfItemPointerAttributeNumber, false, TYPALIGN_SHORT),
-    sysatt("xmin", XIDOID, 4, MinTransactionIdAttributeNumber, true, TYPALIGN_INT),
-    sysatt("cmin", CIDOID, 4, MinCommandIdAttributeNumber, true, TYPALIGN_INT),
-    sysatt("xmax", XIDOID, 4, MaxTransactionIdAttributeNumber, true, TYPALIGN_INT),
-    sysatt("cmax", CIDOID, 4, MaxCommandIdAttributeNumber, true, TYPALIGN_INT),
-    sysatt("tableoid", OIDOID, 4, TableOidAttributeNumber, true, TYPALIGN_INT),
+    sysatt(
+        "ctid",
+        TIDOID,
+        6,
+        SelfItemPointerAttributeNumber,
+        false,
+        TYPALIGN_SHORT,
+    ),
+    sysatt(
+        "xmin",
+        XIDOID,
+        4,
+        MinTransactionIdAttributeNumber,
+        true,
+        TYPALIGN_INT,
+    ),
+    sysatt(
+        "cmin",
+        CIDOID,
+        4,
+        MinCommandIdAttributeNumber,
+        true,
+        TYPALIGN_INT,
+    ),
+    sysatt(
+        "xmax",
+        XIDOID,
+        4,
+        MaxTransactionIdAttributeNumber,
+        true,
+        TYPALIGN_INT,
+    ),
+    sysatt(
+        "cmax",
+        CIDOID,
+        4,
+        MaxCommandIdAttributeNumber,
+        true,
+        TYPALIGN_INT,
+    ),
+    sysatt(
+        "tableoid",
+        OIDOID,
+        4,
+        TableOidAttributeNumber,
+        true,
+        TYPALIGN_INT,
+    ),
 ];
 
 pub fn SystemAttributeDefinition(
@@ -138,7 +196,9 @@ pub fn SystemAttributeDefinition(
 }
 
 pub fn SystemAttributeByName(attname: &str) -> Option<&'static FormData_pg_attribute> {
-    SysAtt.iter().find(|att| att.attname.name_str() == attname.as_bytes())
+    SysAtt
+        .iter()
+        .find(|att| att.attname.name_str() == attname.as_bytes())
 }
 
 #[cfg(test)]
@@ -151,7 +211,10 @@ mod tests {
     #[test]
     fn cache_lookup_failures_are_catchable_xx000() {
         let cases: [(Box<types_error::PgError>, &str); 5] = [
-            (relation_lookup_failed(16384), "cache lookup failed for relation 16384"),
+            (
+                relation_lookup_failed(16384),
+                "cache lookup failed for relation 16384",
+            ),
             (
                 attribute_lookup_failed(3, 16384),
                 "cache lookup failed for attribute 3 of relation 16384",
@@ -160,7 +223,10 @@ mod tests {
                 attribute_name_lookup_failed("c1", 16384),
                 "cache lookup failed for attribute c1 of relation 16384",
             ),
-            (foreign_table_lookup_failed(16385), "cache lookup failed for foreign table 16385"),
+            (
+                foreign_table_lookup_failed(16385),
+                "cache lookup failed for foreign table 16385",
+            ),
             (
                 partition_key_lookup_failed(16386),
                 "cache lookup failed for partition key of relation 16386",
@@ -210,7 +276,10 @@ mod tests {
             let e = SystemAttributeDefinition(attno)
                 .err()
                 .unwrap_or_else(|| panic!("attno {attno} must be refused"));
-            assert_eq!(e.message(), format!("invalid system attribute number {attno}"));
+            assert_eq!(
+                e.message(),
+                format!("invalid system attribute number {attno}")
+            );
             assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
             assert_eq!(e.level(), types_error::ERROR);
         }

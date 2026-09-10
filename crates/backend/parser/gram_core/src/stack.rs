@@ -169,7 +169,10 @@ impl<'mcx> Stacks<'mcx> {
     pub(crate) unsafe fn action_view(&self, base: usize) -> ActionView<'mcx> {
         // SAFETY: caller contract.
         unsafe {
-            ActionView { vs: NonNull::new_unchecked(self.vs.as_ptr().add(base)), ls: NonNull::new_unchecked(self.ls.as_ptr().add(base)) }
+            ActionView {
+                vs: NonNull::new_unchecked(self.vs.as_ptr().add(base)),
+                ls: NonNull::new_unchecked(self.ls.as_ptr().add(base)),
+            }
         }
     }
 }

@@ -23,6 +23,16 @@ fn strtoint_funcname(typname: &str) -> &'static str {
     }
 }
 
+// numutils.c (18.6) closing lines of the (invalid-syntax, out-of-range)
+// ereturn pair per width.
+fn strtoint_lines(typname: &str) -> (i32, i32) {
+    match typname {
+        "smallint" => (357, 351),
+        "bigint" => (879, 873),
+        _ => (618, 612),
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn invalid_syntax_err(input: &str, typname: &'static str) -> PgError {
@@ -30,7 +40,11 @@ fn invalid_syntax_err(input: &str, typname: &'static str) -> PgError {
         "invalid input syntax for type {typname}: \"{input}\""
     ))
     .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
-    .with_location("numutils.c", 0, strtoint_funcname(typname))
+    .with_location(
+        "numutils.c",
+        strtoint_lines(typname).0,
+        strtoint_funcname(typname),
+    )
 }
 
 #[cold]
@@ -40,7 +54,11 @@ fn out_of_range_err(input: &str, typname: &'static str) -> PgError {
         "value \"{input}\" is out of range for type {typname}"
     ))
     .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
-    .with_location("numutils.c", 0, strtoint_funcname(typname))
+    .with_location(
+        "numutils.c",
+        strtoint_lines(typname).1,
+        strtoint_funcname(typname),
+    )
 }
 
 fn is_space(byte: u8) -> bool {
@@ -284,8 +302,7 @@ macro_rules! strtoint {
             // <=19 digits fit u64 exactly, so everything runs guard-free.
             if len - i >= 8 {
                 if len - i > 19 {
-                    return strtoint_slow(s, NEG_ABS, MAX, $typname, escontext)
-                        .map(|v| v as $ity);
+                    return strtoint_slow(s, NEG_ABS, MAX, $typname, escontext).map(|v| v as $ity);
                 }
                 loop {
                     // SAFETY: i + 8 <= len.
@@ -304,8 +321,7 @@ macro_rules! strtoint {
             }
             if len - i >= 4 {
                 // SAFETY: i + 4 <= len.
-                let chunk =
-                    unsafe { core::ptr::read_unaligned(b.as_ptr().add(i) as *const u32) };
+                let chunk = unsafe { core::ptr::read_unaligned(b.as_ptr().add(i) as *const u32) };
                 let t = chunk ^ 0x30303030;
                 if (t.wrapping_add(0x76767676) | t) & 0x80808080 == 0 {
                     let v = (t.wrapping_mul(10).wrapping_add(t >> 8)) & 0x00FF00FF;
@@ -352,11 +368,7 @@ strtoint!(pg_strtoint64, pg_strtoint64_safe, i64, "bigint");
 // C strtoul/strtou64 base-0 model + the uint*in_subr checks; cold (oid/xid
 // input paths). When `endloc` the unconsumed tail is returned, else only
 // trailing whitespace may follow.
-fn uintin_subr<'a>(
-    s: &'a str,
-    is_u32: bool,
-    endloc: bool,
-) -> Result<(u64, &'a str), NumErr> {
+fn uintin_subr<'a>(s: &'a str, is_u32: bool, endloc: bool) -> Result<(u64, &'a str), NumErr> {
     let b = s.as_bytes();
     let len = b.len();
     let mut i = 0usize;
@@ -441,18 +453,14 @@ fn uintin_report<'a>(
         Err(NumErr::OutOfRange) => ereturn(
             escontext,
             (0, ""),
-            PgError::error(format!(
-                "value \"{s}\" is out of range for type {typname}"
-            ))
-            .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+            PgError::error(format!("value \"{s}\" is out of range for type {typname}"))
+                .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
         ),
         Err(NumErr::InvalidSyntax) => ereturn(
             escontext,
             (0, ""),
-            PgError::error(format!(
-                "invalid input syntax for type {typname}: \"{s}\""
-            ))
-            .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
+            PgError::error(format!("invalid input syntax for type {typname}: \"{s}\""))
+                .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
         ),
     }
 }

@@ -18,14 +18,13 @@ use transam_xlog::control_file::{
 };
 use transam_xlog::{XLogRecPtrToBytePos, DB_IN_PRODUCTION, RECOVERY_STATE_DONE};
 use types_core::{
-    BackendType, BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, Oid, TimeLineID,
-    XLogRecPtr, XLogSegNo, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+    BackendType, BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, Oid, TimeLineID, XLogRecPtr,
+    XLogSegNo, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
 };
 use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
 use types_rel::{
-    FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData, LOCKMODE,
-    RELKIND_RELATION,
+    FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData, LOCKMODE, RELKIND_RELATION,
 };
 use types_storage::bufpage::PageRef;
 use types_storage::RelFileLocator;
@@ -214,9 +213,7 @@ fn install_proc_boot_seams() {
     autovacuum_seams::wake_autovacuum_launcher::set(|| {});
     lock_seams::abort_strong_lock_acquire::set(|| {});
     lock_seams::get_awaited_lock_hashcode::set(|| None);
-    lock_seams::lock_release_all::set(|_, _| {
-        lock::VirtualXactLockTableCleanup()
-    });
+    lock_seams::lock_release_all::set(|_, _| lock::VirtualXactLockTableCleanup());
     lock_seams::lock_acquire_extended::set(|_, _, _, _, _, _| {
         Ok(types_storage::lock::LOCKACQUIRE_OK)
     });
@@ -247,9 +244,7 @@ fn install_xact_periphery_seams() {
     be_fsstubs_seams::at_eoxact_large_object::set(|_| Ok(()));
     namespace_seams::at_eoxact_namespace::set(|_, _| {});
     catalog_index_seams::reset_reindex_state::set(|_| {});
-    catalog_storage_seams::smgr_get_pending_deletes::set(|mcx, _for_commit| {
-        Ok(PgVec::new_in(mcx))
-    });
+    catalog_storage_seams::smgr_get_pending_deletes::set(|mcx, _for_commit| Ok(PgVec::new_in(mcx)));
     catalog_storage_seams::smgr_do_pending_deletes::set(|_| Ok(()));
     catalog_storage_seams::smgr_do_pending_syncs::set(|_, _| Ok(()));
     combocid_seams::at_eoxact_combocid::set(|| {});
@@ -359,7 +354,9 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    RelationData { rd_locator: Cell::new(RLOC), rd_smgr: Default::default(),
+    RelationData {
+        rd_locator: Cell::new(RLOC),
+        rd_smgr: Default::default(),
         rd_id: REL_OID,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -369,7 +366,10 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_firstRelfilelocatorSubid: Cell::new(0),
         rd_droppedSubid: Cell::new(0),
         rd_lockInfo: LockInfoData {
-            lockRelId: LockRelId { relId: REL_OID, dbId: 5 },
+            lockRelId: LockRelId {
+                relId: REL_OID,
+                dbId: 5,
+            },
         },
         rd_rel,
         rd_att: int4_x2_tupdesc(mcx),
@@ -382,13 +382,16 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         pgstat_enabled: Cell::new(false),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_opcoptions: Default::default(),
         rd_indexlist: Default::default(),
-            rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
     }
 }
 
@@ -508,13 +511,18 @@ fn run_stmt(sql: &'static str) -> (CmdType, u64) {
     assert_eq!(list.len(), 1);
     let raw = list.nth(0).as_raw_stmt().unwrap();
     let query =
-        parser_analyze::parse_analyze_fixedparams(mcx, raw, sql, &[], Default::default())
-            .unwrap();
+        parser_analyze::parse_analyze_fixedparams(mcx, raw, sql, &[], Default::default()).unwrap();
     let mut rewritten = rewrite_handler::QueryRewrite(mcx, query).unwrap();
     assert_eq!(rewritten.len(), 1);
     let query = rewritten.pop().unwrap();
-    let pstmt = planner::planner(mcx, mcx::leak_in(mcx::alloc_in(mcx, query).unwrap()), sql, 0, types_portal::ParamListHandle::NULL)
-        .unwrap();
+    let pstmt = planner::planner(
+        mcx,
+        mcx::leak_in(mcx::alloc_in(mcx, query).unwrap()),
+        sql,
+        0,
+        types_portal::ParamListHandle::NULL,
+    )
+    .unwrap();
     let pstmt: &'static types_nodes::plannodes::PlannedStmt<'static> =
         mcx::leak_in(mcx::alloc_in(mcx, pstmt).unwrap());
 
@@ -533,13 +541,8 @@ fn run_stmt(sql: &'static str) -> (CmdType, u64) {
     execmain_seams::executor_start::call(qd, 0).unwrap();
     let operation = execmain_seams::query_desc_operation::call(qd);
     let mut dest = tcop_dest::DestReceiver::DoNothing;
-    execmain_seams::executor_run::call(
-        qd,
-        types_scan::sdir::ForwardScanDirection,
-        0,
-        &mut dest,
-    )
-    .unwrap();
+    execmain_seams::executor_run::call(qd, types_scan::sdir::ForwardScanDirection, 0, &mut dest)
+        .unwrap();
     let processed = execmain_seams::query_desc_es_processed::call(qd);
     execmain_seams::executor_finish::call(qd).unwrap();
     execmain_seams::executor_end::call(qd).unwrap();
@@ -564,12 +567,18 @@ fn select_rows() -> Vec<(i32, i32)> {
     for (attno, name) in [(1i16, "a"), (2i16, "b")] {
         let var = Node::mk_var(mcx, 1, attno, INT4OID, -1, 0, 0).unwrap();
         tlist
-            .lappend(mcx, Node::mk_target_entry(mcx, var, attno, Some(name), false).unwrap())
+            .lappend(
+                mcx,
+                Node::mk_target_entry(mcx, var, attno, Some(name), false).unwrap(),
+            )
             .unwrap();
     }
     let mut scan = Node::build::<SeqScan>(mcx).unwrap();
     scan.scan = Scan {
-        plan: Plan { targetlist: tlist, ..Default::default() },
+        plan: Plan {
+            targetlist: tlist,
+            ..Default::default()
+        },
         scanrelid: 1,
     };
     let scan = scan.seal();
@@ -589,9 +598,19 @@ fn select_rows() -> Vec<(i32, i32)> {
     let exec_ctx = MemoryContext::new_bump("sel-exec");
     let mut estate = EStateData::new_in(exec_ctx.mcx());
     estate.es_snapshot = snapshot;
-    let rtable = mcx::leak_in(mcx::alloc_in(exec_ctx.mcx(), NodeList::make1(exec_ctx.mcx(), rte).unwrap()).unwrap());
+    let rtable = mcx::leak_in(
+        mcx::alloc_in(
+            exec_ctx.mcx(),
+            NodeList::make1(exec_ctx.mcx(), rte).unwrap(),
+        )
+        .unwrap(),
+    );
     estate
-        .exec_init_range_table(rtable, mcx::leak_in(mcx::alloc_in(exec_ctx.mcx(), NodeList::nil()).unwrap()), unpruned)
+        .exec_init_range_table(
+            rtable,
+            mcx::leak_in(mcx::alloc_in(exec_ctx.mcx(), NodeList::nil()).unwrap()),
+            unpruned,
+        )
         .unwrap();
     let mut ps = execmain::exec_init_node(Some(scan), &mut estate, 0)
         .unwrap()
@@ -688,8 +707,12 @@ fn insert_commit_select_wal_roundtrip() {
     let ctl = transam_xlog::ctl::XLogCtl();
     ctl.InsertTimeLineID.store(1, Relaxed);
     ctl.PrevTimeLineID.store(1, Relaxed);
-    ctl.Insert.CurrBytePos.store(XLogRecPtrToBytePos(end_of_log), Relaxed);
-    ctl.Insert.PrevBytePos.store(XLogRecPtrToBytePos(prev_rec), Relaxed);
+    ctl.Insert
+        .CurrBytePos
+        .store(XLogRecPtrToBytePos(end_of_log), Relaxed);
+    ctl.Insert
+        .PrevBytePos
+        .store(XLogRecPtrToBytePos(prev_rec), Relaxed);
     ctl.Insert.fullPageWrites.store(true, Relaxed);
     ctl.Insert.RedoRecPtr.store(prev_rec, Relaxed);
     ctl.RedoRecPtr.store(prev_rec, Relaxed);
@@ -727,7 +750,11 @@ fn insert_commit_select_wal_roundtrip() {
 
     with_fake(|f| {
         assert!(f.pins.iter().all(|p| *p == 0), "leaked pins: {:?}", f.pins);
-        assert!(f.locks.iter().all(|l| *l == 0), "leaked locks: {:?}", f.locks);
+        assert!(
+            f.locks.iter().all(|l| *l == 0),
+            "leaked locks: {:?}",
+            f.locks
+        );
     });
 
     // --- WAL decode: heap insert record, then the real commit record. ---
@@ -735,7 +762,9 @@ fn insert_commit_select_wal_roundtrip() {
     let reader_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("reader")));
     let mut reader = xlogreader::XLogReaderState::allocate(reader_ctx.mcx(), SEG).unwrap();
     reader.system_identifier = SYS_ID;
-    let mut routine = SegFileRead { wal_dir: dir.join("pg_wal") };
+    let mut routine = SegFileRead {
+        wal_dir: dir.join("pg_wal"),
+    };
     let first_rec = end_of_log + 40;
     reader.XLogBeginRead(first_rec);
 

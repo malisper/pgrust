@@ -71,16 +71,13 @@ pub(crate) fn ATExecChangeOwner<'mcx>(
         }
         types_rel::RELKIND_SEQUENCE => {
             if !recursing && old_owner_id != new_owner_id {
-                let owned = pg_depend::sequenceIsOwned(
-                    mcx,
-                    relation_oid,
-                    pg_depend::DependencyType::Auto,
-                )?
-                .or(pg_depend::sequenceIsOwned(
-                    mcx,
-                    relation_oid,
-                    pg_depend::DependencyType::Internal,
-                )?);
+                let owned =
+                    pg_depend::sequenceIsOwned(mcx, relation_oid, pg_depend::DependencyType::Auto)?
+                        .or(pg_depend::sequenceIsOwned(
+                            mcx,
+                            relation_oid,
+                            pg_depend::DependencyType::Internal,
+                        )?);
                 if let Some((table_id, _col_id)) = owned {
                     let tabname = lsyscache::get_rel_name(mcx, table_id)?
                         .map(|n| n.to_string())
@@ -114,9 +111,9 @@ pub(crate) fn ATExecChangeOwner<'mcx>(
                     format!("cannot change owner of relation \"{relname}\""),
                 )
                 .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
-                .with_detail(pg_class_seams::errdetail_relkind_not_supported::call(
-                    relkind,
-                )?),
+                .with_detail(
+                    pg_class_seams::errdetail_relkind_not_supported::call(relkind)?,
+                ),
             ));
         }
     }
@@ -196,8 +193,7 @@ pub(crate) fn ATExecChangeOwner<'mcx>(
                     adt_acl::aclnewowner(mcx, acl, old_owner_id, new_owner_id)
                 })?;
                 acl_img = adt_acl::varlena::acl_image(mcx, &new_acl)?;
-                values[Anum_pg_class_relacl - 1] =
-                    Datum::from_usize(acl_img.as_ptr() as usize);
+                values[Anum_pg_class_relacl - 1] = Datum::from_usize(acl_img.as_ptr() as usize);
                 replace[Anum_pg_class_relacl - 1] = true;
             }
 
@@ -242,7 +238,13 @@ pub(crate) fn ATExecChangeOwner<'mcx>(
         }
 
         if target_rel.rd_rel.reltoastrelid != InvalidOid {
-            ATExecChangeOwner(mcx, target_rel.rd_rel.reltoastrelid, new_owner_id, true, lockmode)?;
+            ATExecChangeOwner(
+                mcx,
+                target_rel.rd_rel.reltoastrelid,
+                new_owner_id,
+                true,
+                lockmode,
+            )?;
         }
 
         change_owner_recurse_to_sequences(mcx, relation_oid, new_owner_id, lockmode)?;
@@ -259,8 +261,7 @@ fn change_owner_fix_column_acls<'mcx>(
     old_owner_id: Oid,
     new_owner_id: Oid,
 ) -> PgResult<()> {
-    let att_rel =
-        table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    let att_rel = table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
     let keys = [oid_scankey(1, relation_oid)];
     let mut scan =
         genam::systable_beginscan(mcx, &att_rel, AttributeRelidNumIndexId, true, None, &keys)?;
@@ -320,9 +321,10 @@ fn change_owner_recurse_to_sequences<'mcx>(
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let mut isnull = false;
         // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
-        let refobjsubid =
-            unsafe { types_tuple::heap_getattr(tup, Anum_pg_depend_refobjsubid, desc, &mut isnull) }
-                .as_i32();
+        let refobjsubid = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_depend_refobjsubid, desc, &mut isnull)
+        }
+        .as_i32();
         let classid =
             unsafe { types_tuple::heap_getattr(tup, Anum_pg_depend_classid, desc, &mut isnull) }
                 .as_oid();

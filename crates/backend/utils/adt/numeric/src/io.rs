@@ -3,11 +3,15 @@ use core::cell::RefCell;
 use datum::Bytea;
 use mcx::Mcx;
 use stringinfo::StringInfo;
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_BINARY_REPRESENTATION};
+use types_error::{
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_BINARY_REPRESENTATION,
+};
 
 use crate::arith::{add_var, mul_var};
 use crate::ops::{apply_typmod, apply_typmod_special};
-use crate::var::{int64_to_var, make_result, make_result_opt_error, NumericImage, NumericVar, VarView};
+use crate::var::{
+    int64_to_var, make_result, make_result_opt_error, NumericImage, NumericVar, VarView,
+};
 use crate::{
     invalid_numeric_syntax, numeric_overflow_error, Num, NumericDigit, DEC_DIGITS, NBASE,
     NUMERIC_DSCALE_MASK, NUMERIC_NAN, NUMERIC_NEG, NUMERIC_NINF, NUMERIC_PINF, NUMERIC_POS,
@@ -25,7 +29,11 @@ fn c_isspace(b: u8) -> bool {
 }
 
 fn strncasecmp_eq(s: &[u8], lit: &[u8]) -> bool {
-    s.len() >= lit.len() && s[..lit.len()].iter().zip(lit).all(|(a, b)| a.eq_ignore_ascii_case(b))
+    s.len() >= lit.len()
+        && s[..lit.len()]
+            .iter()
+            .zip(lit)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 enum NumErr {
@@ -111,9 +119,7 @@ pub fn numeric_in(
             Err(NumErr::InvalidSyntax) => {
                 return ereturn(escontext, None, invalid_numeric_syntax(input))
             }
-            Err(NumErr::OutOfRange) => {
-                return ereturn(escontext, None, numeric_overflow_error())
-            }
+            Err(NumErr::OutOfRange) => return ereturn(escontext, None, numeric_overflow_error()),
         }
     } else {
         match set_var_from_non_decimal_integer_str(s, cp + 2, sign, base, &mut value) {
@@ -121,9 +127,7 @@ pub fn numeric_in(
             Err(NumErr::InvalidSyntax) => {
                 return ereturn(escontext, None, invalid_numeric_syntax(input))
             }
-            Err(NumErr::OutOfRange) => {
-                return ereturn(escontext, None, numeric_overflow_error())
-            }
+            Err(NumErr::OutOfRange) => return ereturn(escontext, None, numeric_overflow_error()),
         }
     };
 
@@ -204,7 +208,9 @@ pub fn numeric_send<'mcx>(mcx: Mcx<'mcx>, num: Num<'_>) -> PgResult<Bytea<'mcx>>
 #[cold]
 #[inline(never)]
 fn recv_error(msg: &'static str) -> Box<PgError> {
-    PgError::error(msg).with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION).into()
+    PgError::error(msg)
+        .with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION)
+        .into()
 }
 
 fn set_var_from_str(s: &[u8], mut cp: usize, dest: &mut NumericVar) -> Result<usize, NumErr> {
@@ -342,8 +348,10 @@ fn set_var_from_str(s: &[u8], mut cp: usize, dest: &mut NumericVar) -> Result<us
         {
             let digits = dest.digits_mut();
             let dd = decdigits.as_ptr();
-            debug_assert!(i + DEC_DIGITS as usize * (digits.len().max(1) - 1) + DEC_DIGITS as usize
-                <= decdigits.len() + 1);
+            debug_assert!(
+                i + DEC_DIGITS as usize * (digits.len().max(1) - 1) + DEC_DIGITS as usize
+                    <= decdigits.len() + 1
+            );
             for dig in digits.iter_mut() {
                 // SAFETY: i + 3 stays within the padded decdigits buffer
                 // (ndigits * DEC_DIGITS <= offset + ddigits + DEC_DIGITS - 1).

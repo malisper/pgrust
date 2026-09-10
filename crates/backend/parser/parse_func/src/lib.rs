@@ -4,8 +4,10 @@
 mod tests;
 
 use catalog_namespace::{FuncCandidate, OperCandidate};
-use coerce::{COERCION_EXPLICIT, COERCION_IMPLICIT, COERCION_PATH_COERCEVIAIO,
-    COERCION_PATH_RELABELTYPE, TYPCATEGORY_INVALID, TYPCATEGORY_STRING};
+use coerce::{
+    COERCION_EXPLICIT, COERCION_IMPLICIT, COERCION_PATH_COERCEVIAIO, COERCION_PATH_RELABELTYPE,
+    TYPCATEGORY_INVALID, TYPCATEGORY_STRING,
+};
 use elog::ereport;
 use mcx::{Mcx, PgVec};
 use nodes_core::expr_location;
@@ -17,8 +19,8 @@ use types_error::{
     ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use types_nodes::primnodes::{Aggref, WindowFunc, AGGKIND_HYPOTHETICAL, AGGKIND_ORDERED_SET};
 use types_nodes::parsenodes::ObjectType;
+use types_nodes::primnodes::{Aggref, WindowFunc, AGGKIND_HYPOTHETICAL, AGGKIND_ORDERED_SET};
 use types_nodes::rawnodes::FuncCall;
 use types_nodes::{CoercionForm, FuncExpr, Node, NodeList, NodeTag};
 
@@ -58,7 +60,9 @@ enum FuncDetail<'mcx> {
         vatype: Oid,
         nvargs: i16,
     },
-    Coercion { rettype: Oid },
+    Coercion {
+        rettype: Oid,
+    },
     Multiple,
     Procedure {
         funcid: Oid,
@@ -323,9 +327,14 @@ pub fn ParseFuncOrColumn<'mcx>(
             CoercionForm::COERCE_EXPLICIT_CALL,
             location,
         ),
-        FuncDetail::Multiple => {
-            Err(ambiguous_function(pstate, parts, argnames.as_slice(), actual_arg_types, proc_call, location))
-        }
+        FuncDetail::Multiple => Err(ambiguous_function(
+            pstate,
+            parts,
+            argnames.as_slice(),
+            actual_arg_types,
+            proc_call,
+            location,
+        )),
         FuncDetail::Normal {
             funcid,
             rettype,
@@ -418,7 +427,14 @@ pub fn ParseFuncOrColumn<'mcx>(
             }
             Ok(retval)
         }
-        FuncDetail::Aggregate { funcid, rettype, retset, declared_arg_types, vatype, nvargs } => {
+        FuncDetail::Aggregate {
+            funcid,
+            rettype,
+            retset,
+            declared_arg_types,
+            vatype,
+            nvargs,
+        } => {
             // C parse_func.c:369 elog(ERROR, "cache lookup failed for
             // aggregate %u") -- catchable XX000, not a backend abort.
             let Some(aggshape) = syscache_seams::lookup_pg_aggregate_shape::call(funcid)? else {
@@ -584,8 +600,8 @@ pub fn ParseFuncOrColumn<'mcx>(
             }
             if let Some(over_node) = over {
                 return build_window_func(
-                    mcx, pstate, funcid, rettype, retset, fargs, true, fn_call, agg_filter,
-                    parts, over_node, _last_srf, location,
+                    mcx, pstate, funcid, rettype, retset, fargs, true, fn_call, agg_filter, parts,
+                    over_node, _last_srf, location,
                 );
             }
             // C's aggargtypes = exprType per coerced arg (parse_agg.c);
@@ -599,8 +615,10 @@ pub fn ParseFuncOrColumn<'mcx>(
                 actual_arg_types.len()
             };
             let mut agg_arg_types = mcx::vec_with_capacity_in(mcx, n_plain + 1)?;
-            for (&a, &d) in
-                actual_arg_types.iter().zip(declared_arg_types.iter()).take(n_plain)
+            for (&a, &d) in actual_arg_types
+                .iter()
+                .zip(declared_arg_types.iter())
+                .take(n_plain)
             {
                 agg_arg_types.push(post_coercion_type(a, d)?);
             }
@@ -801,7 +819,9 @@ pub fn ParseFuncOrColumn<'mcx>(
 // C ISCOMPLEX (parse_type.h): typeOrDomainTypeRelid(typeid) != InvalidOid,
 // i.e. the type (or its base, for a domain) has a backing pg_class row.
 fn is_complex(typid: Oid) -> PgResult<bool> {
-    Ok(OidIsValid(lsyscache::get_typ_typrelid(lsyscache::getBaseType(typid)?)?))
+    Ok(OidIsValid(lsyscache::get_typ_typrelid(
+        lsyscache::getBaseType(typid)?,
+    )?))
 }
 
 // C: ParseFuncOrColumn's shared variadic packing — the trailing nvargs
@@ -832,8 +852,10 @@ fn pack_variadic_args<'mcx>(
             vargs.push(n);
         }
     }
-    let element_typeid =
-        post_coercion_type(actual_arg_types[non_var_args], declared_arg_types[non_var_args])?;
+    let element_typeid = post_coercion_type(
+        actual_arg_types[non_var_args],
+        declared_arg_types[non_var_args],
+    )?;
     let array_typeid = lsyscache::get_array_type(element_typeid)?;
     let vargs = NodeList::from_slice(mcx, vargs.as_slice())?;
     if !OidIsValid(array_typeid) {
@@ -857,7 +879,11 @@ fn pack_variadic_args<'mcx>(
                 expr_location(n)
             } else {
                 let l = expr_location(n);
-                if l < 0 { loc } else { loc.min(l) }
+                if l < 0 {
+                    loc
+                } else {
+                    loc.min(l)
+                }
             };
         }
         loc
@@ -874,7 +900,10 @@ fn pack_variadic_args<'mcx>(
         },
     )?;
     plain.push(newa);
-    Ok(Some((NodeList::from_slice(mcx, plain.as_slice())?, array_typeid)))
+    Ok(Some((
+        NodeList::from_slice(mcx, plain.as_slice())?,
+        array_typeid,
+    )))
 }
 
 // unify_hypothetical_args (parse_func.c): coerce each hypothetical direct
@@ -890,8 +919,7 @@ fn unify_hypothetical_args<'mcx>(
 ) -> PgResult<NodeList<'mcx>> {
     let num_args = fargs.len();
     let num_direct_args = num_args - num_aggregated_args;
-    let Some(num_non_hypothetical_args) = num_direct_args.checked_sub(num_aggregated_args)
-    else {
+    let Some(num_non_hypothetical_args) = num_direct_args.checked_sub(num_aggregated_args) else {
         return Err(Box::new(
             elog::ereport(ERROR)
                 .errmsg("incorrect number of arguments to hypothetical-set aggregate")
@@ -913,9 +941,7 @@ fn unify_hypothetical_args<'mcx>(
         if declared_arg_types[hargpos] != declared_arg_types[aargpos] {
             return Err(Box::new(
                 elog::ereport(ERROR)
-                    .errmsg(
-                        "hypothetical-set aggregate has inconsistent declared argument types",
-                    )
+                    .errmsg("hypothetical-set aggregate has inconsistent declared argument types")
                     .into_error()
                     .with_error_location(ErrorLocation::new(
                         "parse_func.c",
@@ -985,7 +1011,9 @@ fn unify_hypothetical_args<'mcx>(
 #[cold]
 #[inline(never)]
 fn cache_lookup_failed_aggregate(funcid: Oid) -> Box<PgError> {
-    Box::new(PgError::error(format!("cache lookup failed for aggregate {funcid}")))
+    Box::new(PgError::error(format!(
+        "cache lookup failed for aggregate {funcid}"
+    )))
 }
 
 // parse_func.c:1681 elog(ERROR, "cache lookup failed for function %u").
@@ -993,7 +1021,9 @@ fn cache_lookup_failed_aggregate(funcid: Oid) -> Box<PgError> {
 #[cold]
 #[inline(never)]
 fn cache_lookup_failed_function(funcid: Oid) -> Box<PgError> {
-    Box::new(PgError::error(format!("cache lookup failed for function {funcid}")))
+    Box::new(PgError::error(format!(
+        "cache lookup failed for function {funcid}"
+    )))
 }
 
 #[cold]
@@ -1035,7 +1065,11 @@ fn ordered_set_direct_args_error(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -1069,7 +1103,11 @@ fn hypothetical_args_mismatch_error(
             ))
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -1109,7 +1147,11 @@ fn ordered_set_min_direct_args_error(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -1124,7 +1166,11 @@ fn named_arg_error(pstate: &ParseState<'_, '_>, msg: String, location: ParseLoc)
             .errmsg(msg)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -1193,13 +1239,14 @@ fn build_window_func<'mcx>(
     };
     if srf_added {
         // C errpositions at exprLocation(pstate->p_last_srf), the inner SRF.
-        let srf_location = pstate.p_last_srf.map(nodes_core::expr_location).unwrap_or(-1);
+        let srf_location = pstate
+            .p_last_srf
+            .map(nodes_core::expr_location)
+            .unwrap_or(-1);
         return Err(feature_not_supported(
             pstate,
             "window function calls cannot contain set-returning function calls".into(),
-            Some(
-                "You might be able to move the set-returning function into a LATERAL FROM item.",
-            ),
+            Some("You might be able to move the set-returning function into a LATERAL FROM item."),
             srf_location,
         ));
     }
@@ -1211,7 +1258,11 @@ fn build_window_func<'mcx>(
                 .errmsg("window functions cannot return sets")
                 .errposition(parser_errposition(pstate, location, encoding))
                 .into_error()
-                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+                .with_error_location(ErrorLocation::new(
+                    file!(),
+                    line!() as i32,
+                    "ParseFuncOrColumn",
+                )),
         ));
     }
 
@@ -1246,10 +1297,11 @@ fn feature_not_supported(
     if let Some(h) = hint {
         b = b.errhint(h);
     }
-    Box::new(
-        b.into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
-    )
+    Box::new(b.into_error().with_error_location(ErrorLocation::new(
+        file!(),
+        line!() as i32,
+        "ParseFuncOrColumn",
+    )))
 }
 
 /// C `func_match_argtypes`. C prepends survivors (reversing order); order is
@@ -1297,9 +1349,15 @@ pub fn func_select_candidate<'c, C: CandidateArgs>(
         return Err(Box::new(
             ereport(ERROR)
                 .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
-                .errmsg(format!("cannot pass more than {FUNC_MAX_ARGS} arguments to a function"))
+                .errmsg(format!(
+                    "cannot pass more than {FUNC_MAX_ARGS} arguments to a function"
+                ))
                 .into_error()
-                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "func_select_candidate")),
+                .with_error_location(ErrorLocation::new(
+                    file!(),
+                    line!() as i32,
+                    "func_select_candidate",
+                )),
         ));
     }
 
@@ -1317,7 +1375,9 @@ pub fn func_select_candidate<'c, C: CandidateArgs>(
 
     keep_best(&mut candidates, |c| {
         let args = c.cand_args();
-        Ok((0..nargs).filter(|&i| base[i] != UNKNOWNOID && args[i] == base[i]).count())
+        Ok((0..nargs)
+            .filter(|&i| base[i] != UNKNOWNOID && args[i] == base[i])
+            .count())
     })?;
     if candidates.len() == 1 {
         return Ok(Some(candidates[0]));
@@ -1469,9 +1529,7 @@ fn FuncNameAsType(parts: &[&str]) -> PgResult<Oid> {
     if !OidIsValid(typoid) {
         return Ok(InvalidOid);
     }
-    if lsyscache::get_typisdefined(typoid)?
-        && !OidIsValid(lsyscache::get_typ_typrelid(typoid)?)
-    {
+    if lsyscache::get_typisdefined(typoid)? && !OidIsValid(lsyscache::get_typ_typrelid(typoid)?) {
         Ok(typoid)
     } else {
         Ok(InvalidOid)
@@ -1514,24 +1572,30 @@ fn func_get_detail<'mcx>(
             let target_type = FuncNameAsType(parts)?;
             if OidIsValid(target_type) {
                 let source_type = argtypes[0];
-                let iscoercion = if source_type == UNKNOWNOID
-                    && fargs.nth(0).node_tag() == NodeTag::T_Const
-                {
-                    true
-                } else {
-                    match coerce::find_coercion_pathway(target_type, source_type, COERCION_EXPLICIT)?.0
-                    {
-                        COERCION_PATH_RELABELTYPE => true,
-                        COERCION_PATH_COERCEVIAIO => {
-                            // C ISCOMPLEX looks through a domain to its base.
-                            !((source_type == RECORDOID || is_complex(source_type)?)
-                                && coerce::TypeCategory(target_type)? == TYPCATEGORY_STRING)
+                let iscoercion =
+                    if source_type == UNKNOWNOID && fargs.nth(0).node_tag() == NodeTag::T_Const {
+                        true
+                    } else {
+                        match coerce::find_coercion_pathway(
+                            target_type,
+                            source_type,
+                            COERCION_EXPLICIT,
+                        )?
+                        .0
+                        {
+                            COERCION_PATH_RELABELTYPE => true,
+                            COERCION_PATH_COERCEVIAIO => {
+                                // C ISCOMPLEX looks through a domain to its base.
+                                !((source_type == RECORDOID || is_complex(source_type)?)
+                                    && coerce::TypeCategory(target_type)? == TYPCATEGORY_STRING)
+                            }
+                            _ => false,
                         }
-                        _ => false,
-                    }
-                };
+                    };
                 if iscoercion {
-                    return Ok(FuncDetail::Coercion { rettype: target_type });
+                    return Ok(FuncDetail::Coercion {
+                        rettype: target_type,
+                    });
                 }
             }
         }
@@ -1567,9 +1631,7 @@ fn func_get_detail<'mcx>(
                 let n = argnumbers[i];
                 // SAFETY: parse analysis exclusively owns the just-built tree.
                 unsafe {
-                    arg.with_mut::<types_nodes::primnodes::NamedArgExpr, _>(|na| {
-                        na.argnumber = n
-                    })
+                    arg.with_mut::<types_nodes::primnodes::NamedArgExpr, _>(|na| na.argnumber = n)
                 }
                 .expect("node checked as NamedArgExpr");
             }
@@ -1600,10 +1662,9 @@ fn func_get_detail<'mcx>(
         let Some(src) = syscache_seams::pg_proc_proargdefaults::call(mcx, funcid)? else {
             return Err(cache_lookup_failed_function(funcid));
         };
-        let src = src
-            .unwrap_or_else(|| {
-                panic!("not enough default arguments (proargdefaults null for {funcid})")
-            });
+        let src = src.unwrap_or_else(|| {
+            panic!("not enough default arguments (proargdefaults null for {funcid})")
+        });
         let defaults = readfuncs::stringToNode(mcx, src.as_str())?;
         let Some(list) = defaults.as_list() else {
             panic!("proargdefaults of {funcid} is not a List");
@@ -1700,7 +1761,10 @@ pub fn check_srf_call_placement(
                 let encoding = mbutils::GetDatabaseEncoding();
                 // C errpositions at exprLocation(pstate->p_last_srf), the
                 // inner SRF.
-                let srf_location = pstate.p_last_srf.map(nodes_core::expr_location).unwrap_or(-1);
+                let srf_location = pstate
+                    .p_last_srf
+                    .map(nodes_core::expr_location)
+                    .unwrap_or(-1);
                 return Err(Box::new(
                     ereport(ERROR)
                         .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -1833,18 +1897,24 @@ fn srf_expr_kind_name(kind: parser_small1::ParseExprKind) -> &'static str {
 // relabel to their base, everything else lands on the declared type.
 fn post_coercion_type(actual: Oid, declared: Oid) -> PgResult<Oid> {
     use types_core::catalog::{
-        ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID,
-        ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID,
-        ANYENUMOID, ANYMULTIRANGEOID, ANYNONARRAYOID, ANYOID, ANYRANGEOID,
+        ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
+        ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
+        ANYNONARRAYOID, ANYOID, ANYRANGEOID,
     };
     if actual == declared {
         return Ok(actual);
     }
     Ok(match declared {
-        ANYOID | ANYELEMENTOID | ANYNONARRAYOID | ANYCOMPATIBLEOID
-        | ANYCOMPATIBLENONARRAYOID => actual,
-        ANYARRAYOID | ANYENUMOID | ANYRANGEOID | ANYMULTIRANGEOID | ANYCOMPATIBLEARRAYOID
-        | ANYCOMPATIBLERANGEOID | ANYCOMPATIBLEMULTIRANGEOID
+        ANYOID | ANYELEMENTOID | ANYNONARRAYOID | ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+            actual
+        }
+        ANYARRAYOID
+        | ANYENUMOID
+        | ANYRANGEOID
+        | ANYMULTIRANGEOID
+        | ANYCOMPATIBLEARRAYOID
+        | ANYCOMPATIBLERANGEOID
+        | ANYCOMPATIBLEMULTIRANGEOID
             if actual != UNKNOWNOID =>
         {
             lsyscache::getBaseType(actual)?
@@ -1922,7 +1992,11 @@ pub fn make_fn_arguments<'mcx>(
 fn name_parts<'a, 'mcx>(mcx: Mcx<'mcx>, name: &NodeList<'a>) -> PgResult<PgVec<'mcx, &'a str>> {
     let mut parts: PgVec<'mcx, &'a str> = mcx::vec_with_capacity_in(mcx, name.len())?;
     for n in name.iter() {
-        parts.push(n.as_string().expect("function name list holds String nodes").sval);
+        parts.push(
+            n.as_string()
+                .expect("function name list holds String nodes")
+                .sval,
+        );
     }
     Ok(parts)
 }
@@ -1981,7 +2055,11 @@ fn variadic_not_array(pstate: &ParseState<'_, '_>, fargs: &NodeList<'_>) -> Box<
             .errmsg("VARIADIC argument must be an array")
             .errposition(parser_errposition(pstate, loc, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -2021,10 +2099,17 @@ fn too_many_aggregate_arguments(pstate: &ParseState<'_, '_>, location: ParseLoc)
     Box::new(
         ereport(ERROR)
             .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
-            .errmsg(format!("aggregates cannot have more than {} arguments", FUNC_MAX_ARGS - 1))
+            .errmsg(format!(
+                "aggregates cannot have more than {} arguments",
+                FUNC_MAX_ARGS - 1
+            ))
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -2036,21 +2121,23 @@ fn too_many_arguments(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<Pg
     Box::new(
         ereport(ERROR)
             .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
-            .errmsg(format!("cannot pass more than {FUNC_MAX_ARGS} arguments to a function"))
+            .errmsg(format!(
+                "cannot pass more than {FUNC_MAX_ARGS} arguments to a function"
+            ))
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn wrong_object_type(
-    pstate: &ParseState<'_, '_>,
-    msg: String,
-    location: ParseLoc,
-) -> Box<PgError> {
+fn wrong_object_type(pstate: &ParseState<'_, '_>, msg: String, location: ParseLoc) -> Box<PgError> {
     let encoding = mbutils::GetDatabaseEncoding();
     Box::new(
         ereport(ERROR)
@@ -2058,7 +2145,11 @@ fn wrong_object_type(
             .errmsg(msg)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -2079,7 +2170,11 @@ fn wrong_object_type_hint(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -2119,7 +2214,11 @@ fn ambiguous_function(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -2160,6 +2259,14 @@ fn undefined_function(
         )
     };
     let encoding = mbutils::GetDatabaseEncoding();
+    // C parse_func.c (18.6): the three "does not exist" ereports' closing lines.
+    let line = if misplaced_order_by {
+        617
+    } else if proc_call {
+        627
+    } else {
+        636
+    };
     Box::new(
         ereport(ERROR)
             .errcode(ERRCODE_UNDEFINED_FUNCTION)
@@ -2167,7 +2274,11 @@ fn undefined_function(
             .errhint(hint)
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ParseFuncOrColumn")),
+            .with_error_location(ErrorLocation::new(
+                "parse_func.c",
+                line,
+                "ParseFuncOrColumn",
+            )),
     )
 }
 
@@ -2230,7 +2341,10 @@ fn func_name_not_unique(parts: &[&str]) -> Box<PgError> {
     Box::new(
         ereport(ERROR)
             .errcode(ERRCODE_AMBIGUOUS_FUNCTION)
-            .errmsg(format!("function name \"{}\" is not unique", name_list_to_string(parts)))
+            .errmsg(format!(
+                "function name \"{}\" is not unique",
+                name_list_to_string(parts)
+            ))
             .errhint("Specify the argument list to select the function unambiguously.".to_string())
             .into_error(),
     )
@@ -2271,17 +2385,26 @@ pub fn LookupFuncWithArgs(
     missing_ok: bool,
 ) -> PgResult<Oid> {
     use types_nodes::parsenodes::ObjectType::*;
-    debug_assert!(matches!(objtype, OBJECT_AGGREGATE | OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE));
+    debug_assert!(matches!(
+        objtype,
+        OBJECT_AGGREGATE | OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE
+    ));
     let objname = &func.objname;
     let objargs = &func.objargs;
     let args_unspecified = func.args_unspecified;
     let argcount = objargs.len();
     if argcount > FUNC_MAX_ARGS {
-        let noun = if objtype == OBJECT_PROCEDURE { "procedures" } else { "functions" };
+        let noun = if objtype == OBJECT_PROCEDURE {
+            "procedures"
+        } else {
+            "functions"
+        };
         return Err(Box::new(
             ereport(ERROR)
                 .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
-                .errmsg(format!("{noun} cannot have more than {FUNC_MAX_ARGS} arguments"))
+                .errmsg(format!(
+                    "{noun} cannot have more than {FUNC_MAX_ARGS} arguments"
+                ))
                 .into_error(),
         ));
     }
@@ -2304,13 +2427,21 @@ pub fn LookupFuncWithArgs(
             return Ok(InvalidOid);
         }
     }
-    let nargs: i16 = if args_unspecified { -1 } else { argcount as i16 };
+    let nargs: i16 = if args_unspecified {
+        -1
+    } else {
+        argcount as i16
+    };
 
     let parts = name_parts(scratch.mcx(), objname)?;
     let parts = parts.as_slice();
     // With an argument list the objtype filter is disabled (OBJECT_ROUTINE):
     // "object is of wrong type" beats "object doesn't exist".
-    let lookup_objtype = if args_unspecified { objtype } else { OBJECT_ROUTINE };
+    let lookup_objtype = if args_unspecified {
+        objtype
+    } else {
+        OBJECT_ROUTINE
+    };
     let mut lookup =
         lookup_func_name_internal(lookup_objtype, parts, nargs, &argoids, false, missing_ok)?;
 
@@ -2352,12 +2483,16 @@ pub fn LookupFuncWithArgs(
         Ok(oid) => {
             let prokind = lsyscache::get_func_prokind(oid)?;
             match objtype {
-                OBJECT_FUNCTION if prokind == PROKIND_PROCEDURE => {
-                    Err(wrong_prokind("%s is not a function", parts, &argoids[..argcount])?)
-                }
-                OBJECT_PROCEDURE if prokind != PROKIND_PROCEDURE => {
-                    Err(wrong_prokind("%s is not a procedure", parts, &argoids[..argcount])?)
-                }
+                OBJECT_FUNCTION if prokind == PROKIND_PROCEDURE => Err(wrong_prokind(
+                    "%s is not a function",
+                    parts,
+                    &argoids[..argcount],
+                )?),
+                OBJECT_PROCEDURE if prokind != PROKIND_PROCEDURE => Err(wrong_prokind(
+                    "%s is not a procedure",
+                    parts,
+                    &argoids[..argcount],
+                )?),
                 OBJECT_AGGREGATE if prokind != PROKIND_AGGREGATE => Err(wrong_prokind(
                     "function %s is not an aggregate",
                     parts,
@@ -2375,7 +2510,10 @@ pub fn LookupFuncWithArgs(
             };
             let mut rpt = ereport(ERROR)
                 .errcode(ERRCODE_AMBIGUOUS_FUNCTION)
-                .errmsg(format!("{noun} name \"{}\" is not unique", name_list_to_string(parts)));
+                .errmsg(format!(
+                    "{noun} name \"{}\" is not unique",
+                    name_list_to_string(parts)
+                ));
             if args_unspecified {
                 rpt = rpt.errhint(format!(
                     "Specify the argument list to select the {noun} unambiguously."
@@ -2484,7 +2622,14 @@ fn lookup_func_name_seam(
     argtypes: &[Oid],
     missing_ok: bool,
 ) -> PgResult<Oid> {
-    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes, false, missing_ok)? {
+    match lookup_func_name_internal(
+        ObjectType::OBJECT_FUNCTION,
+        parts,
+        nargs,
+        argtypes,
+        false,
+        missing_ok,
+    )? {
         Ok(oid) => Ok(oid),
         Err(true) => Err(func_name_not_unique(parts)),
         Err(false) => {
@@ -2542,7 +2687,9 @@ pub fn ParseComplexProjection<'mcx>(
         }
     }
     let tupdesc = if first_arg.as_var().is_some_and(|v| v.vartype == RECORDOID) {
-        Some(parse_func_seams::expandRecordVariable::call(mcx, pstate, first_arg, 0)?)
+        Some(parse_func_seams::expandRecordVariable::call(
+            mcx, pstate, first_arg, 0,
+        )?)
     } else {
         funcapi::get_expr_result_tupdesc(mcx, Some(first_arg), true)?
     };

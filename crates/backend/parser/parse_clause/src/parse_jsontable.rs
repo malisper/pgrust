@@ -50,8 +50,10 @@ pub(crate) fn transformJsonTable<'mcx>(
         }
     }
 
-    let mut cxt =
-        JsonTableParseContext { path_name_id: 0, path_names: mcx::PgVec::new_in(mcx) };
+    let mut cxt = JsonTableParseContext {
+        path_name_id: 0,
+        path_names: mcx::PgVec::new_in(mcx),
+    };
     let root_name = root_pathspec_node
         .as_json_table_path_spec()
         .expect("pathspec is JsonTablePathSpec")
@@ -72,8 +74,9 @@ pub(crate) fn transformJsonTable<'mcx>(
         }
     }
     // Derived only after the name write above.
-    let root_pathspec =
-        root_pathspec_node.as_json_table_path_spec().expect("pathspec is JsonTablePathSpec");
+    let root_pathspec = root_pathspec_node
+        .as_json_table_path_spec()
+        .expect("pathspec is JsonTablePathSpec");
     CheckDuplicateColumnOrPathNames(mcx, pstate, &mut cxt, &jt.columns)?;
 
     debug_assert!(!pstate.p_lateral_active);
@@ -212,8 +215,7 @@ fn transformJsonTableColumns<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let mut ordinality_found = false;
     let error_on_error = jt.on_error.is_some_and(|oe| {
-        oe.as_json_behavior().expect("JsonBehavior").btype
-            == JsonBehaviorType::JSON_BEHAVIOR_ERROR
+        oe.as_json_behavior().expect("JsonBehavior").btype == JsonBehaviorType::JSON_BEHAVIOR_ERROR
     });
     let context_item_typid = parse_expr::expr_type(tf.docexpr.expect("docexpr set"));
 
@@ -257,8 +259,7 @@ fn transformJsonTableColumns<'mcx>(
                         .typeName
                         .and_then(|n| n.as_type_name())
                         .expect("grammar sets column typeName");
-                    let (id, _md) =
-                        parse_utilcmd::typenameTypeIdAndMod(mcx, Some(&*pstate), tn)?;
+                    let (id, _md) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(&*pstate), tn)?;
                     // JTC_FORMATTED (JSON_QUERY) fits composite-ish types and
                     // explicit WRAPPER/QUOTES better than JSON_VALUE.
                     if isCompositeType(id)?
@@ -271,7 +272,11 @@ fn transformJsonTableColumns<'mcx>(
 
                 let param = Node::mk(
                     mcx,
-                    CaseTestExpr { typeId: context_item_typid, typeMod: -1, collation: 0 },
+                    CaseTestExpr {
+                        typeId: context_item_typid,
+                        typeMod: -1,
+                        collation: 0,
+                    },
                 )?;
                 let jfe = transformJsonTableColumn(mcx, eff_coltype, jtc, param, passing_args)?;
                 let ce = parse_expr::transformExpr(
@@ -306,7 +311,14 @@ fn transformJsonTableColumns<'mcx>(
     let childplan =
         transformJsonTableNestedColumns(mcx, pstate, cxt, jt, tf, passing_args, columns)?;
 
-    makeJsonTablePathScan(mcx, pathspec_node, error_on_error, col_min, col_max, childplan)
+    makeJsonTablePathScan(
+        mcx,
+        pathspec_node,
+        error_on_error,
+        col_min,
+        col_max,
+        childplan,
+    )
 }
 
 fn isCompositeType(typid: Oid) -> PgResult<bool> {
@@ -368,8 +380,8 @@ fn transformJsonTableColumn<'mcx>(
             let mut buf = stringinfo::StringInfo::new_in(mcx)?;
             buf.append_bytes(b"$.")?;
             adt_json::escape_json(&mut buf, name.as_bytes())?;
-            let path = core::str::from_utf8(buf.into_vec().leak())
-                .expect("escape_json output is UTF-8");
+            let path =
+                core::str::from_utf8(buf.into_vec().leak()).expect("escape_json output is UTF-8");
             Node::mk_a_const(
                 mcx,
                 Some(ValUnion::String(types_nodes::String { sval: path })),
@@ -380,12 +392,19 @@ fn transformJsonTableColumn<'mcx>(
 
     let returning = Node::mk_mut(
         mcx,
-        JsonReturning { format: jtc.format, typid: 0, typmod: 0 },
+        JsonReturning {
+            format: jtc.format,
+            typid: 0,
+            typmod: 0,
+        },
     )?
     .seal_ref();
     let output = Node::mk(
         mcx,
-        JsonOutput { typeName: jtc.typeName, returning: Some(returning) },
+        JsonOutput {
+            typeName: jtc.typeName,
+            returning: Some(returning),
+        },
     )?;
 
     Node::mk(
@@ -457,7 +476,10 @@ fn transformJsonTableNestedColumns<'mcx>(
         plan = Some(match plan {
             Some(p) => Node::mk(
                 mcx,
-                JsonTableSiblingJoin { lplan: Some(p), rplan: Some(nested) },
+                JsonTableSiblingJoin {
+                    lplan: Some(p),
+                    rplan: Some(nested),
+                },
             )?,
             None => nested,
         });
@@ -474,8 +496,9 @@ fn makeJsonTablePathScan<'mcx>(
     col_max: i32,
     childplan: Option<Node<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
-    let pathspec =
-        pathspec_node.as_json_table_path_spec().expect("JsonTablePathSpec");
+    let pathspec = pathspec_node
+        .as_json_table_path_spec()
+        .expect("JsonTablePathSpec");
     let pathstring = match pathspec.string.and_then(|s| s.as_a_const()).map(|c| c.val) {
         Some(Some(ValUnion::String(s))) => s.sval,
         _ => panic!("makeJsonTablePathScan: pathspec string is not an A_Const String"),
@@ -488,7 +511,13 @@ fn makeJsonTablePathScan<'mcx>(
     let d = datum::Datum::from_usize(image.leak().as_ptr() as usize);
     let value = Node::mk_const(mcx, JSONPATHOID, -1, 0, -1, d, false, false)?;
 
-    let path = Node::mk(mcx, JsonTablePath { value: Some(value), name: pathspec.name })?;
+    let path = Node::mk(
+        mcx,
+        JsonTablePath {
+            value: Some(value),
+            name: pathspec.name,
+        },
+    )?;
 
     Node::mk(
         mcx,
@@ -529,11 +558,7 @@ fn jsontable_err(
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn duplicate_name_err(
-    pstate: &ParseState<'_, '_>,
-    name: &str,
-    location: ParseLoc,
-) -> Box<PgError> {
+fn duplicate_name_err(pstate: &ParseState<'_, '_>, name: &str, location: ParseLoc) -> Box<PgError> {
     jsontable_err(
         pstate,
         types_error::ERRCODE_DUPLICATE_ALIAS,

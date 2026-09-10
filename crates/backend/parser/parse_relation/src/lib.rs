@@ -8,8 +8,8 @@ use nodes_core::node_funcs;
 use parser_small1::{
     parser_errposition, ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
 };
-use types_core::{AttrNumber, Index, InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_core::catalog::{RECORDARRAYOID, RECORDOID};
+use types_core::{AttrNumber, Index, InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_ALIAS, ERRCODE_AMBIGUOUS_COLUMN,
     ERRCODE_DUPLICATE_ALIAS, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_QUERY_CANCELED,
@@ -45,11 +45,10 @@ fn expand_nsitem_vars_at<'a, 'p, 'mcx>(
 }
 
 #[track_caller]
-fn loc(funcname: &'static str) -> ErrorLocation {
-    // pgrust is Rust: report where in OUR source this was raised.
-    // #[track_caller] resolves to the call site, not this helper.
-    let site = core::panic::Location::caller();
-    ErrorLocation::new(site.file(), site.line() as i32, funcname)
+/// C-exact wire location: parse_relation.c `line` (the ereport's closing
+/// line in PG 18.6; 0 = not yet pinned) inside `funcname`.
+fn loc(line: i32, funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new("parse_relation.c", line, funcname)
 }
 
 fn errpos(pstate: &ParseState<'_, '_>, location: ParseLoc) -> i32 {
@@ -188,7 +187,9 @@ pub fn GetNSItemByRangeTablePosn<'p, 'mcx>(
 ) -> &'mcx ParseNamespaceItem<'mcx> {
     let mut p = pstate;
     for _ in 0..sublevels_up {
-        p = p.parentParseState.expect("sublevels_up exceeds pstate depth");
+        p = p
+            .parentParseState
+            .expect("sublevels_up exceeds pstate depth");
     }
     for nsitem in p.p_namespace.iter().copied() {
         if nsitem.p_rtindex == varno {
@@ -209,7 +210,9 @@ pub fn GetNSItemByVar<'p, 'mcx>(
 ) -> &'mcx ParseNamespaceItem<'mcx> {
     let mut p = pstate;
     for _ in 0..var.varlevelsup {
-        p = p.parentParseState.expect("sublevels_up exceeds pstate depth");
+        p = p
+            .parentParseState
+            .expect("sublevels_up exceeds pstate depth");
     }
     for nsitem in p.p_namespace.iter().copied() {
         if nsitem.p_rtindex == var.varno && nsitem.p_returning_type == var.varreturningtype {
@@ -226,10 +229,15 @@ pub fn GetRTEByRangeTablePosn<'p, 'mcx>(
 ) -> &'mcx RangeTblEntry<'mcx> {
     let mut p = pstate;
     for _ in 0..sublevels_up {
-        p = p.parentParseState.expect("sublevels_up exceeds pstate depth");
+        p = p
+            .parentParseState
+            .expect("sublevels_up exceeds pstate depth");
     }
     debug_assert!(varno > 0 && varno as usize <= p.p_rtable.len());
-    p.p_rtable.nth(varno as usize - 1).as_range_tbl_entry().expect("rtable holds RangeTblEntry")
+    p.p_rtable
+        .nth(varno as usize - 1)
+        .as_range_tbl_entry()
+        .expect("rtable holds RangeTblEntry")
 }
 
 pub fn scanNSItemForColumn<'mcx>(
@@ -248,9 +256,18 @@ pub fn scanNSItemForColumn<'mcx>(
     }
 
     for (kind, what) in [
-        (ParseExprKind::EXPR_KIND_CHECK_CONSTRAINT, SysColContext::CheckConstraint),
-        (ParseExprKind::EXPR_KIND_GENERATED_COLUMN, SysColContext::GeneratedColumn),
-        (ParseExprKind::EXPR_KIND_MERGE_WHEN, SysColContext::MergeWhen),
+        (
+            ParseExprKind::EXPR_KIND_CHECK_CONSTRAINT,
+            SysColContext::CheckConstraint,
+        ),
+        (
+            ParseExprKind::EXPR_KIND_GENERATED_COLUMN,
+            SysColContext::GeneratedColumn,
+        ),
+        (
+            ParseExprKind::EXPR_KIND_MERGE_WHEN,
+            SysColContext::MergeWhen,
+        ),
     ] {
         if pstate.p_expr_kind == kind
             && (attnum as i32) < InvalidAttrNumber as i32
@@ -481,7 +498,9 @@ fn searchRangeTableForCol<'p, 'mcx>(
     let mut ps = Some(pstate);
     while let Some(p) = ps {
         for rte_node in &p.p_rtable {
-            let rte = rte_node.as_range_tbl_entry().expect("rtable holds RangeTblEntry");
+            let rte = rte_node
+                .as_range_tbl_entry()
+                .expect("rtable holds RangeTblEntry");
             if rte.rtekind == RTEKind::RTE_JOIN {
                 continue;
             }
@@ -529,7 +548,9 @@ pub fn markNullableIfNeeded<'mcx>(
     let rtindex = var.varno;
     let mut p = pstate;
     for _ in 0..var.varlevelsup {
-        p = p.parentParseState.expect("varlevelsup exceeds pstate depth");
+        p = p
+            .parentParseState
+            .expect("varlevelsup exceeds pstate depth");
     }
     if rtindex > 0 && (rtindex as usize) <= p.p_nullingrels.len() {
         let relids = &p.p_nullingrels[rtindex as usize - 1];
@@ -598,7 +619,9 @@ pub fn markVarForSelectPriv(
 ) -> PgResult<()> {
     let mut p = pstate;
     for _ in 0..var.varlevelsup {
-        p = p.parentParseState.expect("varlevelsup exceeds pstate depth");
+        p = p
+            .parentParseState
+            .expect("varlevelsup exceeds pstate depth");
     }
     markRTEForSelectPriv(mcx, p, var.varno, var.varattno)
 }
@@ -635,23 +658,39 @@ fn buildRelationAliases<'mcx>(
             next_alias += 1;
             rebuilt_alias_colnames.lappend(mcx, attrname)?;
         } else {
-            let name = core::str::from_utf8(attr.attname.name_str())
-                .expect("catalog attnames are UTF-8");
+            let name =
+                core::str::from_utf8(attr.attname.name_str()).expect("catalog attnames are UTF-8");
             attrname = Node::mk_string(mcx, str_in(mcx, name)?)?;
         }
         eref_colnames.lappend(mcx, attrname)?;
     }
 
     if next_alias < numaliases {
-        return Err(too_many_aliases(eref_aliasname, maxattrs - numdropped, numaliases));
+        return Err(too_many_aliases(
+            eref_aliasname,
+            maxattrs - numdropped,
+            numaliases,
+        ));
     }
 
-    let eref = Node::mk_mut(mcx, Alias { aliasname: Some(eref_aliasname), colnames: eref_colnames })?
-        .seal_ref();
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some(eref_aliasname),
+            colnames: eref_colnames,
+        },
+    )?
+    .seal_ref();
     let rebuilt_alias = match alias {
         Some(a) => Some(
-            Node::mk_mut(mcx, Alias { aliasname: a.aliasname, colnames: rebuilt_alias_colnames })?
-                .seal_ref() as &'mcx Alias<'mcx>,
+            Node::mk_mut(
+                mcx,
+                Alias {
+                    aliasname: a.aliasname,
+                    colnames: rebuilt_alias_colnames,
+                },
+            )?
+            .seal_ref() as &'mcx Alias<'mcx>,
         ),
         None => None,
     };
@@ -665,7 +704,9 @@ fn buildNSItemFromTupleDesc<'mcx>(
     perminfo: Option<Node<'mcx>>,
     tupdesc: &TupleDescData<'mcx>,
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
-    let rte = rte_node.as_range_tbl_entry().expect("p_rte is RangeTblEntry");
+    let rte = rte_node
+        .as_range_tbl_entry()
+        .expect("p_rte is RangeTblEntry");
     let maxattrs = tupdesc.natts as usize;
     debug_assert_eq!(maxattrs, rte.eref.expect("rte has eref").colnames.len());
 
@@ -735,7 +776,7 @@ pub fn parserOpenTable<'mcx>(
                         )
                         .errposition(errpos(pstate, relation.location))
                         .into_error()
-                        .with_error_location(loc("parserOpenTable")),
+                        .with_error_location(loc(1496, "parserOpenTable")),
                 ));
             }
             Err(undefined_table(pstate, relation))
@@ -786,8 +827,11 @@ pub fn addRangeTableEntry<'mcx>(
         .or(relation.relname)
         .expect("grammar always sets relname");
 
-    let lockmode =
-        if isLockedRefname(pstate, Some(refname)) { RowShareLock } else { AccessShareLock };
+    let lockmode = if isLockedRefname(pstate, Some(refname)) {
+        RowShareLock
+    } else {
+        AccessShareLock
+    };
 
     let rel = parserOpenTable(mcx, pstate, relation, lockmode)?;
 
@@ -816,13 +860,7 @@ pub fn addRangeTableEntry<'mcx>(
     pstate.p_rtable.lappend(mcx, rte_node)?;
     let rtindex = pstate.p_rtable.len() as i32;
 
-    let nsitem = buildNSItemFromTupleDesc(
-        mcx,
-        rte_node,
-        rtindex,
-        Some(perminfo),
-        &rel.rd_att,
-    )?;
+    let nsitem = buildNSItemFromTupleDesc(mcx, rte_node, rtindex, Some(perminfo), &rel.rd_att)?;
 
     table::table_close(rel, NoLock)?;
 
@@ -870,13 +908,7 @@ pub fn addRangeTableEntryForRelation<'mcx>(
     pstate.p_rtable.lappend(mcx, rte_node)?;
     let rtindex = pstate.p_rtable.len() as i32;
 
-    let nsitem = buildNSItemFromTupleDesc(
-        mcx,
-        rte_node,
-        rtindex,
-        Some(perminfo),
-        &rel.rd_att,
-    )?;
+    let nsitem = buildNSItemFromTupleDesc(mcx, rte_node, rtindex, Some(perminfo), &rel.rd_att)?;
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
@@ -924,15 +956,15 @@ fn GetColumnDefCollation(
         typcollation
     };
     if result != InvalidOid && typcollation == InvalidOid {
-        let typename = format_type::format_type_be(type_oid)
-            .unwrap_or_else(|_| format!("type {type_oid}"));
+        let typename =
+            format_type::format_type_be(type_oid).unwrap_or_else(|_| format!("type {type_oid}"));
         return Err(Box::new(
             elog::ereport(ERROR)
                 .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
                 .errmsg(format!("collations are not supported by type {typename}"))
                 .errposition(errpos(pstate, location))
                 .into_error()
-                .with_error_location(loc("GetColumnDefCollation")),
+                .with_error_location(loc(0, "GetColumnDefCollation")),
         ));
     }
     Ok(result)
@@ -953,7 +985,7 @@ fn coldeflist_error(
             .errmsg(msg)
             .errposition(errpos(pstate, location))
             .into_error()
-            .with_error_location(loc("addRangeTableEntryForFunction")),
+            .with_error_location(loc(0, "addRangeTableEntryForFunction")),
     )
 }
 
@@ -987,8 +1019,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
         if !coldeflist.is_nil() {
             match resolved.class {
                 funcapi::TypeFuncClass::Record => {}
-                funcapi::TypeFuncClass::Composite
-                | funcapi::TypeFuncClass::CompositeDomain => {
+                funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
                     let msg = if nodes_core::node_funcs::expr_type(funcexpr)
                         == types_core::catalog::RECORDOID
                     {
@@ -1020,8 +1051,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
             return Err(coldeflist_error(
                 pstate,
                 ERRCODE_SYNTAX_ERROR,
-                "a column definition list is required for functions returning \"record\""
-                    .into(),
+                "a column definition list is required for functions returning \"record\"".into(),
                 nodes_core::node_funcs::expr_location(funcexpr),
             ));
         }
@@ -1041,8 +1071,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                 })
             }
             funcapi::TypeFuncClass::Scalar => {
-                let colname =
-                    chooseScalarFunctionAlias(mcx, funcexpr, funcname, alias, nfuncs)?;
+                let colname = chooseScalarFunctionAlias(mcx, funcexpr, funcname, alias, nfuncs)?;
                 let typmod = nodes_core::node_funcs::expr_typmod(funcexpr);
                 let collation = nodes_core::node_funcs::expr_collation(funcexpr);
                 let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
@@ -1091,11 +1120,12 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                     // C typenameTypeIdAndMod has no typtype gate; record and
                     // record[] pass here, checked below by
                     // CheckAttributeNamesTypes(CHKATYPE_ANYRECORD).
-                    let (attrtype, attrtypmod) = parse_utilcmd_seams::typename_type_id_and_mod_any::call(
-                        mcx,
-                        Some(pstate),
-                        tn,
-                    )?;
+                    let (attrtype, attrtypmod) =
+                        parse_utilcmd_seams::typename_type_id_and_mod_any::call(
+                            mcx,
+                            Some(pstate),
+                            tn,
+                        )?;
                     let attrcollation = GetColumnDefCollation(pstate, n, attrtype)?;
                     let attno = (i + 1) as AttrNumber;
                     tupdesc::TupleDescInitEntry(
@@ -1107,8 +1137,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                         0,
                     )?;
                     tupdesc::TupleDescInitEntryCollation(&mut d, attno, attrcollation);
-                    funccolnames
-                        .lappend(mcx, Node::mk_string(mcx, str_in(mcx, attrname)?)?)?;
+                    funccolnames.lappend(mcx, Node::mk_string(mcx, str_in(mcx, attrname)?)?)?;
                     funccoltypes.lappend(mcx, attrtype)?;
                     funccoltypmods.lappend(mcx, attrtypmod)?;
                     funccolcollations.lappend(mcx, attrcollation)?;
@@ -1156,9 +1185,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
             return Err(coldeflist_error(
                 pstate,
                 ERRCODE_TOO_MANY_COLUMNS,
-                format!(
-                    "functions in FROM can return at most {MaxTupleAttributeNumber} columns"
-                ),
+                format!("functions in FROM can return at most {MaxTupleAttributeNumber} columns"),
                 nodes_core::node_funcs::expr_location_list(&funcexprs),
             ));
         }
@@ -1205,13 +1232,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
     pstate.p_rtable.lappend(mcx, rte_node)?;
     let rtindex = pstate.p_rtable.len() as i32;
 
-    let nsitem = buildNSItemFromTupleDesc(
-        mcx,
-        rte_node,
-        rtindex,
-        None,
-        &tupdesc,
-    )?;
+    let nsitem = buildNSItemFromTupleDesc(mcx, rte_node, rtindex, None, &tupdesc)?;
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
@@ -1239,7 +1260,7 @@ pub fn addRangeTableEntryForValues<'mcx>(
                      {numaliases} columns specified"
                 ))
                 .into_error()
-                .with_error_location(loc("addRangeTableEntryForValues")),
+                .with_error_location(loc(0, "addRangeTableEntryForValues")),
         ));
     }
 
@@ -1251,8 +1272,14 @@ pub fn addRangeTableEntryForValues<'mcx>(
         };
         eref_colnames.lappend(mcx, name)?;
     }
-    let eref = Node::mk_mut(mcx, Alias { aliasname: Some(refname), colnames: eref_colnames })?
-        .seal_ref();
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some(refname),
+            colnames: eref_colnames,
+        },
+    )?
+    .seal_ref();
 
     let rte = RangeTblEntry {
         rtekind: RTEKind::RTE_VALUES,
@@ -1345,8 +1372,14 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
             numaliases,
         ));
     }
-    let eref = Node::mk_mut(mcx, Alias { aliasname: Some(refname), colnames: eref_colnames })?
-        .seal_ref();
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some(refname),
+            colnames: eref_colnames,
+        },
+    )?
+    .seal_ref();
 
     let rte = RangeTblEntry {
         rtekind: RTEKind::RTE_TABLEFUNC,
@@ -1406,20 +1439,19 @@ fn cte_without_returning(
     Box::new(
         elog::ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(format!("WITH query \"{ctename}\" does not have a RETURNING clause"))
+            .errmsg(format!(
+                "WITH query \"{ctename}\" does not have a RETURNING clause"
+            ))
             .errposition(errpos(pstate, location))
             .into_error()
-            .with_error_location(loc("addRangeTableEntryForCTE")),
+            .with_error_location(loc(0, "addRangeTableEntryForCTE")),
     )
 }
 
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn too_many_tablefunc_columns(
-    pstate: &ParseState<'_, '_>,
-    location: ParseLoc,
-) -> Box<PgError> {
+fn too_many_tablefunc_columns(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
     let encoding = mbutils::GetDatabaseEncoding();
     Box::new(
         elog::ereport(ERROR)
@@ -1428,9 +1460,11 @@ fn too_many_tablefunc_columns(
                 "functions in FROM can return at most {} columns",
                 types_tuple::htup::MaxTupleAttributeNumber
             ))
-            .errposition(parser_small1::parser_errposition(pstate, location, encoding))
+            .errposition(parser_small1::parser_errposition(
+                pstate, location, encoding,
+            ))
             .into_error()
-            .with_error_location(loc("addRangeTableEntryForTableFunc")),
+            .with_error_location(loc(0, "addRangeTableEntryForTableFunc")),
     )
 }
 
@@ -1446,7 +1480,7 @@ fn tablefunc_too_many_aliases(func: &str, available: usize, specified: usize) ->
                  columns specified"
             ))
             .into_error()
-            .with_error_location(loc("addRangeTableEntryForTableFunc")),
+            .with_error_location(loc(0, "addRangeTableEntryForTableFunc")),
     )
 }
 
@@ -1489,9 +1523,20 @@ pub fn addRangeTableEntryForSubquery<'mcx>(
         });
     }
     if columns.len() < numaliases {
-        return Err(too_many_aliases(aliasname.unwrap_or(""), columns.len(), numaliases));
+        return Err(too_many_aliases(
+            aliasname.unwrap_or(""),
+            columns.len(),
+            numaliases,
+        ));
     }
-    let eref = Node::mk_mut(mcx, Alias { aliasname, colnames: eref_colnames })?.seal_ref();
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname,
+            colnames: eref_colnames,
+        },
+    )?
+    .seal_ref();
 
     let rte = RangeTblEntry {
         rtekind: RTEKind::RTE_SUBQUERY,
@@ -1597,12 +1642,19 @@ pub fn addRangeTableEntryForCTE<'mcx>(
         if q.commandType != types_nodes::nodes_enums::CmdType::CMD_SELECT
             && q.returningList.is_nil()
         {
-            return Err(cte_without_returning(pstate, cte.ctename.unwrap_or(""), rv.location));
+            return Err(cte_without_returning(
+                pstate,
+                cte.ctename.unwrap_or(""),
+                rv.location,
+            ));
         }
     }
 
     let alias = rv.alias;
-    let refname = alias.and_then(|a| a.aliasname).or(cte.ctename).expect("cte name");
+    let refname = alias
+        .and_then(|a| a.aliasname)
+        .or(cte.ctename)
+        .expect("cte name");
     let (aliasname, mut eref_colnames) = match alias {
         Some(a) => (a.aliasname, a.colnames.clone_in(mcx)?),
         None => (Some(refname), NodeList::nil()),
@@ -1621,31 +1673,54 @@ pub fn addRangeTableEntryForCTE<'mcx>(
     // The SEARCH/CYCLE output columns exist on the RTE before the rewriter
     // adds them to the CTE itself; inside the CTE they are star-invisible.
     let mut n_dontexpand_columns = 0usize;
-    if let Some(sc) = cte.search_clause.map(|n| n.as_cte_search_clause().expect("search clause")) {
-        eref_colnames
-            .lappend(mcx, Node::mk_string(mcx, sc.search_seq_column.expect("SET column"))?)?;
+    if let Some(sc) = cte
+        .search_clause
+        .map(|n| n.as_cte_search_clause().expect("search clause"))
+    {
+        eref_colnames.lappend(
+            mcx,
+            Node::mk_string(mcx, sc.search_seq_column.expect("SET column"))?,
+        )?;
         coltypes.lappend(
             mcx,
-            if sc.search_breadth_first { RECORDOID } else { RECORDARRAYOID },
+            if sc.search_breadth_first {
+                RECORDOID
+            } else {
+                RECORDARRAYOID
+            },
         )?;
         coltypmods.lappend(mcx, -1)?;
         colcollations.lappend(mcx, InvalidOid)?;
         n_dontexpand_columns += 1;
     }
-    if let Some(cc) = cte.cycle_clause.map(|n| n.as_cte_cycle_clause().expect("cycle clause")) {
-        eref_colnames
-            .lappend(mcx, Node::mk_string(mcx, cc.cycle_mark_column.expect("SET column"))?)?;
+    if let Some(cc) = cte
+        .cycle_clause
+        .map(|n| n.as_cte_cycle_clause().expect("cycle clause"))
+    {
+        eref_colnames.lappend(
+            mcx,
+            Node::mk_string(mcx, cc.cycle_mark_column.expect("SET column"))?,
+        )?;
         coltypes.lappend(mcx, cc.cycle_mark_type)?;
         coltypmods.lappend(mcx, cc.cycle_mark_typmod)?;
         colcollations.lappend(mcx, cc.cycle_mark_collation)?;
-        eref_colnames
-            .lappend(mcx, Node::mk_string(mcx, cc.cycle_path_column.expect("USING column"))?)?;
+        eref_colnames.lappend(
+            mcx,
+            Node::mk_string(mcx, cc.cycle_path_column.expect("USING column"))?,
+        )?;
         coltypes.lappend(mcx, RECORDARRAYOID)?;
         coltypmods.lappend(mcx, -1)?;
         colcollations.lappend(mcx, InvalidOid)?;
         n_dontexpand_columns += 2;
     }
-    let eref = Node::mk_mut(mcx, Alias { aliasname, colnames: eref_colnames })?.seal_ref();
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname,
+            colnames: eref_colnames,
+        },
+    )?
+    .seal_ref();
 
     let rte = RangeTblEntry {
         rtekind: RTEKind::RTE_CTE,
@@ -1722,8 +1797,7 @@ pub fn addRangeTableEntryForENR<'mcx>(
     debug_assert!(enrmd.enrtype == queryenvironment::ENR_NAMED_TUPLESTORE);
     let tupdesc = queryenvironment::ENRMetadataGetTupDesc(mcx, enrmd)?;
 
-    let (eref, rebuilt_alias) =
-        buildRelationAliases(mcx, &tupdesc, alias, str_in(mcx, refname)?)?;
+    let (eref, rebuilt_alias) = buildRelationAliases(mcx, &tupdesc, alias, str_in(mcx, refname)?)?;
 
     let mut coltypes = types_nodes::list::OidList::nil();
     let mut coltypmods = types_nodes::list::IntList::nil();
@@ -1765,13 +1839,7 @@ pub fn addRangeTableEntryForENR<'mcx>(
     pstate.p_rtable.lappend(mcx, rte_node)?;
     let rtindex = pstate.p_rtable.len() as i32;
 
-    let nsitem = buildNSItemFromTupleDesc(
-        mcx,
-        rte_node,
-        rtindex,
-        None,
-        &tupdesc,
-    )?;
+    let nsitem = buildNSItemFromTupleDesc(mcx, rte_node, rtindex, None, &tupdesc)?;
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
@@ -1789,7 +1857,9 @@ pub fn addRangeTableEntryForGroup<'mcx>(
     let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> =
         mcx::vec_with_capacity_in(mcx, groupClauses.len())?;
     for (i, te_node) in groupClauses.iter().enumerate() {
-        let te = te_node.as_target_entry().expect("groupClauses are TargetEntries");
+        let te = te_node
+            .as_target_entry()
+            .expect("groupClauses are TargetEntries");
         eref_colnames.lappend(mcx, Node::mk_string(mcx, te.resname.unwrap_or("?column?"))?)?;
         // C copyObject(te->expr): the sealed expr subtree is shared read-only.
         groupexprs.lappend(mcx, te.expr)?;
@@ -1805,9 +1875,14 @@ pub fn addRangeTableEntryForGroup<'mcx>(
             p_dontexpand: false,
         });
     }
-    let eref =
-        Node::mk_mut(mcx, Alias { aliasname: Some("*GROUP*"), colnames: eref_colnames })?
-            .seal_ref();
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("*GROUP*"),
+            colnames: eref_colnames,
+        },
+    )?
+    .seal_ref();
 
     let rte = RangeTblEntry {
         rtekind: RTEKind::RTE_GROUP,
@@ -1895,9 +1970,20 @@ pub fn addRangeTableEntryForJoin<'mcx>(
         eref_colnames.lappend(mcx, colnames.nth(i))?;
     }
     if numaliases > colnames.len() {
-        return Err(too_many_join_aliases(aliasname.unwrap_or(""), colnames.len(), numaliases));
+        return Err(too_many_join_aliases(
+            aliasname.unwrap_or(""),
+            colnames.len(),
+            numaliases,
+        ));
     }
-    let eref = Node::mk_mut(mcx, Alias { aliasname, colnames: eref_colnames })?.seal_ref();
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname,
+            colnames: eref_colnames,
+        },
+    )?
+    .seal_ref();
 
     // Joins are never checked for access rights: no addRTEPermissionInfo.
     let rte = RangeTblEntry {
@@ -1960,7 +2046,11 @@ pub fn addRTEPermissionInfo<'mcx>(
 
     let perminfo = Node::mk(
         mcx,
-        RTEPermissionInfo { relid: rte.relid, inh: rte.inh, ..Default::default() },
+        RTEPermissionInfo {
+            relid: rte.relid,
+            inh: rte.inh,
+            ..Default::default()
+        },
     )?;
     rteperminfos.lappend(mcx, perminfo)?;
     rte.perminfoindex = rteperminfos.len() as Index;
@@ -1975,7 +2065,9 @@ pub fn getRTEPermissionInfo<'mcx>(
         return Err(bad_perminfo_index(rte));
     }
     let node = rteperminfos.nth(rte.perminfoindex as usize - 1);
-    let perminfo = node.as_rte_permission_info().expect("rteperminfos holds RTEPermissionInfo");
+    let perminfo = node
+        .as_rte_permission_info()
+        .expect("rteperminfos holds RTEPermissionInfo");
     if perminfo.relid != rte.relid {
         return Err(perminfo_relid_mismatch(rte, perminfo.relid));
     }
@@ -2161,9 +2253,7 @@ pub fn expandRTE<'mcx>(
             }
             Ok((colnames, colvars))
         }
-        RTEKind::RTE_JOIN => {
-            expandJoin(mcx, rte, rtindex, sublevels_up, returning_type, location)
-        }
+        RTEKind::RTE_JOIN => expandJoin(mcx, rte, rtindex, sublevels_up, returning_type, location),
         // These expose no columns.
         RTEKind::RTE_RESULT | RTEKind::RTE_GROUP => Ok((NodeList::nil(), NodeList::nil())),
     }
@@ -2184,7 +2274,12 @@ fn expandJoin<'mcx>(
     assert_eq!(eref.colnames.len(), rte.joinaliasvars.len());
     let mut colnames = NodeList::nil();
     let mut colvars = NodeList::nil();
-    for (i, (colname, avar)) in eref.colnames.iter().zip(rte.joinaliasvars.iter()).enumerate() {
+    for (i, (colname, avar)) in eref
+        .colnames
+        .iter()
+        .zip(rte.joinaliasvars.iter())
+        .enumerate()
+    {
         // C parse_relation.c: a dropped join column is a NULL cell; this port
         // marks it with a null Const (AcquireRewriteLocks). Omit dropped columns
         // (the include_dropped=false behavior used by "join.*" expansion) rather
@@ -2291,10 +2386,10 @@ fn expandFunction<'mcx>(
         } else {
             let resolved = funcapi::get_expr_result_type(mcx, Some(funcexpr))?;
             match resolved.class {
-                funcapi::TypeFuncClass::Composite
-                | funcapi::TypeFuncClass::CompositeDomain => {
-                    let tupdesc =
-                        resolved.result_tuple_desc.expect("composite result carries a tupdesc");
+                funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
+                    let tupdesc = resolved
+                        .result_tuple_desc
+                        .expect("composite result carries a tupdesc");
                     debug_assert_eq!(rtfunc.funccolcount, tupdesc.natts);
                     let (names, vars) = expandTupleDesc(
                         mcx,
@@ -2342,10 +2437,18 @@ fn expandFunction<'mcx>(
     }
 
     if rte.funcordinality {
-        colnames.lappend(mcx, *eref.colnames.as_slice().last().expect("ordinality alias"))?;
+        colnames.lappend(
+            mcx,
+            *eref.colnames.as_slice().last().expect("ordinality alias"),
+        )?;
         colvars.lappend(
             mcx,
-            mk_var(types_core::catalog::INT8OID, -1, InvalidOid, atts_done as i32 + 1)?,
+            mk_var(
+                types_core::catalog::INT8OID,
+                -1,
+                InvalidOid,
+                atts_done as i32 + 1,
+            )?,
         )?;
     }
 
@@ -2427,7 +2530,10 @@ fn expandTupleDesc<'mcx>(
         }
 
         let label = if aliascell < aliases.len() {
-            let l = aliases[aliascell].as_string().expect("eref colnames are String nodes").sval;
+            let l = aliases[aliascell]
+                .as_string()
+                .expect("eref colnames are String nodes")
+                .sval;
             aliascell += 1;
             l
         } else {
@@ -2471,7 +2577,10 @@ pub fn expandNSItemVars<'mcx>(
     let mut vars = NodeList::nil();
     let mut colnames = NodeList::nil();
     for (colindex, colnameval) in nsitem.p_names.colnames.iter().enumerate() {
-        let colname = colnameval.as_string().expect("eref colnames are String nodes").sval;
+        let colname = colnameval
+            .as_string()
+            .expect("eref colnames are String nodes")
+            .sval;
         let nscol = &nsitem.p_nscolumns[colindex];
         if nscol.p_dontexpand {
             continue;
@@ -2526,7 +2635,10 @@ pub fn expandNSItemAttrs<'mcx>(
         let label = name.as_string().expect("colnames are String nodes").sval;
         let resno = pstate.p_next_resno as AttrNumber;
         pstate.p_next_resno += 1;
-        te_list.lappend(mcx, Node::mk_target_entry(mcx, var_node, resno, Some(label), false)?)?;
+        te_list.lappend(
+            mcx,
+            Node::mk_target_entry(mcx, var_node, resno, Some(label), false)?,
+        )?;
         if require_col_privs {
             let var = var_node.as_var().expect("expandNSItemVars yields Vars");
             markVarForSelectPriv(mcx, pstate, var)?;
@@ -2569,12 +2681,18 @@ pub fn errorMissingRTE<'mcx>(
 
     let b = elog::ereport(ERROR).errcode(ERRCODE_UNDEFINED_TABLE);
     let b = if let Some(badAlias) = badAlias {
-        b.errmsg(format!("invalid reference to FROM-clause entry for table \"{relname}\""))
-            .errhint(format!("Perhaps you meant to reference the table alias \"{badAlias}\"."))
+        b.errmsg(format!(
+            "invalid reference to FROM-clause entry for table \"{relname}\""
+        ))
+        .errhint(format!(
+            "Perhaps you meant to reference the table alias \"{badAlias}\"."
+        ))
     } else if let Some(rte) = rte {
         let eref_alias = rte.eref.and_then(|e| e.aliasname).unwrap_or("");
         let b = b
-            .errmsg(format!("invalid reference to FROM-clause entry for table \"{relname}\""))
+            .errmsg(format!(
+                "invalid reference to FROM-clause entry for table \"{relname}\""
+            ))
             .errdetail(format!(
                 "There is an entry for table \"{eref_alias}\", but it cannot be referenced \
                  from this part of the query."
@@ -2590,7 +2708,7 @@ pub fn errorMissingRTE<'mcx>(
     Box::new(
         b.errposition(errpos(pstate, relation.location))
             .into_error()
-            .with_error_location(loc("errorMissingRTE")),
+            .with_error_location(loc(0, "errorMissingRTE")),
     )
 }
 
@@ -2605,7 +2723,10 @@ fn searchRangeTableForRel<'p, 'mcx>(
     let (cte_levelsup, isenr) = if relation.schemaname.is_none() {
         match scanNameSpaceForCTE(pstate, refname) {
             Some((_, levelsup)) => (Some(levelsup), false),
-            None => (None, parser_small1::name_matches_visible_ENR(pstate, refname)),
+            None => (
+                None,
+                parser_small1::name_matches_visible_ENR(pstate, refname),
+            ),
         }
     } else {
         (None, false)
@@ -2621,7 +2742,9 @@ fn searchRangeTableForRel<'p, 'mcx>(
     let mut levelsup: Index = 0;
     while let Some(p) = ps {
         for rte_node in &p.p_rtable {
-            let rte = rte_node.as_range_tbl_entry().expect("rtable holds RangeTblEntry");
+            let rte = rte_node
+                .as_range_tbl_entry()
+                .expect("rtable holds RangeTblEntry");
             if rte.rtekind == RTEKind::RTE_RELATION && OidIsValid(relId) && rte.relid == relId {
                 return Ok(Some(rte));
             }
@@ -2631,9 +2754,7 @@ fn searchRangeTableForRel<'p, 'mcx>(
             {
                 return Ok(Some(rte));
             }
-            if rte.rtekind == RTEKind::RTE_NAMEDTUPLESTORE
-                && isenr
-                && rte.enrname == Some(refname)
+            if rte.rtekind == RTEKind::RTE_NAMEDTUPLESTORE && isenr && rte.enrname == Some(refname)
             {
                 return Ok(Some(rte));
             }
@@ -2665,7 +2786,9 @@ pub fn errorMissingColumn(
     };
 
     if let Some(rexact1) = state.rexact1 {
-        let b = elog::ereport(ERROR).errcode(ERRCODE_UNDEFINED_COLUMN).errmsg(msg);
+        let b = elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_COLUMN)
+            .errmsg(msg);
         let b = if state.rexact2.is_some() {
             let b = b.errdetail(format!(
                 "There are columns named \"{colname}\", but they are in tables that \
@@ -2693,7 +2816,7 @@ pub fn errorMissingColumn(
         return Box::new(
             b.errposition(errpos(pstate, location))
                 .into_error()
-                .with_error_location(loc("errorMissingColumn")),
+                .with_error_location(loc(0, "errorMissingColumn")),
         );
     }
 
@@ -2710,7 +2833,9 @@ pub fn errorMissingColumn(
         rte.eref.and_then(|e| e.aliasname).unwrap_or("")
     }
 
-    let b = elog::ereport(ERROR).errcode(ERRCODE_UNDEFINED_COLUMN).errmsg(msg);
+    let b = elog::ereport(ERROR)
+        .errcode(ERRCODE_UNDEFINED_COLUMN)
+        .errmsg(msg);
     let b = match (state.rfirst, state.rsecond) {
         (Some(rfirst), None) => b.errhint(format!(
             "Perhaps you meant to reference the column \"{}.{}\".",
@@ -2729,7 +2854,7 @@ pub fn errorMissingColumn(
     Box::new(
         b.errposition(errpos(pstate, location))
             .into_error()
-            .with_error_location(loc("errorMissingColumn")),
+            .with_error_location(loc(3859, "errorMissingColumn")),
     )
 }
 
@@ -2803,7 +2928,7 @@ fn ambiguous_table_ref(
             .errmsg(format!("table reference \"{refname}\" is ambiguous"))
             .errposition(errpos(pstate, location))
             .into_error()
-            .with_error_location(loc("scanNameSpaceForRefname")),
+            .with_error_location(loc(0, "scanNameSpaceForRefname")),
     )
 }
 
@@ -2821,7 +2946,7 @@ fn ambiguous_table_relid(
             .errmsg(format!("table reference {relid} is ambiguous"))
             .errposition(errpos(pstate, location))
             .into_error()
-            .with_error_location(loc("scanNameSpaceForRelid")),
+            .with_error_location(loc(0, "scanNameSpaceForRelid")),
     )
 }
 
@@ -2839,7 +2964,7 @@ fn ambiguous_column_ref(
             .errmsg(format!("column reference \"{colname}\" is ambiguous"))
             .errposition(errpos(pstate, location))
             .into_error()
-            .with_error_location(loc("colNameToVar")),
+            .with_error_location(loc(0, "colNameToVar")),
     )
 }
 
@@ -2852,11 +2977,14 @@ fn bad_lateral_ref<'p, 'mcx>(
     location: ParseLoc,
 ) -> Box<PgError> {
     let refname = nsitem.p_names.aliasname.unwrap_or("");
-    let is_target =
-        pstate.p_target_nsitem.is_some_and(|t| t.p_rte.ptr_eq(nsitem.p_rte));
+    let is_target = pstate
+        .p_target_nsitem
+        .is_some_and(|t| t.p_rte.ptr_eq(nsitem.p_rte));
     let b = elog::ereport(ERROR)
         .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
-        .errmsg(format!("invalid reference to FROM-clause entry for table \"{refname}\""));
+        .errmsg(format!(
+            "invalid reference to FROM-clause entry for table \"{refname}\""
+        ));
     let b = if is_target {
         b.errhint(format!(
             "There is an entry for table \"{refname}\", but it cannot be referenced from \
@@ -2868,7 +2996,7 @@ fn bad_lateral_ref<'p, 'mcx>(
     Box::new(
         b.errposition(errpos(pstate, location))
             .into_error()
-            .with_error_location(loc("check_lateral_ref_ok")),
+            .with_error_location(loc(0, "check_lateral_ref_ok")),
     )
 }
 
@@ -2904,7 +3032,7 @@ fn bad_system_column_context(
             .errmsg(msg)
             .errposition(errpos(pstate, location))
             .into_error()
-            .with_error_location(loc("scanNSItemForColumn")),
+            .with_error_location(loc(0, "scanNSItemForColumn")),
     )
 }
 
@@ -2921,7 +3049,7 @@ fn dropped_column(nsitem: &ParseNamespaceItem<'_>, colname: &str) -> Box<PgError
                 nsitem.p_names.aliasname.unwrap_or("")
             ))
             .into_error()
-            .with_error_location(loc("scanNSItemForColumn")),
+            .with_error_location(loc(0, "scanNSItemForColumn")),
     )
 }
 
@@ -2933,9 +3061,12 @@ fn undefined_table(
     relation: &types_nodes::RangeVar<'_>,
 ) -> Box<PgError> {
     let relname = relation.relname.expect("grammar always sets relname");
-    let msg = match relation.schemaname {
-        Some(schemaname) => format!("relation \"{schemaname}.{relname}\" does not exist"),
-        None => format!("relation \"{relname}\" does not exist"),
+    let (msg, line) = match relation.schemaname {
+        Some(schemaname) => (
+            format!("relation \"{schemaname}.{relname}\" does not exist"),
+            1480,
+        ),
+        None => (format!("relation \"{relname}\" does not exist"), 1501),
     };
     Box::new(
         elog::ereport(ERROR)
@@ -2943,7 +3074,7 @@ fn undefined_table(
             .errmsg(msg)
             .errposition(errpos(pstate, relation.location))
             .into_error()
-            .with_error_location(loc("parserOpenTable")),
+            .with_error_location(loc(line, "parserOpenTable")),
     )
 }
 
@@ -2956,8 +3087,8 @@ fn unsupported_function_return_type(
     rettype: Oid,
     location: ParseLoc,
 ) -> Box<PgError> {
-    let typename = format_type::format_type_be(rettype)
-        .unwrap_or_else(|_| format!("type {rettype}"));
+    let typename =
+        format_type::format_type_be(rettype).unwrap_or_else(|_| format!("type {rettype}"));
     Box::new(
         elog::ereport(ERROR)
             .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
@@ -2966,7 +3097,7 @@ fn unsupported_function_return_type(
             ))
             .errposition(errpos(pstate, location))
             .into_error()
-            .with_error_location(loc("addRangeTableEntryForFunction")),
+            .with_error_location(loc(0, "addRangeTableEntryForFunction")),
     )
 }
 
@@ -2985,7 +3116,14 @@ pub fn get_rte_attribute_name<'mcx>(
     }
     let colname = |alias: &Alias<'mcx>| -> Option<&'mcx str> {
         if attnum > 0 && (attnum as usize) <= alias.colnames.len() {
-            Some(alias.colnames.nth(attnum as usize - 1).as_string().expect("colname String").sval)
+            Some(
+                alias
+                    .colnames
+                    .nth(attnum as usize - 1)
+                    .as_string()
+                    .expect("colname String")
+                    .sval,
+            )
         } else {
             None
         }
@@ -3061,7 +3199,7 @@ fn too_many_aliases(aliasname: &str, available: usize, specified: usize) -> Box<
                  columns specified"
             ))
             .into_error()
-            .with_error_location(loc("buildRelationAliases")),
+            .with_error_location(loc(0, "buildRelationAliases")),
     )
 }
 
@@ -3074,7 +3212,7 @@ fn too_many_join_columns() -> Box<PgError> {
             .errcode(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
             .errmsg(format!("joins can have at most {} columns", i16::MAX))
             .into_error()
-            .with_error_location(loc("addRangeTableEntryForJoin")),
+            .with_error_location(loc(0, "addRangeTableEntryForJoin")),
     )
 }
 
@@ -3090,7 +3228,7 @@ fn too_many_join_aliases(aliasname: &str, available: usize, specified: usize) ->
                  {specified} columns specified"
             ))
             .into_error()
-            .with_error_location(loc("addRangeTableEntryForJoin")),
+            .with_error_location(loc(0, "addRangeTableEntryForJoin")),
     )
 }
 
@@ -3101,9 +3239,11 @@ fn duplicate_table_name(aliasname: &str) -> Box<PgError> {
     Box::new(
         elog::ereport(ERROR)
             .errcode(ERRCODE_DUPLICATE_ALIAS)
-            .errmsg(format!("table name \"{aliasname}\" specified more than once"))
+            .errmsg(format!(
+                "table name \"{aliasname}\" specified more than once"
+            ))
             .into_error()
-            .with_error_location(loc("checkNameSpaceConflicts")),
+            .with_error_location(loc(474, "checkNameSpaceConflicts")),
     )
 }
 
@@ -3116,7 +3256,7 @@ fn bad_perminfo_index(rte: &RangeTblEntry<'_>) -> Box<PgError> {
             "invalid perminfoindex {} in RTE with relid {}",
             rte.perminfoindex, rte.relid
         ))
-        .with_error_location(loc("getRTEPermissionInfo")),
+        .with_error_location(loc(0, "getRTEPermissionInfo")),
     )
 }
 
@@ -3130,7 +3270,7 @@ fn perminfo_relid_mismatch(rte: &RangeTblEntry<'_>, perminfo_relid: Oid) -> Box<
              (with relid={})",
             rte.perminfoindex, perminfo_relid, rte.relid
         ))
-        .with_error_location(loc("getRTEPermissionInfo")),
+        .with_error_location(loc(0, "getRTEPermissionInfo")),
     )
 }
 
@@ -3143,7 +3283,8 @@ impl<'mcx> UsesTempRelation<'mcx> {
         for item in q.rtable.iter() {
             let rte = item.as_range_tbl_entry().expect("rtable entry");
             if rte.rtekind == RTEKind::RTE_RELATION {
-                let rel = relation_seams::relation_open::call(self.mcx, rte.relid, AccessShareLock)?;
+                let rel =
+                    relation_seams::relation_open::call(self.mcx, rte.relid, AccessShareLock)?;
                 let relpersistence = rel.rd_rel.relpersistence;
                 rel.close(AccessShareLock)?;
                 if relpersistence == types_core::catalog::RELPERSISTENCE_TEMP {

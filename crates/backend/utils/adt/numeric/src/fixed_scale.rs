@@ -230,7 +230,9 @@ mod tests {
     // Parse via the production numeric_in path so fit/unpack are tested
     // against PG-canonical images.
     fn img(s: &str) -> NumericImage {
-        crate::io::numeric_in(s, -1, None).expect("parse").expect("non-soft parse")
+        crate::io::numeric_in(s, -1, None)
+            .expect("parse")
+            .expect("non-soft parse")
     }
 
     /// NUMERIC(P,S)-coerced image — the production shape the fast lane sees.
@@ -324,7 +326,10 @@ mod tests {
 
     #[test]
     fn budget_boundary_is_exact() {
-        assert_eq!(fixed_scale_fit(img("36028797018963967").num(), 0), Some(BUDGET));
+        assert_eq!(
+            fixed_scale_fit(img("36028797018963967").num(), 0),
+            Some(BUDGET)
+        );
         assert_eq!(fixed_scale_fit(img("36028797018963968").num(), 0), None);
         assert_eq!(
             fixed_scale_fit(img("-36028797018963967").num(), 0),
@@ -427,11 +432,10 @@ mod tests {
 
     #[test]
     fn election_packs_uniform_chunk() {
-        let imgs: Vec<NumericImage> =
-            ["1.50", "2.75", "0.00", "-0.25", "360287970189639.67"]
-                .iter()
-                .map(|s| img_ps(s, 20, 2))
-                .collect();
+        let imgs: Vec<NumericImage> = ["1.50", "2.75", "0.00", "-0.25", "360287970189639.67"]
+            .iter()
+            .map(|s| img_ps(s, 20, 2))
+            .collect();
         let chunk = fixed_scale_elect(imgs.iter().map(|i| i.num())).expect("uniform chunk");
         assert_eq!(chunk.scale, 2);
         assert_eq!(chunk.packed, vec![150, 275, 0, -25, BUDGET]);
@@ -462,13 +466,25 @@ mod tests {
             let scale = ((r2 >> 1) % 9) as i32;
             let narrow = fixed_scale_unpack(mant, scale).expect("narrow");
             let wide = fixed_scale_unpack_i128(mant as i128, scale).expect("wide");
-            assert_eq!(wide.as_bytes(), narrow.as_bytes(), "mant {mant} scale {scale}");
+            assert_eq!(
+                wide.as_bytes(),
+                narrow.as_bytes(),
+                "mant {mant} scale {scale}"
+            );
         }
         // Beyond-i64 sums: byte-identical to numeric_in of the decimal
         // string (the SUM answer law: dscale = the shared scale).
         for (m, s, want) in [
-            (123456789012345678901234567i128, 2, "1234567890123456789012345.67"),
-            (-123456789012345678901234567i128, 2, "-1234567890123456789012345.67"),
+            (
+                123456789012345678901234567i128,
+                2,
+                "1234567890123456789012345.67",
+            ),
+            (
+                -123456789012345678901234567i128,
+                2,
+                "-1234567890123456789012345.67",
+            ),
             (i128::from(i64::MAX) * 1000, 3, "9223372036854775807.000"),
             (10i128.pow(30), 0, "1000000000000000000000000000000"),
             (0, 4, "0.0000"),
@@ -512,7 +528,10 @@ mod tests {
 
         assert_eq!(
             fixed_scale_elect(core::iter::empty::<Num<'_>>()),
-            Ok(FixedScaleChunk { scale: 0, packed: vec![] })
+            Ok(FixedScaleChunk {
+                scale: 0,
+                packed: vec![]
+            })
         );
     }
 }

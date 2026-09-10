@@ -172,11 +172,16 @@ fn every_call_rule_is_handled_or_allowlisted() {
         "actions.rs arm extraction collapsed: only {} rule numbers found",
         handled.len()
     );
-    assert!(handled.contains(&2), "rule 2 (parse_toplevel) arm not found");
-    assert!(handled.contains(&2464), "rule 2464 (PLpgSQL_Expr) arm not found");
+    assert!(
+        handled.contains(&2),
+        "rule 2 (parse_toplevel) arm not found"
+    );
+    assert!(
+        handled.contains(&2464),
+        "rule 2464 (PLpgSQL_Expr) arm not found"
+    );
 
-    let call_rules: Vec<usize> =
-        (1..=YYNRULES).filter(|&r| DISPATCH[r] == 0).collect();
+    let call_rules: Vec<usize> = (1..=YYNRULES).filter(|&r| DISPATCH[r] == 0).collect();
     assert!(
         call_rules.len() > 1800,
         "DISPATCH table sanity: only {} CALL rules",
@@ -194,7 +199,11 @@ fn every_call_rule_is_handled_or_allowlisted() {
          reaches Parser::reduce's `unimplemented_rule` fence with no ported arm \
          and no KNOWN_UNPORTED entry. Either port the action in actions.rs or \
          allowlist it with a comment naming the production:\n  {}",
-        missing.iter().map(|&r| rule_desc(r)).collect::<Vec<_>>().join("\n  ")
+        missing
+            .iter()
+            .map(|&r| rule_desc(r))
+            .collect::<Vec<_>>()
+            .join("\n  ")
     );
 
     // The allowlist must not go stale: every entry must still be a CALL
@@ -244,5 +253,8 @@ fn arm_collector_ignores_nested_non_rule_matches() {
         }
     "#;
     let got = handled_rules(src);
-    assert_eq!(got.into_iter().collect::<Vec<_>>(), vec![1, 10, 11, 12, 20, 21]);
+    assert_eq!(
+        got.into_iter().collect::<Vec<_>>(),
+        vec![1, 10, 11, 12, 20, 21]
+    );
 }

@@ -37,7 +37,10 @@ pub struct KeyAction<'mcx> {
 
 impl Default for KeyAction<'_> {
     fn default() -> Self {
-        KeyAction { action: 0, cols: NodeList::nil() }
+        KeyAction {
+            action: 0,
+            cols: NodeList::nil(),
+        }
     }
 }
 
@@ -119,7 +122,11 @@ impl<'mcx> YYSTYPE<'mcx> {
 
     #[inline(always)]
     fn mk(p: *mut u8, tag: u32, aux: u32) -> Self {
-        YYSTYPE { p, meta: tag as u64 | ((aux as u64) << 32), _arena: PhantomData }
+        YYSTYPE {
+            p,
+            meta: tag as u64 | ((aux as u64) << 32),
+            _arena: PhantomData,
+        }
     }
 
     #[inline(always)]
@@ -189,7 +196,10 @@ impl<'mcx> YYSTYPE<'mcx> {
     // the bare alias pointer; non-NIL rides a FuncAliasCols arena carrier.
     #[inline(always)]
     pub fn FuncAlias(alias: Option<&'mcx Alias<'mcx>>, coldeflist: NodeList<'mcx>) -> Self {
-        assert!(coldeflist.is_nil(), "gram_core: non-NIL coldeflist needs an arena carrier");
+        assert!(
+            coldeflist.is_nil(),
+            "gram_core: non-NIL coldeflist needs an arena carrier"
+        );
         let p = match alias {
             Some(a) => a as *const Alias<'mcx> as *mut u8,
             Option::None => core::ptr::null_mut(),
@@ -200,7 +210,11 @@ impl<'mcx> YYSTYPE<'mcx> {
     #[inline(always)]
     pub fn Group(distinct: bool, list: NodeList<'mcx>) -> Self {
         let (p, len) = list.into_raw_parts();
-        Self::mk(p as *mut u8, if distinct { T_GROUP_DISTINCT } else { T_GROUP }, len)
+        Self::mk(
+            p as *mut u8,
+            if distinct { T_GROUP_DISTINCT } else { T_GROUP },
+            len,
+        )
     }
 
     #[inline(always)]
@@ -242,7 +256,11 @@ impl<'mcx> YYSTYPE<'mcx> {
 
     #[inline(always)]
     pub fn JsonBehaviorsV(a: &'mcx mut JsonBehaviors<'mcx>) -> Self {
-        Self::mk(a as *mut JsonBehaviors<'mcx> as *mut u8, T_JSON_BEHAVIORS, 0)
+        Self::mk(
+            a as *mut JsonBehaviors<'mcx> as *mut u8,
+            T_JSON_BEHAVIORS,
+            0,
+        )
     }
 
     pub fn json_behaviors(self) -> &'mcx mut JsonBehaviors<'mcx> {
@@ -255,7 +273,11 @@ impl<'mcx> YYSTYPE<'mcx> {
 
     #[inline(always)]
     pub fn TransformElementsV(a: &'mcx mut TransformElements<'mcx>) -> Self {
-        Self::mk(a as *mut TransformElements<'mcx> as *mut u8, T_TRANSFORM_ELEMS, 0)
+        Self::mk(
+            a as *mut TransformElements<'mcx> as *mut u8,
+            T_TRANSFORM_ELEMS,
+            0,
+        )
     }
 
     pub fn transform_elements(self) -> &'mcx mut TransformElements<'mcx> {
@@ -287,10 +309,7 @@ impl<'mcx> YYSTYPE<'mcx> {
         }
         // SAFETY: built by Str/Keyword from a &str with this ptr/len.
         unsafe {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                self.p,
-                self.aux() as usize,
-            ))
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(self.p, self.aux() as usize))
         }
     }
 
@@ -352,7 +371,10 @@ impl<'mcx> YYSTYPE<'mcx> {
     pub fn func_alias(self) -> (Option<&'mcx Alias<'mcx>>, NodeList<'mcx>) {
         match self.tag() {
             // SAFETY: built by FuncAlias() from &'mcx Alias (coldeflist NIL-asserted).
-            T_FUNC_ALIAS => (unsafe { (self.p as *const Alias<'mcx>).as_ref() }, NodeList::nil()),
+            T_FUNC_ALIAS => (
+                unsafe { (self.p as *const Alias<'mcx>).as_ref() },
+                NodeList::nil(),
+            ),
             T_FUNC_ALIAS_COLS => {
                 // SAFETY: built by FuncAliasV() from &'mcx FuncAliasCols; the
                 // list is arena-owned with no drop glue and each carrier is
@@ -366,7 +388,11 @@ impl<'mcx> YYSTYPE<'mcx> {
 
     #[inline(always)]
     pub fn FuncAliasV(c: &'mcx FuncAliasCols<'mcx>) -> Self {
-        Self::mk(c as *const FuncAliasCols<'mcx> as *mut u8, T_FUNC_ALIAS_COLS, 0)
+        Self::mk(
+            c as *const FuncAliasCols<'mcx> as *mut u8,
+            T_FUNC_ALIAS_COLS,
+            0,
+        )
     }
 
     pub fn group(self) -> (bool, NodeList<'mcx>) {
@@ -376,7 +402,9 @@ impl<'mcx> YYSTYPE<'mcx> {
             _ => confusion("Group"),
         };
         // SAFETY: built by group() via into_raw_parts (as list()).
-        (distinct, unsafe { NodeList::from_raw_parts(self.p.cast(), self.aux()) })
+        (distinct, unsafe {
+            NodeList::from_raw_parts(self.p.cast(), self.aux())
+        })
     }
 
     pub fn limit(self) -> Option<&'mcx mut SelectLimit<'mcx>> {

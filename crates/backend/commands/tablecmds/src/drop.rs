@@ -1,12 +1,12 @@
 // RemoveRelations + RangeVarCallbackForDropRelation (tablecmds.c) over the
 // relation removeTypes.
 use mcx::Mcx;
+use rel_vocab::RangeVar;
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_TABLE, ERROR, NOTICE,
 };
 use types_nodes::parsenodes::{DropStmt, ObjectType};
-use rel_vocab::RangeVar;
 use types_nodes::NodeList;
 use types_rel::{AccessExclusiveLock, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
@@ -139,7 +139,8 @@ fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, rightkind: u8, missing_ok: bool) 
             if !missing_ok {
                 return Err(Box::new(
                     PgError::new(ERROR, format!("schema \"{schemaname}\" does not exist"))
-                        .with_sqlstate(types_error::ERRCODE_UNDEFINED_SCHEMA),
+                        .with_sqlstate(types_error::ERRCODE_UNDEFINED_SCHEMA)
+                        .with_location("tablecmds.c", 1483, "DropErrorMsgNonExistent"),
                 ));
             }
             elog_seams::ereport::call(
@@ -147,7 +148,7 @@ fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, rightkind: u8, missing_ok: bool) 
                     NOTICE,
                     format!("schema \"{schemaname}\" does not exist, skipping"),
                 )
-                .with_funcname("DropErrorMsgNonExistent"),
+                .with_location("tablecmds.c", 1489, "DropErrorMsgNonExistent"),
             )?;
             return Ok(());
         }
@@ -158,7 +159,8 @@ fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, rightkind: u8, missing_ok: bool) 
     if !missing_ok {
         return Err(Box::new(
             PgError::new(ERROR, format!("{noun} \"{relname}\" does not exist"))
-                .with_sqlstate(rentry.nonexistent_code),
+                .with_sqlstate(rentry.nonexistent_code)
+                .with_location("tablecmds.c", 1502, "DropErrorMsgNonExistent"),
         ));
     }
     elog_seams::ereport::call(
@@ -166,7 +168,7 @@ fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, rightkind: u8, missing_ok: bool) 
             NOTICE,
             format!("{noun} \"{relname}\" does not exist, skipping"),
         )
-        .with_funcname("DropErrorMsgNonExistent"),
+        .with_location("tablecmds.c", 1506, "DropErrorMsgNonExistent"),
     )?;
     Ok(())
 }
@@ -200,10 +202,16 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
                 .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
         }
-        if matches!(drop.behavior, types_nodes::parsenodes::DropBehavior::DROP_CASCADE) {
+        if matches!(
+            drop.behavior,
+            types_nodes::parsenodes::DropBehavior::DROP_CASCADE
+        ) {
             return Err(Box::new(
-                PgError::new(ERROR, "DROP INDEX CONCURRENTLY does not support CASCADE".to_string())
-                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                PgError::new(
+                    ERROR,
+                    "DROP INDEX CONCURRENTLY does not support CASCADE".to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
         }
     }
@@ -252,12 +260,9 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
             continue;
         }
 
-        if drop.concurrent
-            && actual_relpersistence.get() != types_core::RELPERSISTENCE_TEMP
-        {
+        if drop.concurrent && actual_relpersistence.get() != types_core::RELPERSISTENCE_TEMP {
             debug_assert!(
-                drop.objects.len() == 1
-                    && matches!(drop.removeType, ObjectType::OBJECT_INDEX)
+                drop.objects.len() == 1 && matches!(drop.removeType, ObjectType::OBJECT_INDEX)
             );
             flags |= catalog_dependency::PERFORM_DELETION_CONCURRENTLY;
         }
@@ -285,10 +290,8 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
             pg_inherits::find_all_inheritors(mcx, heap_oid.get(), heap_lockmode)?;
         }
 
-        objects.add_exact_object_address(pg_depend::ObjectAddress::set(
-            RELATION_RELATION_ID,
-            relOid,
-        ));
+        objects
+            .add_exact_object_address(pg_depend::ObjectAddress::set(RELATION_RELATION_ID, relOid));
     }
 
     catalog_dependency::performMultipleDeletions(mcx, &objects, drop.behavior, flags)
@@ -350,14 +353,8 @@ fn RangeVarCallbackForDropRelation<'mcx>(
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
     key.sk_argument = datum::Datum::from_oid(relOid);
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &pg_class,
-        catalog::ClassOidIndexId,
-        true,
-        None,
-        &[key],
-    )?;
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
     let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
         genam::systable_endscan(mcx, scan)?;
         pg_class.close(types_rel::AccessShareLock)?;
@@ -388,7 +385,11 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         relkind
     };
     if actual_expected != expected_relkind {
-        return Err(DropErrorMsgWrongType(rel.relname, relkind, expected_relkind));
+        return Err(DropErrorMsgWrongType(
+            rel.relname,
+            relkind,
+            expected_relkind,
+        ));
     }
 
     // DROP is allowed to either the table owner or the schema owner.
@@ -407,7 +408,8 @@ fn RangeVarCallbackForDropRelation<'mcx>(
     }
 
     // IsSystemClass: catalog oid range or pg_toast namespace.
-    let is_system = catalog::IsCatalogRelationOid(relOid) || catalog::IsToastNamespace(relnamespace);
+    let is_system =
+        catalog::IsCatalogRelationOid(relOid) || catalog::IsToastNamespace(relnamespace);
     // tablecmds.c:1793-1816: an INVALID index of a system catalog (a toast
     // index left behind by a failed REINDEX CONCURRENTLY) may be dropped
     // without allow_system_table_mods; a concurrently vanished pg_index row
@@ -423,10 +425,7 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         return Err(Box::new(
             PgError::new(
                 ERROR,
-                format!(
-                    "permission denied: \"{}\" is a system catalog",
-                    rel.relname
-                ),
+                format!("permission denied: \"{}\" is a system catalog", rel.relname),
             )
             .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
         ));
@@ -504,9 +503,15 @@ mod elog_hygiene_tests {
         let e = r.expect_err("OBJECT_TYPE is not a DROP relation type");
         assert_eq!(
             e.message(),
-            format!("unrecognized drop object type: {}", ObjectType::OBJECT_TYPE as i32)
+            format!(
+                "unrecognized drop object type: {}",
+                ObjectType::OBJECT_TYPE as i32
+            )
         );
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
-        assert_eq!(super::drop_expected_relkind(ObjectType::OBJECT_TABLE).unwrap(), b'r');
+        assert_eq!(
+            super::drop_expected_relkind(ObjectType::OBJECT_TABLE).unwrap(),
+            b'r'
+        );
     }
 }

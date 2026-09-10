@@ -50,8 +50,18 @@ macro_rules! overflow_fns {
     };
 }
 
-overflow_fns!(pg_add_s16_overflow, pg_sub_s16_overflow, pg_mul_s16_overflow, i16);
-overflow_fns!(pg_add_s32_overflow, pg_sub_s32_overflow, pg_mul_s32_overflow, i32);
+overflow_fns!(
+    pg_add_s16_overflow,
+    pg_sub_s16_overflow,
+    pg_mul_s16_overflow,
+    i16
+);
+overflow_fns!(
+    pg_add_s32_overflow,
+    pg_sub_s32_overflow,
+    pg_mul_s32_overflow,
+    i32
+);
 
 #[inline(always)]
 pub(crate) fn pg_add_s64_overflow(a: i64, b: i64, result: &mut i64) -> bool {
@@ -83,11 +93,21 @@ fn smallint_out_of_range() -> Box<PgError> {
 #[inline(never)]
 fn division_by_zero(funcname: &'static str) -> Box<PgError> {
     // funcname = the enclosing C fn's __func__ (wire R field); C repeats the
-    // ereport per function, so each caller threads its own name (W-1).
+    // ereport per function, so each caller threads its own name (W-1). The
+    // line is that ereport's closing line in int.c (18.6).
+    let line = match funcname {
+        "int4div" => 872,
+        "int2div" => 988,
+        "int24div" => 1068,
+        "int42div" => 1130,
+        "int4mod" => 1168,
+        "int2mod" => 1196,
+        _ => 0,
+    };
     Box::new(
         PgError::error("division by zero")
             .with_sqlstate(ERRCODE_DIVISION_BY_ZERO)
-            .with_funcname(funcname),
+            .with_location("int.c", line, funcname),
     )
 }
 
@@ -221,7 +241,11 @@ fn strtol_base10(s: &[u8]) -> (i64, usize) {
         return (0, 0);
     }
     let val = if overflow {
-        if neg { i64::MIN } else { i64::MAX }
+        if neg {
+            i64::MIN
+        } else {
+            i64::MAX
+        }
     } else if neg {
         -acc
     } else {
@@ -367,7 +391,11 @@ pub fn int4_bool(arg: i32) -> bool {
 
 #[inline]
 pub fn bool_int4(arg: bool) -> i32 {
-    if arg { 1 } else { 0 }
+    if arg {
+        1
+    } else {
+        0
+    }
 }
 
 macro_rules! cmp_ops {
@@ -415,7 +443,13 @@ pub fn in_range_int4_int4(
     Ok(if less { val <= sum } else { val >= sum })
 }
 
-pub fn in_range_int4_int2(val: i32, base: i32, offset: i16, sub: bool, less: bool) -> PgResult<bool> {
+pub fn in_range_int4_int2(
+    val: i32,
+    base: i32,
+    offset: i16,
+    sub: bool,
+    less: bool,
+) -> PgResult<bool> {
     in_range_int4_int4(val, base, offset as i32, sub, less)
 }
 
@@ -463,11 +497,23 @@ pub fn in_range_int2_int4(
     Ok(if less { val <= sum } else { val >= sum })
 }
 
-pub fn in_range_int2_int2(val: i16, base: i16, offset: i16, sub: bool, less: bool) -> PgResult<bool> {
+pub fn in_range_int2_int2(
+    val: i16,
+    base: i16,
+    offset: i16,
+    sub: bool,
+    less: bool,
+) -> PgResult<bool> {
     in_range_int2_int4(val, base, offset as i32, sub, less)
 }
 
-pub fn in_range_int2_int8(val: i16, base: i16, offset: i64, sub: bool, less: bool) -> PgResult<bool> {
+pub fn in_range_int2_int8(
+    val: i16,
+    base: i16,
+    offset: i64,
+    sub: bool,
+    less: bool,
+) -> PgResult<bool> {
     in_range_int4_int8(val as i32, base as i32, offset, sub, less)
 }
 
@@ -759,22 +805,38 @@ pub fn int4lcm(arg1: i32, arg2: i32) -> PgResult<i32> {
 
 #[inline]
 pub fn int2larger(arg1: i16, arg2: i16) -> i16 {
-    if arg1 > arg2 { arg1 } else { arg2 }
+    if arg1 > arg2 {
+        arg1
+    } else {
+        arg2
+    }
 }
 
 #[inline]
 pub fn int2smaller(arg1: i16, arg2: i16) -> i16 {
-    if arg1 < arg2 { arg1 } else { arg2 }
+    if arg1 < arg2 {
+        arg1
+    } else {
+        arg2
+    }
 }
 
 #[inline]
 pub fn int4larger(arg1: i32, arg2: i32) -> i32 {
-    if arg1 > arg2 { arg1 } else { arg2 }
+    if arg1 > arg2 {
+        arg1
+    } else {
+        arg2
+    }
 }
 
 #[inline]
 pub fn int4smaller(arg1: i32, arg2: i32) -> i32 {
-    if arg1 < arg2 { arg1 } else { arg2 }
+    if arg1 < arg2 {
+        arg1
+    } else {
+        arg2
+    }
 }
 
 #[inline]

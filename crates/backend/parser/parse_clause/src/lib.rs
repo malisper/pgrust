@@ -20,7 +20,9 @@ use types_error::{
     ERRCODE_TOO_MANY_COLUMNS, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::nodes_enums::LimitOption;
-use types_nodes::parsenodes::{GroupingSet, GroupingSetKind, RTEKind, RangeTblEntry, SortGroupClause, WindowClause};
+use types_nodes::parsenodes::{
+    GroupingSet, GroupingSetKind, RTEKind, RangeTblEntry, SortGroupClause, WindowClause,
+};
 use types_nodes::primnodes::TargetEntry;
 use types_nodes::rawnodes::{
     SortBy, SortByDir, SortByNulls, ValUnion, FRAMEOPTION_DEFAULTS, FRAMEOPTION_END_OFFSET,
@@ -114,7 +116,11 @@ fn no_distinct_ordering_operator(pstate: &ParseState<'_, '_>, expr: Node<'_>) ->
                 mbutils::GetDatabaseEncoding(),
             ))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformAggregateCall")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "transformAggregateCall",
+            )),
     )
 }
 
@@ -164,8 +170,7 @@ fn transformFromClauseItemNs<'mcx>(
         return transformJoinExpr(mcx, pstate, n.as_join_expr().unwrap());
     }
     let (node, nsitem) = transformFromClauseItem(mcx, pstate, n)?;
-    let mut namespace: mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>> =
-        mcx::PgVec::new_in(mcx);
+    let mut namespace: mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>> = mcx::PgVec::new_in(mcx);
     namespace.push(nsitem);
     Ok((node, namespace))
 }
@@ -249,7 +254,10 @@ fn transformJoinExpr<'mcx>(
         Some(a) => Some(
             Node::mk_mut(
                 mcx,
-                types_nodes::Alias { aliasname: a.aliasname, colnames: using_clause.clone_in(mcx)? },
+                types_nodes::Alias {
+                    aliasname: a.aliasname,
+                    colnames: using_clause.clone_in(mcx)?,
+                },
             )?
             .seal_ref(),
         ),
@@ -291,7 +299,12 @@ fn transformJoinExpr<'mcx>(
             )?;
             res_colnames.lappend(mcx, ucol)?;
         }
-        Some(transformJoinUsingClause(mcx, pstate, &l_usingvars, &r_usingvars)?)
+        Some(transformJoinUsingClause(
+            mcx,
+            pstate,
+            &l_usingvars,
+            &r_usingvars,
+        )?)
     } else {
         match j.quals {
             Some(q) => Some(transformJoinOnClause(mcx, pstate, q, &my_namespace)?),
@@ -319,10 +332,8 @@ fn transformJoinExpr<'mcx>(
     for (l_no, r_no) in l_colnos.iter().zip(r_colnos.iter()) {
         let l_index = l_no as usize - 1;
         let r_index = r_no as usize - 1;
-        let l_colvar =
-            parse_relation::buildVarFromNSColumn(mcx, pstate, &l_nscolumns[l_index])?;
-        let r_colvar =
-            parse_relation::buildVarFromNSColumn(mcx, pstate, &r_nscolumns[r_index])?;
+        let l_colvar = parse_relation::buildVarFromNSColumn(mcx, pstate, &l_nscolumns[l_index])?;
+        let r_colvar = parse_relation::buildVarFromNSColumn(mcx, pstate, &r_nscolumns[r_index])?;
         let u_colvar = buildMergedJoinVar(mcx, pstate, j.jointype, l_colvar, r_colvar)?;
         res_colvars.lappend(mcx, u_colvar)?;
         let res_colindex = res_nscolumns.len();
@@ -433,8 +444,7 @@ fn transformJoinExpr<'mcx>(
 
     // With an alias the contained RTEs are hidden completely; otherwise they
     // stay visible as table names but not for unqualified column access.
-    let mut namespace: mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>> =
-        mcx::PgVec::new_in(mcx);
+    let mut namespace: mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>> = mcx::PgVec::new_in(mcx);
     if j.alias.is_none() {
         for item in &my_namespace {
             namespace.push(&*mcx::leak_in(mcx::alloc_in(
@@ -500,8 +510,13 @@ fn transformJoinOnClause<'mcx>(
         ns.push(it);
     }
     let save_namespace = core::mem::replace(&mut pstate.p_namespace, ns);
-    let result =
-        transformWhereClause(mcx, pstate, Some(quals), ParseExprKind::EXPR_KIND_JOIN_ON, "JOIN/ON");
+    let result = transformWhereClause(
+        mcx,
+        pstate,
+        Some(quals),
+        ParseExprKind::EXPR_KIND_JOIN_ON,
+        "JOIN/ON",
+    );
     pstate.p_namespace = save_namespace;
     Ok(result?.expect("quals in, quals out"))
 }
@@ -513,7 +528,12 @@ fn scanForUsingColumn(
 ) -> PgResult<usize> {
     let mut index: Option<usize> = None;
     for (ndx, col) in colnames.iter().enumerate() {
-        if col.as_string().expect("eref colnames are String nodes").sval == u_colname {
+        if col
+            .as_string()
+            .expect("eref colnames are String nodes")
+            .sval
+            == u_colname
+        {
             if index.is_some() {
                 return Err(using_column_ambiguous(u_colname, side));
             }
@@ -656,7 +676,10 @@ fn buildMergedJoinVar<'mcx>(
     let (r_type, r_typmod) = (expr_type(r_colvar), expr_typmod(r_colvar));
     let outcoltype = coerce::select_common_type(
         pstate,
-        &[(l_type, expr_location(l_colvar)), (r_type, expr_location(r_colvar))],
+        &[
+            (l_type, expr_location(l_colvar)),
+            (r_type, expr_location(r_colvar)),
+        ],
         Some("JOIN/USING"),
     )?;
     let outcoltypmod =
@@ -763,7 +786,10 @@ fn extractRemainingColumns<'mcx>(
         prevcols.add_member(mcx, colno)?;
     }
     for (i, colname_node) in src_colnames.iter().enumerate() {
-        let colname = colname_node.as_string().expect("eref colnames are String nodes").sval;
+        let colname = colname_node
+            .as_string()
+            .expect("eref colnames are String nodes")
+            .sval;
         let attnum = i as i32 + 1;
         // Dropped columns carry empty names; already-merged USING columns are
         // in prevcols. C's extractRemainingColumns (parse_clause.c) emits every
@@ -779,8 +805,10 @@ fn extractRemainingColumns<'mcx>(
         }
         src_colnos.lappend(mcx, attnum)?;
         res_colnames.lappend(mcx, colname_node)?;
-        res_colvars
-            .lappend(mcx, parse_relation::buildVarFromNSColumn(mcx, pstate, &src_nscolumns[i])?)?;
+        res_colvars.lappend(
+            mcx,
+            parse_relation::buildVarFromNSColumn(mcx, pstate, &src_nscolumns[i])?,
+        )?;
         res_nscolumns.push(src_nscolumns[i]);
     }
     Ok(())
@@ -800,11 +828,11 @@ fn transformFromClauseItem<'mcx>(
             // as a CTE, then an ENR, before plain-relation resolution.
             if rv.schemaname.is_none() {
                 let refname = rv.relname.expect("grammar always sets relname");
-                if let Some((cte, levelsup)) =
-                    parse_relation::scanNameSpaceForCTE(pstate, refname)
+                if let Some((cte, levelsup)) = parse_relation::scanNameSpaceForCTE(pstate, refname)
                 {
-                    let nsitem =
-                        parse_relation::addRangeTableEntryForCTE(mcx, pstate, cte, levelsup, rv, true)?;
+                    let nsitem = parse_relation::addRangeTableEntryForCTE(
+                        mcx, pstate, cte, levelsup, rv, true,
+                    )?;
                     let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
                     return Ok((rtr, nsitem));
                 }
@@ -829,8 +857,7 @@ fn transformFromClauseItem<'mcx>(
             Ok((rtr, nsitem))
         }
         NodeTag::T_RangeTableFunc => {
-            let nsitem =
-                transformRangeTableFunc(mcx, pstate, n.as_range_table_func().unwrap())?;
+            let nsitem = transformRangeTableFunc(mcx, pstate, n.as_range_table_func().unwrap())?;
             let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
             Ok((rtr, nsitem))
         }
@@ -853,17 +880,16 @@ fn transformFromClauseItem<'mcx>(
             // SAFETY: no ref derived from this RTE is live across the write
             // (nsitem holds the Node handle, not a borrow).
             unsafe {
-                nsitem.p_rte.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(tsc))
+                nsitem
+                    .p_rte
+                    .with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(tsc))
             }
             .expect("nsitem p_rte is a RangeTblEntry");
             Ok((rel, nsitem))
         }
         NodeTag::T_JsonTable => {
-            let nsitem = parse_jsontable::transformJsonTable(
-                mcx,
-                pstate,
-                n.as_json_table().unwrap(),
-            )?;
+            let nsitem =
+                parse_jsontable::transformJsonTable(mcx, pstate, n.as_json_table().unwrap())?;
             let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
             Ok((rtr, nsitem))
         }
@@ -885,10 +911,18 @@ fn transformRangeTableSample<'mcx>(
 
     let mut parts: mcx::PgVec<'_, &str> = mcx::PgVec::new_in(mcx);
     for p in rts.method.iter() {
-        parts.push(p.as_string().expect("func_name parts are String nodes").sval);
+        parts.push(
+            p.as_string()
+                .expect("func_name parts are String nodes")
+                .sval,
+        );
     }
-    let handler_oid =
-        parse_func_seams::LookupFuncName::call(&parts, 1, &[types_core::catalog::INTERNALOID], true)?;
+    let handler_oid = parse_func_seams::LookupFuncName::call(
+        &parts,
+        1,
+        &[types_core::catalog::INTERNALOID],
+        true,
+    )?;
     if handler_oid == InvalidOid {
         return Err(tablesample_no_method(pstate, &parts, rts.location));
     }
@@ -913,7 +947,8 @@ fn transformRangeTableSample<'mcx>(
     // assign_query_collations never looks inside RTEs (as C).
     let mut fargs = NodeList::nil();
     for (raw, &argtype) in rts.args.iter().zip(param_types) {
-        let arg = parse_expr::transformExpr(mcx, pstate, raw, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
+        let arg =
+            parse_expr::transformExpr(mcx, pstate, raw, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
         let arg = coerce::coerce_to_specific_type(
             mcx,
             pstate,
@@ -932,8 +967,12 @@ fn transformRangeTableSample<'mcx>(
             if !tsm.repeatable_across_queries() {
                 return Err(tablesample_no_repeatable(pstate, &parts, rts.location));
             }
-            let arg =
-                parse_expr::transformExpr(mcx, pstate, raw, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
+            let arg = parse_expr::transformExpr(
+                mcx,
+                pstate,
+                raw,
+                ParseExprKind::EXPR_KIND_FROM_FUNCTION,
+            )?;
             let arg = coerce::coerce_to_specific_type(
                 mcx,
                 pstate,
@@ -951,7 +990,11 @@ fn transformRangeTableSample<'mcx>(
 
     Node::mk(
         mcx,
-        types_nodes::TableSampleClause { tsmhandler: handler_oid, args: fargs, repeatable },
+        types_nodes::TableSampleClause {
+            tsmhandler: handler_oid,
+            args: fargs,
+            repeatable,
+        },
     )
 }
 
@@ -1185,7 +1228,8 @@ fn transformRangeTableFunc<'mcx>(
 
             tf.coltypes.lappend(mcx, typid)?;
             tf.coltypmods.lappend(mcx, typmod)?;
-            tf.colcollations.lappend(mcx, lsyscache::typ::get_typcollation(typid)?)?;
+            tf.colcollations
+                .lappend(mcx, lsyscache::typ::get_typcollation(typid)?)?;
 
             let colexpr = match rawc.colexpr {
                 Some(e) => {
@@ -1272,7 +1316,8 @@ fn transformRangeTableFunc<'mcx>(
                                 }
                             }
                         }
-                        tf.ns_names.lappend(mcx, Some(Node::mk_string(mcx, name)?))?;
+                        tf.ns_names
+                            .lappend(mcx, Some(Node::mk_string(mcx, name)?))?;
                     }
                     None => {
                         if default_ns_seen {
@@ -1300,7 +1345,6 @@ fn transformRangeTableFunc<'mcx>(
     parse_relation::addRangeTableEntryForTableFunc(mcx, pstate, tf, rtf.alias, is_lateral, true)
         .map(|nsitem| &*nsitem)
 }
-
 
 #[track_caller]
 #[cold]
@@ -1362,7 +1406,8 @@ fn transformRangeSubselect<'mcx>(
     let locked = parse_relation::isLockedRefname(pstate, r.alias.and_then(|a| a.aliasname));
     let query = analyze_seams::parse_sub_analyze::call(
         mcx,
-        r.subquery.expect("grammar always sets RangeSubselect.subquery"),
+        r.subquery
+            .expect("grammar always sets RangeSubselect.subquery"),
         pstate,
         None,
         locked,
@@ -1459,12 +1504,8 @@ fn transformRangeFunction<'mcx>(
                         },
                     )?;
                     let last_srf = pstate.p_last_srf;
-                    let newfexpr = transformExpr(
-                        mcx,
-                        pstate,
-                        newfc,
-                        ParseExprKind::EXPR_KIND_FROM_FUNCTION,
-                    )?;
+                    let newfexpr =
+                        transformExpr(mcx, pstate, newfc, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
                     check_srf_top_level(pstate, last_srf, newfexpr)?;
                     funcexprs.lappend(mcx, newfexpr)?;
                     funcnames.push(parse_target::FigureColname(newfc));
@@ -1475,8 +1516,7 @@ fn transformRangeFunction<'mcx>(
         }
 
         let last_srf = pstate.p_last_srf;
-        let newfexpr =
-            transformExpr(mcx, pstate, fexpr, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
+        let newfexpr = transformExpr(mcx, pstate, fexpr, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
         check_srf_top_level(pstate, last_srf, newfexpr)?;
         funcexprs.lappend(mcx, newfexpr)?;
         funcnames.push(parse_target::FigureColname(fexpr));
@@ -1564,7 +1604,12 @@ fn check_srf_top_level<'mcx>(
         (Some(a), Some(b)) => !a.ptr_eq(b),
         _ => true,
     };
-    if moved && !pstate.p_last_srf.expect("moved implies Some").ptr_eq(newfexpr) {
+    if moved
+        && !pstate
+            .p_last_srf
+            .expect("moved implies Some")
+            .ptr_eq(newfexpr)
+    {
         pstate.p_lateral_active = false;
         return Err(srf_not_top_level(
             pstate,
@@ -1591,14 +1636,11 @@ fn coldeflist_syntax_error(
     if let Some(h) = hint {
         b = b.errhint(h);
     }
-    Box::new(
-        b.into_error()
-            .with_error_location(ErrorLocation::new(
-                "parse_clause.c",
-                0,
-                "transformRangeFunction",
-            )),
-    )
+    Box::new(b.into_error().with_error_location(ErrorLocation::new(
+        "parse_clause.c",
+        0,
+        "transformRangeFunction",
+    )))
 }
 
 #[track_caller]
@@ -1612,7 +1654,11 @@ fn srf_not_top_level(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgE
             .errmsg("set-returning functions must appear at top level of FROM")
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformRangeFunction")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "transformRangeFunction",
+            )),
     )
 }
 
@@ -1639,15 +1685,18 @@ pub fn setTargetTable<'mcx>(
                     "relation \"{relname}\" cannot be the target of a modifying statement"
                 ))
                 .into_error()
-                .with_error_location(ErrorLocation::new(file!(), line!() as i32, "setTargetTable")),
+                .with_error_location(ErrorLocation::new(
+                    file!(),
+                    line!() as i32,
+                    "setTargetTable",
+                )),
         ));
     }
     if let Some(old) = pstate.p_target_relation.take() {
         table::table_close(old, types_rel::NoLock)?;
     }
 
-    let rel =
-        parse_relation::parserOpenTable(mcx, pstate, relation, types_rel::RowExclusiveLock)?;
+    let rel = parse_relation::parserOpenTable(mcx, pstate, relation, types_rel::RowExclusiveLock)?;
     let nsitem = parse_relation::addRangeTableEntryForRelation(
         mcx,
         pstate,
@@ -1663,9 +1712,7 @@ pub fn setTargetTable<'mcx>(
     // SAFETY: perminfo nodes are read only through transient as_* lookups; no
     // derived reference is live across this write.
     unsafe {
-        perminfo.with_mut::<types_nodes::RTEPermissionInfo, _>(|p| {
-            p.requiredPerms = requiredPerms
-        })
+        perminfo.with_mut::<types_nodes::RTEPermissionInfo, _>(|p| p.requiredPerms = requiredPerms)
     }
     .expect("p_perminfo is RTEPermissionInfo");
 
@@ -1762,7 +1809,12 @@ pub fn transformIndexStmt<'mcx>(
         let raw = node.as_variant::<IndexElem>().expect("IndexElem").expr;
         let Some(raw) = raw else { continue };
         let figured = parse_target::FigureIndexColname(raw);
-        let expr = transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_INDEX_EXPRESSION)?;
+        let expr = transformExpr(
+            mcx,
+            &mut pstate,
+            raw,
+            ParseExprKind::EXPR_KIND_INDEX_EXPRESSION,
+        )?;
         parse_collate::assign_expr_collations(mcx, &mut pstate, expr)?;
         // SAFETY: analyze-owned parse tree; no derived refs live.
         unsafe {
@@ -1791,8 +1843,10 @@ pub fn transformIndexStmt<'mcx>(
 #[inline(never)]
 fn index_expr_other_table() -> Box<PgError> {
     Box::new(
-        PgError::error("index expressions and predicates can refer only to the table being indexed")
-            .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE),
+        PgError::error(
+            "index expressions and predicates can refer only to the table being indexed",
+        )
+        .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE),
     )
 }
 
@@ -1806,7 +1860,9 @@ pub fn transformStatsStmt<'mcx>(
 ) -> PgResult<()> {
     use types_nodes::rawnodes::{CreateStatsStmt, StatsElem};
     let (transformed, exprs) = {
-        let stmt = stmt_node.as_variant::<CreateStatsStmt>().expect("CreateStatsStmt");
+        let stmt = stmt_node
+            .as_variant::<CreateStatsStmt>()
+            .expect("CreateStatsStmt");
         let mut exprs: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
         exprs.extend(stmt.exprs.iter());
         (stmt.transformed, exprs)
@@ -1835,7 +1891,12 @@ pub fn transformStatsStmt<'mcx>(
     for node in exprs.iter() {
         let raw = node.as_variant::<StatsElem>().expect("StatsElem").expr;
         let Some(raw) = raw else { continue };
-        let expr = transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_STATS_EXPRESSION)?;
+        let expr = transformExpr(
+            mcx,
+            &mut pstate,
+            raw,
+            ParseExprKind::EXPR_KIND_STATS_EXPRESSION,
+        )?;
         parse_collate::assign_expr_collations(mcx, &mut pstate, expr)?;
         // SAFETY: analyze-owned parse tree; no derived refs live.
         unsafe { node.with_mut::<StatsElem, _>(|e| e.expr = Some(expr)) }.expect("StatsElem");
@@ -1882,18 +1943,28 @@ pub fn transformOnConflictArbiter<'mcx>(
         .map(|n| n.as_infer_clause().expect("grammar builds InferClause"));
 
     if onConflictClause.action == OnConflictAction::ONCONFLICT_UPDATE && infer.is_none() {
-        return Err(on_conflict_requires_inference(pstate, onConflictClause.location));
+        return Err(on_conflict_requires_inference(
+            pstate,
+            onConflictClause.location,
+        ));
     }
 
     // Speculative insertion into system catalogs is disallowed.
-    let target = pstate.p_target_relation.as_ref().expect("ON CONFLICT with no target relation");
+    let target = pstate
+        .p_target_relation
+        .as_ref()
+        .expect("ON CONFLICT with no target relation");
     if catalog::IsCatalogRelation(target) {
         return Err(on_conflict_on_catalog(pstate, onConflictClause.location));
     }
     // Same applies to a table used by logical decoding as a catalog table
     // (RelationIsUsedAsCatalogTable: user_catalog_table reloption).
     if target.is_used_as_catalog_table() {
-        return Err(on_conflict_on_user_catalog_table(pstate, target.name(), onConflictClause.location));
+        return Err(on_conflict_on_user_catalog_table(
+            pstate,
+            target.name(),
+            onConflictClause.location,
+        ));
     }
 
     let mut arbiter_elems = NodeList::nil();
@@ -1941,8 +2012,7 @@ pub fn transformOnConflictArbiter<'mcx>(
                     for &attnum in conattnos.iter() {
                         p.selectedCols.add_member(
                             mcx,
-                            attnum as i32
-                                - types_tuple::htup::FirstLowInvalidHeapAttributeNumber,
+                            attnum as i32 - types_tuple::htup::FirstLowInvalidHeapAttributeNumber,
                         )?;
                     }
                     Ok::<(), Box<PgError>>(())
@@ -1965,7 +2035,9 @@ fn resolve_unique_index_expr<'mcx>(
 
     let mut result = NodeList::nil();
     for elem_node in &infer.indexElems {
-        let ielem = elem_node.as_variant::<types_nodes::IndexElem>().expect("index_params cell");
+        let ielem = elem_node
+            .as_variant::<types_nodes::IndexElem>()
+            .expect("index_params cell");
 
         if ielem.ordering != SortByDir::SORTBY_DEFAULT {
             return Err(on_conflict_bad_index_elem(
@@ -1988,10 +2060,21 @@ fn resolve_unique_index_expr<'mcx>(
                 let name = ielem.name.expect("IndexElem without expr has a name");
                 let mut fields = NodeList::nil();
                 fields.lappend(mcx, Node::mk_string(mcx, name)?)?;
-                Node::mk(mcx, ColumnRef { fields, location: infer.location })?
+                Node::mk(
+                    mcx,
+                    ColumnRef {
+                        fields,
+                        location: infer.location,
+                    },
+                )?
             }
         };
-        let expr = transformExpr(mcx, pstate, parse, ParseExprKind::EXPR_KIND_INDEX_EXPRESSION)?;
+        let expr = transformExpr(
+            mcx,
+            pstate,
+            parse,
+            ParseExprKind::EXPR_KIND_INDEX_EXPRESSION,
+        )?;
 
         // C: LookupCollation / get_opclass_oid(BTREE_AM_OID, ...).
         let infercollid = if ielem.collation.is_nil() {
@@ -2003,14 +2086,22 @@ fn resolve_unique_index_expr<'mcx>(
         let inferopclass = if ielem.opclass.is_nil() {
             InvalidOid
         } else {
-            opclasscmds_seams::get_opclass_oid::call(types_core::BTREE_AM_OID, &ielem.opclass, false)?
+            opclasscmds_seams::get_opclass_oid::call(
+                types_core::BTREE_AM_OID,
+                &ielem.opclass,
+                false,
+            )?
         };
 
         result.lappend(
             mcx,
             Node::mk(
                 mcx,
-                types_nodes::InferenceElem { expr: Some(expr), infercollid, inferopclass },
+                types_nodes::InferenceElem {
+                    expr: Some(expr),
+                    infercollid,
+                    inferopclass,
+                },
             )?,
         )?;
     }
@@ -2020,16 +2111,17 @@ fn resolve_unique_index_expr<'mcx>(
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn on_conflict_requires_inference(
-    pstate: &ParseState<'_, '_>,
-    location: ParseLoc,
-) -> Box<PgError> {
+fn on_conflict_requires_inference(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
     Box::new(
         elog::ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)
             .errmsg("ON CONFLICT DO UPDATE requires inference specification or constraint name")
             .errhint("For example, ON CONFLICT (column_name).")
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -2047,7 +2139,11 @@ fn on_conflict_on_catalog(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Bo
         elog::ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("ON CONFLICT is not supported with system catalog tables")
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -2071,7 +2167,11 @@ fn on_conflict_on_user_catalog_table(
             .errmsg(format!(
                 "ON CONFLICT is not supported on table \"{relname}\" used as a catalog table"
             ))
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -2097,7 +2197,11 @@ fn on_conflict_bad_index_elem(
             // gramwalk seed 1992923080990245657 caught the skew.
             .errcode(types_error::ERRCODE_INVALID_COLUMN_REFERENCE)
             .errmsg(msg)
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -2119,7 +2223,11 @@ fn resolve_arbiter_position(
     if e.cursor_position().is_some() {
         return e;
     }
-    Box::new((*e).with_cursor_position(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding())))
+    Box::new((*e).with_cursor_position(parser_errposition(
+        pstate,
+        location,
+        mbutils::GetDatabaseEncoding(),
+    )))
 }
 
 pub fn transformLimitClause<'mcx>(
@@ -2160,7 +2268,11 @@ fn checkExprIsVarFree(
     construct_name: &str,
 ) -> PgResult<()> {
     if vars::contain_vars_of_level(n, 0)? {
-        return Err(contains_variables(pstate, construct_name, vars::locate_var_of_level(n, 0)?));
+        return Err(contains_variables(
+            pstate,
+            construct_name,
+            vars::locate_var_of_level(n, 0)?,
+        ));
     }
     Ok(())
 }
@@ -2201,8 +2313,14 @@ fn findTargetlistEntrySQL92<'mcx>(
                 // alias; a FROM match falls through to the SQL99 leg.
                 let mut name = Some(name);
                 if expr_kind == ParseExprKind::EXPR_KIND_GROUP_BY
-                    && parse_relation::colNameToVar(mcx, pstate, name.unwrap(), true, cref.location)?
-                        .is_some()
+                    && parse_relation::colNameToVar(
+                        mcx,
+                        pstate,
+                        name.unwrap(),
+                        true,
+                        cref.location,
+                    )?
+                    .is_some()
                 {
                     name = None;
                 }
@@ -2256,7 +2374,12 @@ fn findTargetlistEntrySQL92<'mcx>(
                 }
             }
         }
-        return Err(position_not_in_select_list(pstate, expr_kind, target_pos, aconst.location));
+        return Err(position_not_in_select_list(
+            pstate,
+            expr_kind,
+            target_pos,
+            aconst.location,
+        ));
     }
     findTargetlistEntrySQL99(mcx, pstate, node, tlist, expr_kind)
 }
@@ -2343,7 +2466,9 @@ fn addTargetToSortList<'mcx>(
         // SAFETY: parse analysis holds exclusive access to the targetlist it
         // is transforming; the `tle` borrow above is dead before this write.
         unsafe {
-            tle_node.with_mut::<TargetEntry, _>(|t| t.expr = new_expr).unwrap();
+            tle_node
+                .with_mut::<TargetEntry, _>(|t| t.expr = new_expr)
+                .unwrap();
         }
         restype = TEXTOID;
     }
@@ -2380,10 +2505,9 @@ fn addTargetToSortList<'mcx>(
             let sortop =
                 parse_oper::compatible_oper_opid(pstate, &sortby.useOp, restype, restype, false)
                     .map_err(attach_pos)?;
-            let Some((eqop, reverse)) =
-                lsyscache::amop::get_equality_op_for_ordering_op(sortop)
-                    .map_err(attach_pos)?
-                    .filter(|(eq, _)| *eq != InvalidOid)
+            let Some((eqop, reverse)) = lsyscache::amop::get_equality_op_for_ordering_op(sortop)
+                .map_err(attach_pos)?
+                .filter(|(eq, _)| *eq != InvalidOid)
             else {
                 let opname = sortby
                     .useOp
@@ -2395,7 +2519,9 @@ fn addTargetToSortList<'mcx>(
                 return Err(attach_pos(Box::new(
                     elog::ereport(ERROR)
                         .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-                        .errmsg(format!("operator {opname} is not a valid ordering operator"))
+                        .errmsg(format!(
+                            "operator {opname} is not a valid ordering operator"
+                        ))
                         .errhint(
                             "Ordering operators must be \"<\" or \">\" members of btree operator \
                              families."
@@ -2441,7 +2567,10 @@ pub fn assignSortGroupRef<'mcx>(tle_node: Node<'mcx>, tlist: &NodeList<'mcx>) ->
     }
     let mut max_ref: Index = 0;
     for n in tlist {
-        let r = n.as_target_entry().expect("tlist holds TargetEntry").ressortgroupref;
+        let r = n
+            .as_target_entry()
+            .expect("tlist holds TargetEntry")
+            .ressortgroupref;
         if r > max_ref {
             max_ref = r;
         }
@@ -2449,7 +2578,9 @@ pub fn assignSortGroupRef<'mcx>(tle_node: Node<'mcx>, tlist: &NodeList<'mcx>) ->
     // SAFETY: parse analysis holds exclusive access to the targetlist it is
     // transforming; the `tle` borrow above is dead before this write.
     unsafe {
-        tle_node.with_mut::<TargetEntry, _>(|t| t.ressortgroupref = max_ref + 1).unwrap();
+        tle_node
+            .with_mut::<TargetEntry, _>(|t| t.ressortgroupref = max_ref + 1)
+            .unwrap();
     }
     max_ref + 1
 }
@@ -2464,7 +2595,9 @@ pub fn targetIsInSortList(
         return Ok(false);
     }
     for n in sort_list {
-        let scl = n.as_sort_group_clause().expect("sortlist holds SortGroupClause");
+        let scl = n
+            .as_sort_group_clause()
+            .expect("sortlist holds SortGroupClause");
         if scl.tleSortGroupRef == tle_ref
             && (sortop == InvalidOid
                 || sortop == scl.sortop
@@ -2531,9 +2664,9 @@ fn flatten_grouping_sets<'mcx>(
                         Flattened::Many(nodes) => {
                             result_set.lappend(mcx, Node::mk_list(mcx, nodes)?)?
                         }
-                        Flattened::Nil => unreachable!(
-                            "flatten_grouping_sets: NIL cell in a grouping list"
-                        ),
+                        Flattened::Nil => {
+                            unreachable!("flatten_grouping_sets: NIL cell in a grouping list")
+                        }
                     }
                 }
             }
@@ -2646,8 +2779,7 @@ pub fn transformGroupClause<'mcx>(
             if r#ref > 0 {
                 seen_local.push(r#ref);
                 if has_grouping_sets {
-                    let content =
-                        NodeList::make1(mcx, Node::mk_integer(mcx, r#ref as i32)?)?;
+                    let content = NodeList::make1(mcx, Node::mk_integer(mcx, r#ref as i32)?)?;
                     gsets.lappend(
                         mcx,
                         Node::mk_grouping_set(
@@ -2714,7 +2846,14 @@ fn transformGroupClauseExpr<'mcx>(
         }
     }
     if !found {
-        addTargetToGroupList(mcx, pstate, tle_node, flatresult, targetlist, expr_location(gexpr))?;
+        addTargetToGroupList(
+            mcx,
+            pstate,
+            tle_node,
+            flatresult,
+            targetlist,
+            expr_location(gexpr),
+        )?;
     }
     Ok(tle_node.as_target_entry().unwrap().ressortgroupref)
 }
@@ -2774,7 +2913,13 @@ fn transformGroupingSet<'mcx>(
             NodeTag::T_List => {
                 let sublist = n.as_list().unwrap();
                 let l = transformGroupClauseList(
-                    flatresult, mcx, pstate, sublist, targetlist, sort_clause, expr_kind,
+                    flatresult,
+                    mcx,
+                    pstate,
+                    sublist,
+                    targetlist,
+                    sort_clause,
+                    expr_kind,
                     use_sql99,
                 )?;
                 content.lappend(
@@ -2790,7 +2935,14 @@ fn transformGroupingSet<'mcx>(
             NodeTag::T_GroupingSet => {
                 let gset2 = n.as_grouping_set().unwrap();
                 let tg = transformGroupingSet(
-                    flatresult, mcx, pstate, gset2, targetlist, sort_clause, expr_kind, use_sql99,
+                    flatresult,
+                    mcx,
+                    pstate,
+                    gset2,
+                    targetlist,
+                    sort_clause,
+                    expr_kind,
+                    use_sql99,
                 )?;
                 content.lappend(mcx, tg)?;
             }
@@ -2839,7 +2991,11 @@ fn cube_limit_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgEr
             .errmsg("CUBE is limited to 12 elements")
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformGroupingSet")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "transformGroupingSet",
+            )),
     )
 }
 
@@ -2871,7 +3027,9 @@ fn addTargetToGroupList<'mcx>(
         // SAFETY: parse analysis holds exclusive access to the targetlist it
         // is transforming; the `tle` borrow above is dead before this write.
         unsafe {
-            tle_node.with_mut::<TargetEntry, _>(|t| t.expr = new_expr).unwrap();
+            tle_node
+                .with_mut::<TargetEntry, _>(|t| t.expr = new_expr)
+                .unwrap();
         }
         restype = TEXTOID;
     }
@@ -2926,7 +3084,11 @@ pub fn transformDistinctClause<'mcx>(
             .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in targetlist"));
         let tle = tle_node.as_target_entry().unwrap();
         if tle.resjunk {
-            return Err(distinct_orderby_mismatch(pstate, is_agg, expr_location(tle.expr)));
+            return Err(distinct_orderby_mismatch(
+                pstate,
+                is_agg,
+                expr_location(tle.expr),
+            ));
         }
         result.lappend(mcx, Node::mk(mcx, *scl)?)?;
     }
@@ -2996,10 +3158,20 @@ pub fn transformDistinctOnClause<'mcx>(
         if skipped_sortitem {
             return Err(distinct_on_orderby_mismatch(pstate, expr_location(dexpr)));
         }
-        addTargetToGroupList(mcx, pstate, tle_node, &mut result, targetlist, expr_location(dexpr))?;
+        addTargetToGroupList(
+            mcx,
+            pstate,
+            tle_node,
+            &mut result,
+            targetlist,
+            expr_location(dexpr),
+        )?;
     }
 
-    assert!(!result.is_nil(), "grammar forbids an empty DISTINCT ON list");
+    assert!(
+        !result.is_nil(),
+        "grammar forbids an empty DISTINCT ON list"
+    );
     Ok(result)
 }
 
@@ -3198,7 +3370,10 @@ pub fn transformWindowDefinitions<'mcx>(
             let Some((opfamily, opcintype, _cmptype)) =
                 lsyscache::get_ordering_op_properties(sortcl.sortop)?
             else {
-                panic!("operator {} is not a valid ordering operator", sortcl.sortop);
+                panic!(
+                    "operator {} is not a valid ordering operator",
+                    sortcl.sortop
+                );
             };
             rangeopfamily = opfamily;
             rangeopcintype = opcintype;
@@ -3244,13 +3419,12 @@ pub fn transformWindowDefinitions<'mcx>(
 }
 
 // copyObject on a SortGroupClause list (Copy struct; fresh cells).
-fn copy_sort_group_list<'mcx>(
-    mcx: Mcx<'mcx>,
-    list: &NodeList<'mcx>,
-) -> PgResult<NodeList<'mcx>> {
+fn copy_sort_group_list<'mcx>(mcx: Mcx<'mcx>, list: &NodeList<'mcx>) -> PgResult<NodeList<'mcx>> {
     let mut out = NodeList::nil();
     for sc_node in list {
-        let sc = sc_node.as_sort_group_clause().expect("SortGroupClause cell");
+        let sc = sc_node
+            .as_sort_group_clause()
+            .expect("SortGroupClause cell");
         out.lappend(mcx, Node::mk(mcx, *sc)?)?;
     }
     Ok(out)
@@ -3269,7 +3443,11 @@ fn window_error(
         elog::ereport(ERROR)
             .errcode(code)
             .errmsg(msg)
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -3293,7 +3471,11 @@ fn window_error_hint(
             .errcode(types_error::ERRCODE_WINDOWING_ERROR)
             .errmsg(msg)
             .errhint(hint)
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -3339,7 +3521,12 @@ fn transformFrameOffset<'mcx>(
     let construct_name;
     if frame_options & FRAMEOPTION_ROWS != 0 {
         construct_name = "ROWS";
-        let n = transformExpr(mcx, pstate, clause, ParseExprKind::EXPR_KIND_WINDOW_FRAME_ROWS)?;
+        let n = transformExpr(
+            mcx,
+            pstate,
+            clause,
+            ParseExprKind::EXPR_KIND_WINDOW_FRAME_ROWS,
+        )?;
         node = coerce::coerce_to_specific_type(
             mcx,
             pstate,
@@ -3351,19 +3538,25 @@ fn transformFrameOffset<'mcx>(
         )?;
     } else if frame_options & FRAMEOPTION_RANGE != 0 {
         construct_name = "RANGE";
-        let n = transformExpr(mcx, pstate, clause, ParseExprKind::EXPR_KIND_WINDOW_FRAME_RANGE)?;
+        let n = transformExpr(
+            mcx,
+            pstate,
+            clause,
+            ParseExprKind::EXPR_KIND_WINDOW_FRAME_RANGE,
+        )?;
         let node_type = expr_type(n);
-        let preferred_type = if node_type != UNKNOWNOID { node_type } else { rangeopcintype };
+        let preferred_type = if node_type != UNKNOWNOID {
+            node_type
+        } else {
+            rangeopcintype
+        };
 
         let mut nfuncs = 0;
         let mut nmatches = 0;
         let mut selected_type = InvalidOid;
         let mut selected_func = InvalidOid;
-        let procs = syscache_seams::lookup_pg_amproc_members::call(
-            mcx,
-            rangeopfamily,
-            rangeopcintype,
-        )?;
+        let procs =
+            syscache_seams::lookup_pg_amproc_members::call(mcx, rangeopfamily, rangeopcintype)?;
         for proc in procs.iter() {
             if proc.amprocnum != BTINRANGE_PROC {
                 continue;
@@ -3433,8 +3626,12 @@ fn transformFrameOffset<'mcx>(
         *in_range_func = selected_func;
     } else if frame_options & FRAMEOPTION_GROUPS != 0 {
         construct_name = "GROUPS";
-        let n =
-            transformExpr(mcx, pstate, clause, ParseExprKind::EXPR_KIND_WINDOW_FRAME_GROUPS)?;
+        let n = transformExpr(
+            mcx,
+            pstate,
+            clause,
+            ParseExprKind::EXPR_KIND_WINDOW_FRAME_GROUPS,
+        )?;
         node = coerce::coerce_to_specific_type(
             mcx,
             pstate,
@@ -3464,7 +3661,11 @@ fn frame_offset_error(
     let mut b = elog::ereport(ERROR)
         .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(msg)
-        .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()));
+        .errposition(parser_errposition(
+            pstate,
+            location,
+            mbutils::GetDatabaseEncoding(),
+        ));
     if let Some(hint) = hint {
         b = b.errhint(hint);
     }
@@ -3545,8 +3746,15 @@ fn ambiguous_column(
     Box::new(
         elog::ereport(ERROR)
             .errcode(types_error::ERRCODE_AMBIGUOUS_COLUMN)
-            .errmsg(format!("{} \"{name}\" is ambiguous", ParseExprKindName(expr_kind)))
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errmsg(format!(
+                "{} \"{name}\" is ambiguous",
+                ParseExprKindName(expr_kind)
+            ))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -3567,8 +3775,15 @@ fn non_integer_constant(
     Box::new(
         elog::ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)
-            .errmsg(format!("non-integer constant in {}", ParseExprKindName(expr_kind)))
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errmsg(format!(
+                "non-integer constant in {}",
+                ParseExprKindName(expr_kind)
+            ))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -3594,11 +3809,15 @@ fn position_not_in_select_list(
                 "{} position {target_pos} is not in select list",
                 ParseExprKindName(expr_kind)
             ))
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
-                0,
+                2149,
                 "findTargetlistEntrySQL92",
             )),
     )
@@ -3615,10 +3834,20 @@ fn contains_variables(
     Box::new(
         elog::ereport(ERROR)
             .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
-            .errmsg(format!("argument of {construct_name} must not contain variables"))
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errmsg(format!(
+                "argument of {construct_name} must not contain variables"
+            ))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "checkExprIsVarFree")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "checkExprIsVarFree",
+            )),
     )
 }
 
@@ -3639,7 +3868,11 @@ fn distinct_orderby_mismatch(
         elog::ereport(ERROR)
             .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
             .errmsg(msg.to_string())
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -3660,7 +3893,11 @@ fn distinct_on_orderby_mismatch(pstate: &ParseState<'_, '_>, location: ParseLoc)
                 "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
                     .to_string(),
             )
-            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .errposition(parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
             .into_error()
             .with_error_location(ErrorLocation::new(
                 "parse_clause.c",
@@ -3701,6 +3938,10 @@ fn null_row_count_with_ties() -> Box<PgError> {
             .errcode(ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE)
             .errmsg("row count cannot be null in FETCH FIRST ... WITH TIES clause".to_string())
             .into_error()
-            .with_error_location(ErrorLocation::new(file!(), line!() as i32, "transformLimitClause")),
+            .with_error_location(ErrorLocation::new(
+                file!(),
+                line!() as i32,
+                "transformLimitClause",
+            )),
     )
 }

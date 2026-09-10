@@ -67,14 +67,27 @@ fn init_priv_owner_route_covers_grantable_syscache_classes() {
     // (cacheid, owner attnum) per objectaddress.c's ObjectProperty rows.
     assert_eq!(
         grant::init_priv_owner_route(types_core::FOREIGN_DATA_WRAPPER_RELATION_ID).unwrap(),
-        (cache_syscache::cacheinfo::FOREIGNDATAWRAPPEROID, 3, "foreign-data wrapper"),
+        (
+            cache_syscache::cacheinfo::FOREIGNDATAWRAPPEROID,
+            3,
+            "foreign-data wrapper"
+        ),
     );
     assert_eq!(
         grant::init_priv_owner_route(types_core::FOREIGN_SERVER_RELATION_ID).unwrap(),
-        (cache_syscache::cacheinfo::FOREIGNSERVEROID, 3, "foreign server"),
+        (
+            cache_syscache::cacheinfo::FOREIGNSERVEROID,
+            3,
+            "foreign server"
+        ),
     );
     // pg_class.relowner.
-    assert_eq!(grant::init_priv_owner_route(RELATION_RELATION_ID).unwrap().1, 6);
+    assert_eq!(
+        grant::init_priv_owner_route(RELATION_RELATION_ID)
+            .unwrap()
+            .1,
+        6
+    );
 }
 
 #[test]
@@ -107,9 +120,15 @@ fn pg_aclmask_defensive_arms_error_catchably() {
     // C's elog(ERROR) arms: no grantable rights on these types; a catchable
     // error, never a process panic.
     let e = pg_aclmask_for_grant(ObjectType::OBJECT_STATISTIC_EXT, 1, 0, 10, 0).unwrap_err();
-    assert_eq!(e.message, "grantable rights not supported for statistics objects");
+    assert_eq!(
+        e.message,
+        "grantable rights not supported for statistics objects"
+    );
     let e = pg_aclmask_for_grant(ObjectType::OBJECT_EVENT_TRIGGER, 1, 0, 10, 0).unwrap_err();
-    assert_eq!(e.message, "grantable rights not supported for event triggers");
+    assert_eq!(
+        e.message,
+        "grantable rights not supported for event triggers"
+    );
 }
 
 #[test]
@@ -118,11 +137,17 @@ fn oidparse_rejects_other_nodes_with_c_elog() {
     // never a panic (audit-18.6 b138).
     let ctx = mcx::MemoryContext::new("t");
     let mcx = ctx.mcx();
-    assert_eq!(grant::oidparse(types_nodes::Node::mk_integer(mcx, 16384).unwrap()).unwrap(), 16384);
+    assert_eq!(
+        grant::oidparse(types_nodes::Node::mk_integer(mcx, 16384).unwrap()).unwrap(),
+        16384
+    );
     let e = grant::oidparse(types_nodes::Node::mk_string(mcx, "x").unwrap()).unwrap_err();
     assert_eq!(
         e.message,
-        format!("unrecognized node type: {}", types_nodes::NodeTag::T_String as i32)
+        format!(
+            "unrecognized node type: {}",
+            types_nodes::NodeTag::T_String as i32
+        )
     );
     assert_eq!(e.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
 }

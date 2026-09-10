@@ -78,8 +78,8 @@ pub(crate) unsafe fn bt_findsplitloc<'mcx>(
 
     if !P_RIGHTMOST(&opaque) {
         let itemid = page.item_id(P_HIKEY);
-        rightspace -= (maxalign(itemid.lp_len() as usize)
-            + core::mem::size_of::<ItemIdData>()) as i32;
+        rightspace -=
+            (maxalign(itemid.lp_len() as usize) + core::mem::size_of::<ItemIdData>()) as i32;
     }
 
     let olddataitemstotal = rightspace - page.exact_free_space() as i32;
@@ -228,8 +228,8 @@ unsafe fn recsplitloc(
     let mut rightfree = state.rightspace - (state.olddataitemstotal - olddataitemstoleft);
 
     if state.is_leaf {
-        leftfree -= (firstrightsz + maxalign(core::mem::size_of::<ItemPointerData>())
-            - postingsz) as i32;
+        leftfree -=
+            (firstrightsz + maxalign(core::mem::size_of::<ItemPointerData>()) - postingsz) as i32;
     } else {
         leftfree -= firstrightsz as i32;
     }
@@ -242,8 +242,8 @@ unsafe fn recsplitloc(
 
     if !state.is_leaf {
         rightfree += firstrightsz as i32
-            - (maxalign(crate::itup::INDEX_TUPLE_HEADER_SIZE)
-                + core::mem::size_of::<ItemIdData>()) as i32;
+            - (maxalign(crate::itup::INDEX_TUPLE_HEADER_SIZE) + core::mem::size_of::<ItemIdData>())
+                as i32;
     }
 
     if leftfree >= 0 && rightfree >= 0 {
@@ -448,9 +448,7 @@ unsafe fn strategy_decide(
 }
 
 /// _bt_interval_edges.
-fn interval_edges<'s>(
-    state: &'s FindSplitData<'_, '_, '_>,
-) -> (&'s SplitPoint, &'s SplitPoint) {
+fn interval_edges<'s>(state: &'s FindSplitData<'_, '_, '_>) -> (&'s SplitPoint, &'s SplitPoint) {
     let highsplit = state.interval.min(state.splits.len());
     let deltaoptimal = &state.splits[0];
     let mut leftinterval: Option<&SplitPoint> = None;

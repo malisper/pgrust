@@ -53,7 +53,9 @@ fn assert_bare_select(sel: &types_nodes::SelectStmt<'_>) {
 fn target_int<'a>(sel: &types_nodes::SelectStmt<'a>, i: usize) -> (Option<&'a str>, i32, i32, i32) {
     let rt = sel.targetList.nth(i).as_res_target().expect("ResTarget");
     let c = rt.val.expect("val").as_a_const().expect("A_Const");
-    let Some(ValUnion::Integer(iv)) = c.val else { panic!("Integer") };
+    let Some(ValUnion::Integer(iv)) = c.val else {
+        panic!("Integer")
+    };
     (rt.name, iv.ival, c.location, rt.location)
 }
 
@@ -89,7 +91,9 @@ fn select_string() {
     let sel = select_of(only_stmt(&list));
     let rt = sel.targetList.nth(0).as_res_target().unwrap();
     let c = rt.val.unwrap().as_a_const().unwrap();
-    let Some(ValUnion::String(s)) = c.val else { panic!("String") };
+    let Some(ValUnion::String(s)) = c.val else {
+        panic!("String")
+    };
     assert_eq!(s.sval, "foo");
     assert_eq!(c.location, 7);
 }
@@ -212,12 +216,19 @@ fn order_by_limit_offset() {
     let s1 = sel.sortClause.nth(1).as_sort_by().unwrap();
     assert_eq!(s1.sortby_dir, types_nodes::SortByDir::SORTBY_DEFAULT);
     let count = sel.limitCount.expect("limitCount").as_a_const().unwrap();
-    let Some(ValUnion::Integer(c)) = count.val else { panic!("Integer") };
+    let Some(ValUnion::Integer(c)) = count.val else {
+        panic!("Integer")
+    };
     assert_eq!(c.ival, 10);
     let off = sel.limitOffset.expect("limitOffset").as_a_const().unwrap();
-    let Some(ValUnion::Integer(o)) = off.val else { panic!("Integer") };
+    let Some(ValUnion::Integer(o)) = off.val else {
+        panic!("Integer")
+    };
     assert_eq!(o.ival, 2);
-    assert_eq!(sel.limitOption, types_nodes::LimitOption::LIMIT_OPTION_COUNT);
+    assert_eq!(
+        sel.limitOption,
+        types_nodes::LimitOption::LIMIT_OPTION_COUNT
+    );
 }
 
 #[test]
@@ -253,10 +264,15 @@ fn typecast_and_bool_where() {
 fn distinct_clause_repr() {
     let list = parse("SELECT DISTINCT a FROM t;");
     let sel = select_of(only_stmt(&list));
-    assert!(matches!(sel.distinctClause, types_nodes::DistinctClause::All));
+    assert!(matches!(
+        sel.distinctClause,
+        types_nodes::DistinctClause::All
+    ));
     let list = parse("SELECT DISTINCT ON (a, b) a FROM t;");
     let sel = select_of(only_stmt(&list));
-    let types_nodes::DistinctClause::On(ref l) = sel.distinctClause else { panic!("On") };
+    let types_nodes::DistinctClause::On(ref l) = sel.distinctClause else {
+        panic!("On")
+    };
     assert_eq!(l.len(), 2);
 }
 
@@ -268,19 +284,30 @@ fn select_options_errors() {
     assert_eq!(e.message(), "multiple ORDER BY clauses not allowed");
     assert_eq!(e.cursor_position(), Some(39));
     let e = parse_err("SELECT a FROM t FETCH FIRST 2 ROWS WITH TIES;");
-    assert_eq!(e.message(), "WITH TIES cannot be specified without ORDER BY clause");
+    assert_eq!(
+        e.message(),
+        "WITH TIES cannot be specified without ORDER BY clause"
+    );
 }
 
 #[test]
 fn insert_values_shapes() {
     let list = parse("INSERT INTO t VALUES (1, 2);");
-    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().expect("InsertStmt");
+    let ins = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_insert_stmt()
+        .expect("InsertStmt");
     let rv = ins.relation.unwrap().as_range_var().expect("RangeVar");
     assert_eq!(rv.relname, Some("t"));
     assert!(rv.alias.is_none() && ins.cols.is_nil());
     assert!(ins.onConflictClause.is_none() && ins.returningClause.is_none());
     assert!(ins.withClause.is_none());
-    let sel = ins.selectStmt.unwrap().as_select_stmt().expect("SelectStmt");
+    let sel = ins
+        .selectStmt
+        .unwrap()
+        .as_select_stmt()
+        .expect("SelectStmt");
     assert_eq!(sel.valuesLists.len(), 1);
     assert_eq!(sel.valuesLists.nth(0).as_list().unwrap().len(), 2);
 
@@ -301,7 +328,13 @@ fn insert_values_shapes() {
 
     let list = parse("INSERT INTO t SELECT a FROM s;");
     let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
-    assert!(ins.selectStmt.unwrap().as_select_stmt().unwrap().valuesLists.is_nil());
+    assert!(ins
+        .selectStmt
+        .unwrap()
+        .as_select_stmt()
+        .unwrap()
+        .valuesLists
+        .is_nil());
 }
 
 #[test]
@@ -309,20 +342,36 @@ fn on_conflict_shapes() {
     use types_nodes::OnConflictAction;
 
     let list = parse("INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING;");
-    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().expect("InsertStmt");
-    let occ = ins.onConflictClause.unwrap().as_on_conflict_clause().expect("OnConflictClause");
+    let ins = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_insert_stmt()
+        .expect("InsertStmt");
+    let occ = ins
+        .onConflictClause
+        .unwrap()
+        .as_on_conflict_clause()
+        .expect("OnConflictClause");
     assert_eq!(occ.action, OnConflictAction::ONCONFLICT_NOTHING);
     assert!(occ.infer.is_none() && occ.targetList.is_nil() && occ.whereClause.is_none());
 
-    let list =
-        parse("INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET b = excluded.b WHERE t.c > 0;");
+    let list = parse(
+        "INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET b = excluded.b WHERE t.c > 0;",
+    );
     let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
-    let occ = ins.onConflictClause.unwrap().as_on_conflict_clause().unwrap();
+    let occ = ins
+        .onConflictClause
+        .unwrap()
+        .as_on_conflict_clause()
+        .unwrap();
     assert_eq!(occ.action, OnConflictAction::ONCONFLICT_UPDATE);
     let infer = occ.infer.unwrap().as_infer_clause().expect("InferClause");
     assert_eq!(infer.indexElems.len(), 1);
-    let elem =
-        infer.indexElems.nth(0).as_variant::<types_nodes::IndexElem>().expect("IndexElem");
+    let elem = infer
+        .indexElems
+        .nth(0)
+        .as_variant::<types_nodes::IndexElem>()
+        .expect("IndexElem");
     assert_eq!(elem.name, Some("a"));
     assert!(infer.whereClause.is_none() && infer.conname.is_none());
     assert_eq!(occ.targetList.len(), 1);
@@ -334,13 +383,21 @@ fn on_conflict_shapes() {
 
     let list = parse("INSERT INTO t VALUES (1) ON CONFLICT (a) WHERE a > 0 DO NOTHING;");
     let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
-    let occ = ins.onConflictClause.unwrap().as_on_conflict_clause().unwrap();
+    let occ = ins
+        .onConflictClause
+        .unwrap()
+        .as_on_conflict_clause()
+        .unwrap();
     let infer = occ.infer.unwrap().as_infer_clause().unwrap();
     assert!(infer.whereClause.is_some());
 
     let list = parse("INSERT INTO t VALUES (1) ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING;");
     let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
-    let occ = ins.onConflictClause.unwrap().as_on_conflict_clause().unwrap();
+    let occ = ins
+        .onConflictClause
+        .unwrap()
+        .as_on_conflict_clause()
+        .unwrap();
     let infer = occ.infer.unwrap().as_infer_clause().unwrap();
     assert!(infer.indexElems.is_nil());
     assert_eq!(infer.conname, Some("t_pkey"));
@@ -390,8 +447,16 @@ fn partition_cmd_rule_numbers_match_tables() {
 #[test]
 fn returning_clause_shapes() {
     let list = parse("INSERT INTO t VALUES (1, 2) RETURNING id;");
-    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().expect("InsertStmt");
-    let ret = ins.returningClause.unwrap().as_returning_clause().expect("ReturningClause");
+    let ins = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_insert_stmt()
+        .expect("InsertStmt");
+    let ret = ins
+        .returningClause
+        .unwrap()
+        .as_returning_clause()
+        .expect("ReturningClause");
     assert!(ret.options.is_nil());
     assert_eq!(ret.exprs.len(), 1);
     let rt = ret.exprs.nth(0).as_res_target().expect("ResTarget");
@@ -400,13 +465,21 @@ fn returning_clause_shapes() {
     assert_eq!(cr.fields.nth(0).as_string().unwrap().sval, "id");
 
     let list = parse("UPDATE t SET a = 1 WHERE b = 2 RETURNING a, b + 1 AS c;");
-    let upd = only_stmt(&list).stmt.unwrap().as_update_stmt().expect("UpdateStmt");
+    let upd = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_update_stmt()
+        .expect("UpdateStmt");
     let ret = upd.returningClause.unwrap().as_returning_clause().unwrap();
     assert_eq!(ret.exprs.len(), 2);
     assert_eq!(ret.exprs.nth(1).as_res_target().unwrap().name, Some("c"));
 
     let list = parse("DELETE FROM t WHERE a = 1 RETURNING *;");
-    let del = only_stmt(&list).stmt.unwrap().as_delete_stmt().expect("DeleteStmt");
+    let del = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_delete_stmt()
+        .expect("DeleteStmt");
     let ret = del.returningClause.unwrap().as_returning_clause().unwrap();
     assert_eq!(ret.exprs.len(), 1);
     let rt = ret.exprs.nth(0).as_res_target().unwrap();
@@ -417,8 +490,16 @@ fn returning_clause_shapes() {
 #[test]
 fn copy_stmt_to_file() {
     let list = parse("COPY foo TO '/tmp/x.dat'");
-    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
-    let rv = cs.relation.expect("relation").as_range_var().expect("RangeVar");
+    let cs = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_copy_stmt()
+        .expect("CopyStmt");
+    let rv = cs
+        .relation
+        .expect("relation")
+        .as_range_var()
+        .expect("RangeVar");
     assert_eq!(rv.relname, Some("foo"));
     assert!(!cs.is_from && !cs.is_program);
     assert_eq!(cs.filename, Some("/tmp/x.dat"));
@@ -428,10 +509,13 @@ fn copy_stmt_to_file() {
 
 #[test]
 fn copy_stmt_from_with_options() {
-    let list = parse(
-        "COPY s.foo (a, b) FROM '/tmp/x.dat' WITH (FORMAT text, DELIMITER '|', NULL 'NIL')",
-    );
-    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
+    let list =
+        parse("COPY s.foo (a, b) FROM '/tmp/x.dat' WITH (FORMAT text, DELIMITER '|', NULL 'NIL')");
+    let cs = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_copy_stmt()
+        .expect("CopyStmt");
     let rv = cs.relation.unwrap().as_range_var().unwrap();
     assert_eq!((rv.schemaname, rv.relname), (Some("s"), Some("foo")));
     assert!(cs.is_from);
@@ -452,14 +536,28 @@ fn copy_stmt_from_with_options() {
 #[test]
 fn copy_stmt_legacy_options_and_stdin() {
     let list = parse("COPY foo FROM stdin DELIMITER '|' NULL ''");
-    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
+    let cs = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_copy_stmt()
+        .expect("CopyStmt");
     assert!(cs.is_from && cs.filename.is_none());
     assert_eq!(cs.options.len(), 2);
-    assert_eq!(cs.options.nth(0).as_def_elem().unwrap().defname, Some("delimiter"));
-    assert_eq!(cs.options.nth(1).as_def_elem().unwrap().defname, Some("null"));
+    assert_eq!(
+        cs.options.nth(0).as_def_elem().unwrap().defname,
+        Some("delimiter")
+    );
+    assert_eq!(
+        cs.options.nth(1).as_def_elem().unwrap().defname,
+        Some("null")
+    );
 
     let list = parse("COPY binary foo TO '/tmp/x'");
-    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
+    let cs = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_copy_stmt()
+        .expect("CopyStmt");
     let d = cs.options.nth(0).as_def_elem().unwrap();
     assert_eq!(d.defname, Some("format"));
     assert_eq!(d.arg.unwrap().as_string().unwrap().sval, "binary");
@@ -468,18 +566,32 @@ fn copy_stmt_legacy_options_and_stdin() {
 #[test]
 fn copy_stmt_query_form_and_errors() {
     let list = parse("COPY (SELECT 1) TO '/tmp/x'");
-    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
+    let cs = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_copy_stmt()
+        .expect("CopyStmt");
     assert!(cs.relation.is_none());
     assert!(cs.query.unwrap().as_select_stmt().is_some());
 
     let e = parse_err("COPY foo TO PROGRAM STDOUT");
-    assert!(format!("{e:?}").contains("STDIN/STDOUT not allowed with PROGRAM"), "{e:?}");
+    assert!(
+        format!("{e:?}").contains("STDIN/STDOUT not allowed with PROGRAM"),
+        "{e:?}"
+    );
     let e = parse_err("COPY foo TO '/tmp/x' WHERE a > 1");
-    assert!(format!("{e:?}").contains("WHERE clause not allowed with COPY TO"), "{e:?}");
+    assert!(
+        format!("{e:?}").contains("WHERE clause not allowed with COPY TO"),
+        "{e:?}"
+    );
 }
 
 fn vacuum_of<'a>(list: &NodeList<'a>) -> &'a types_nodes::parsenodes::VacuumStmt<'a> {
-    only_stmt(list).stmt.unwrap().as_vacuum_stmt().expect("VacuumStmt")
+    only_stmt(list)
+        .stmt
+        .unwrap()
+        .as_vacuum_stmt()
+        .expect("VacuumStmt")
 }
 
 #[test]
@@ -493,7 +605,10 @@ fn analyze_stmt_forms() {
     assert!(!vs.is_vacuumcmd && vs.options.is_nil());
     assert_eq!(vs.rels.len(), 1);
     let vr = vs.rels.nth(0).as_vacuum_relation().expect("VacuumRelation");
-    assert_eq!(vr.relation.unwrap().as_range_var().unwrap().relname, Some("t"));
+    assert_eq!(
+        vr.relation.unwrap().as_range_var().unwrap().relname,
+        Some("t")
+    );
     assert_eq!(vr.oid, 0);
     assert!(vr.va_cols.is_nil());
 
@@ -677,7 +792,10 @@ fn cluster_statement_forms() {
     let list = parse("CLUSTER t USING idx");
     let rs = only_stmt(&list);
     let n = rs.stmt.unwrap().as_variant::<ClusterStmt>().unwrap();
-    assert_eq!(n.relation.unwrap().as_range_var().unwrap().relname, Some("t"));
+    assert_eq!(
+        n.relation.unwrap().as_range_var().unwrap().relname,
+        Some("t")
+    );
     assert_eq!(n.indexname, Some("idx"));
     assert!(n.params.is_nil());
 
@@ -685,33 +803,48 @@ fn cluster_statement_forms() {
     let rs = only_stmt(&list);
     let n = rs.stmt.unwrap().as_variant::<ClusterStmt>().unwrap();
     assert!(n.relation.is_none() && n.indexname.is_none());
-    assert_eq!(n.params.nth(0).as_def_elem().unwrap().defname, Some("verbose"));
+    assert_eq!(
+        n.params.nth(0).as_def_elem().unwrap().defname,
+        Some("verbose")
+    );
 
     let list = parse("CLUSTER idx ON t");
     let rs = only_stmt(&list);
     let n = rs.stmt.unwrap().as_variant::<ClusterStmt>().unwrap();
-    assert_eq!(n.relation.unwrap().as_range_var().unwrap().relname, Some("t"));
+    assert_eq!(
+        n.relation.unwrap().as_range_var().unwrap().relname,
+        Some("t")
+    );
     assert_eq!(n.indexname, Some("idx"));
 
     let list = parse("REINDEX INDEX i1");
     let rs = only_stmt(&list);
     let n = rs.stmt.unwrap().as_variant::<ReindexStmt>().unwrap();
     assert_eq!(n.kind, ReindexObjectType::REINDEX_OBJECT_INDEX);
-    assert_eq!(n.relation.unwrap().as_range_var().unwrap().relname, Some("i1"));
+    assert_eq!(
+        n.relation.unwrap().as_range_var().unwrap().relname,
+        Some("i1")
+    );
     assert!(n.params.is_nil() && n.name.is_none());
 
     let list = parse("REINDEX (VERBOSE) TABLE t");
     let rs = only_stmt(&list);
     let n = rs.stmt.unwrap().as_variant::<ReindexStmt>().unwrap();
     assert_eq!(n.kind, ReindexObjectType::REINDEX_OBJECT_TABLE);
-    assert_eq!(n.params.nth(0).as_def_elem().unwrap().defname, Some("verbose"));
+    assert_eq!(
+        n.params.nth(0).as_def_elem().unwrap().defname,
+        Some("verbose")
+    );
 
     let list = parse("REINDEX DATABASE CONCURRENTLY d");
     let rs = only_stmt(&list);
     let n = rs.stmt.unwrap().as_variant::<ReindexStmt>().unwrap();
     assert_eq!(n.kind, ReindexObjectType::REINDEX_OBJECT_DATABASE);
     assert_eq!(n.name, Some("d"));
-    assert_eq!(n.params.nth(0).as_def_elem().unwrap().defname, Some("concurrently"));
+    assert_eq!(
+        n.params.nth(0).as_def_elem().unwrap().defname,
+        Some("concurrently")
+    );
 }
 
 #[test]
@@ -719,7 +852,11 @@ fn create_table_two_columns() {
     use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName};
     let list = parse("CREATE TABLE t2 (a int4, b int8)");
     let rs = only_stmt(&list);
-    let n = rs.stmt.expect("stmt").as_variant::<CreateStmt>().expect("CreateStmt");
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<CreateStmt>()
+        .expect("CreateStmt");
     let rv = n.relation.expect("relation");
     assert_eq!(rv.relname, Some("t2"));
     assert_eq!(rv.relpersistence, b'p');
@@ -729,24 +866,41 @@ fn create_table_two_columns() {
     assert_eq!(n.tableElts.len(), 2);
     let expect = [("a", "int4"), ("b", "int8")];
     for (i, (name, tyname)) in expect.iter().enumerate() {
-        let cd = n.tableElts.nth(i).as_variant::<ColumnDef>().expect("ColumnDef");
+        let cd = n
+            .tableElts
+            .nth(i)
+            .as_variant::<ColumnDef>()
+            .expect("ColumnDef");
         assert_eq!(cd.colname, Some(*name));
         assert!(cd.is_local && !cd.is_not_null && cd.constraints.is_nil());
-        let tn = cd.typeName.expect("typeName").as_variant::<TypeName>().expect("TypeName");
-        let last = tn.names.nth(tn.names.len() - 1).as_string().expect("name").sval;
+        let tn = cd
+            .typeName
+            .expect("typeName")
+            .as_variant::<TypeName>()
+            .expect("TypeName");
+        let last = tn
+            .names
+            .nth(tn.names.len() - 1)
+            .as_string()
+            .expect("name")
+            .sval;
         assert_eq!(last, *tyname);
     }
 }
 
 #[test]
 fn identity_generated_column_constraints() {
-    use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, CreateStmt};
+    use types_nodes::rawnodes::{ColumnDef, ConstrType, Constraint, CreateStmt};
     let list = parse(
         "CREATE TABLE t (id int GENERATED ALWAYS AS IDENTITY, \
          j bigint GENERATED BY DEFAULT AS IDENTITY (START WITH 10 INCREMENT BY 5), \
          a int, b int GENERATED ALWAYS AS (a * 2) STORED)",
     );
-    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<CreateStmt>()
+        .unwrap();
     assert_eq!(n.tableElts.len(), 4);
 
     let cd = n.tableElts.nth(0).as_variant::<ColumnDef>().unwrap();
@@ -770,10 +924,17 @@ fn identity_generated_column_constraints() {
 
     // gram.y: generated columns only allow ALWAYS; VIRTUAL kind parses.
     let e = parse_err("CREATE TABLE t (b int GENERATED BY DEFAULT AS (1) STORED)");
-    assert_eq!(e.message(), "for a generated column, GENERATED ALWAYS must be specified");
+    assert_eq!(
+        e.message(),
+        "for a generated column, GENERATED ALWAYS must be specified"
+    );
     assert_eq!(e.cursor_position(), Some(33));
     let list = parse("CREATE TABLE t (a int, b int GENERATED ALWAYS AS (a) VIRTUAL)");
-    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<CreateStmt>()
+        .unwrap();
     let cd = n.tableElts.nth(1).as_variant::<ColumnDef>().unwrap();
     let c = cd.constraints.nth(0).as_variant::<Constraint>().unwrap();
     assert_eq!(c.generated_kind, b'v');
@@ -812,13 +973,21 @@ fn with_clause_select() {
     assert!(!wc.recursive);
     assert_eq!(wc.location, 0);
     assert_eq!(wc.ctes.len(), 1);
-    let cte = wc.ctes.nth(0).as_variant::<CommonTableExpr>().expect("CommonTableExpr");
+    let cte = wc
+        .ctes
+        .nth(0)
+        .as_variant::<CommonTableExpr>()
+        .expect("CommonTableExpr");
     assert_eq!(cte.ctename, Some("x"));
     assert!(cte.aliascolnames.is_nil());
     assert_eq!(cte.ctematerialized, CTEMaterialize::CTEMaterializeDefault);
     assert_eq!(cte.location, 5);
     assert!(!cte.cterecursive && cte.cterefcount == 0);
-    let cq = cte.ctequery.expect("ctequery").as_select_stmt().expect("SelectStmt");
+    let cq = cte
+        .ctequery
+        .expect("ctequery")
+        .as_select_stmt()
+        .expect("SelectStmt");
     assert_eq!(cq.targetList.len(), 1);
     assert!(cte.search_clause.is_none() && cte.cycle_clause.is_none());
 }
@@ -845,7 +1014,10 @@ fn with_clause_variants() {
     let x = wc.ctes.nth(0).as_variant::<CommonTableExpr>().expect("cte");
     assert_eq!(x.ctename, Some("x"));
     assert_eq!(x.aliascolnames.len(), 2);
-    assert_eq!(x.aliascolnames.nth(0).as_string().expect("colname").sval, "a");
+    assert_eq!(
+        x.aliascolnames.nth(0).as_string().expect("colname").sval,
+        "a"
+    );
     assert_eq!(x.ctematerialized, CTEMaterialize::CTEMaterializeAlways);
     let y = wc.ctes.nth(1).as_variant::<CommonTableExpr>().expect("cte");
     assert_eq!(y.ctematerialized, CTEMaterialize::CTEMaterializeNever);
@@ -873,32 +1045,60 @@ fn join_on_shapes() {
     assert_eq!(e.name.nth(0).as_string().unwrap().sval, "=");
 
     let list = parse("SELECT * FROM a INNER JOIN b ON true;");
-    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    let j = select_of(only_stmt(&list))
+        .fromClause
+        .nth(0)
+        .as_join_expr()
+        .unwrap();
     assert_eq!(j.jointype, JoinType::JOIN_INNER);
     assert!(j.quals.is_some());
 
     let list = parse("SELECT * FROM a CROSS JOIN b;");
-    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    let j = select_of(only_stmt(&list))
+        .fromClause
+        .nth(0)
+        .as_join_expr()
+        .unwrap();
     assert_eq!(j.jointype, JoinType::JOIN_INNER);
     assert!(j.quals.is_none());
 
     let list = parse("SELECT * FROM (a JOIN b ON a.x = b.x) c;");
-    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    let j = select_of(only_stmt(&list))
+        .fromClause
+        .nth(0)
+        .as_join_expr()
+        .unwrap();
     assert_eq!(j.alias.expect("alias").aliasname, Some("c"));
 
     let list = parse("SELECT * FROM a JOIN b ON a.x = b.x JOIN c ON b.y = c.y;");
-    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    let j = select_of(only_stmt(&list))
+        .fromClause
+        .nth(0)
+        .as_join_expr()
+        .unwrap();
     assert!(j.larg.as_join_expr().is_some());
     assert!(j.rarg.as_range_var().is_some());
 
     let list = parse("SELECT * FROM a LEFT OUTER JOIN b ON a.x = b.x;");
-    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    let j = select_of(only_stmt(&list))
+        .fromClause
+        .nth(0)
+        .as_join_expr()
+        .unwrap();
     assert_eq!(j.jointype, JoinType::JOIN_LEFT);
     let list = parse("SELECT * FROM a RIGHT JOIN b ON a.x = b.x;");
-    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    let j = select_of(only_stmt(&list))
+        .fromClause
+        .nth(0)
+        .as_join_expr()
+        .unwrap();
     assert_eq!(j.jointype, JoinType::JOIN_RIGHT);
     let list = parse("SELECT * FROM a FULL JOIN b ON a.x = b.x;");
-    let j = select_of(only_stmt(&list)).fromClause.nth(0).as_join_expr().unwrap();
+    let j = select_of(only_stmt(&list))
+        .fromClause
+        .nth(0)
+        .as_join_expr()
+        .unwrap();
     assert_eq!(j.jointype, JoinType::JOIN_FULL);
 }
 
@@ -935,7 +1135,11 @@ fn in_subquery_shapes() {
 
     let list = parse("SELECT * FROM t1 WHERE pk IN (SELECT fk FROM t2);");
     let sel = select_of(only_stmt(&list));
-    let sl = sel.whereClause.expect("WHERE").as_sub_link().expect("SubLink");
+    let sl = sel
+        .whereClause
+        .expect("WHERE")
+        .as_sub_link()
+        .expect("SubLink");
     assert_eq!(sl.subLinkType, SubLinkType::ANY_SUBLINK);
     assert_eq!(sl.subLinkId, 0);
     assert!(sl.operName.is_nil());
@@ -959,7 +1163,11 @@ fn subquery_op_sub_type_shapes() {
     // a_expr subquery_Op sub_type select_with_parens (rules 2078, 2263-2265).
     let list = parse("SELECT * FROM t1 WHERE pk = ANY (SELECT fk FROM t2);");
     let sel = select_of(only_stmt(&list));
-    let sl = sel.whereClause.expect("WHERE").as_sub_link().expect("SubLink");
+    let sl = sel
+        .whereClause
+        .expect("WHERE")
+        .as_sub_link()
+        .expect("SubLink");
     assert_eq!(sl.subLinkType, SubLinkType::ANY_SUBLINK);
     assert_eq!(sl.operName.len(), 1);
     assert_eq!(sl.operName.nth(0).as_string().expect("op name").sval, "=");
@@ -967,13 +1175,21 @@ fn subquery_op_sub_type_shapes() {
 
     let list = parse("SELECT * FROM t1 WHERE pk <> SOME (SELECT fk FROM t2);");
     let sel = select_of(only_stmt(&list));
-    let sl = sel.whereClause.expect("WHERE").as_sub_link().expect("SubLink");
+    let sl = sel
+        .whereClause
+        .expect("WHERE")
+        .as_sub_link()
+        .expect("SubLink");
     assert_eq!(sl.subLinkType, SubLinkType::ANY_SUBLINK);
     assert_eq!(sl.operName.nth(0).as_string().expect("op name").sval, "<>");
 
     let list = parse("SELECT * FROM t1 WHERE pk < ALL (SELECT fk FROM t2);");
     let sel = select_of(only_stmt(&list));
-    let sl = sel.whereClause.expect("WHERE").as_sub_link().expect("SubLink");
+    let sl = sel
+        .whereClause
+        .expect("WHERE")
+        .as_sub_link()
+        .expect("SubLink");
     assert_eq!(sl.subLinkType, SubLinkType::ALL_SUBLINK);
     assert_eq!(sl.operName.nth(0).as_string().expect("op name").sval, "<");
     assert!(sl.subselect.as_select_stmt().is_some());
@@ -1007,7 +1223,10 @@ fn in_list_shapes() {
 }
 
 fn set_of<'a>(rs: &RawStmt<'a>) -> &'a types_nodes::parsenodes::VariableSetStmt<'a> {
-    rs.stmt.expect("stmt").as_variable_set_stmt().expect("VariableSetStmt")
+    rs.stmt
+        .expect("stmt")
+        .as_variable_set_stmt()
+        .expect("VariableSetStmt")
 }
 
 #[test]
@@ -1015,7 +1234,10 @@ fn set_session_and_defaults() {
     use types_nodes::parsenodes::VariableSetKind::*;
     let list = parse("SET SESSION work_mem = '8MB';");
     let n = set_of(only_stmt(&list));
-    assert_eq!((n.kind, n.name, n.is_local), (VAR_SET_VALUE, Some("work_mem"), false));
+    assert_eq!(
+        (n.kind, n.name, n.is_local),
+        (VAR_SET_VALUE, Some("work_mem"), false)
+    );
 
     let n = set_of(only_stmt(&parse("SET work_mem TO DEFAULT;")));
     assert_eq!((n.kind, n.name), (VAR_SET_DEFAULT, Some("work_mem")));
@@ -1038,7 +1260,10 @@ fn set_session_and_defaults() {
 fn set_session_authorization_forms() {
     use types_nodes::parsenodes::VariableSetKind::*;
     let n = set_of(only_stmt(&parse("SET SESSION AUTHORIZATION alice;")));
-    assert_eq!((n.kind, n.name), (VAR_SET_VALUE, Some("session_authorization")));
+    assert_eq!(
+        (n.kind, n.name),
+        (VAR_SET_VALUE, Some("session_authorization"))
+    );
     let c = n.args.nth(0).as_a_const().unwrap();
     assert!(matches!(c.val, Some(ValUnion::String(s)) if s.sval == "alice"));
 
@@ -1047,7 +1272,10 @@ fn set_session_authorization_forms() {
     assert!(matches!(c.val, Some(ValUnion::String(s)) if s.sval == "bob"));
 
     let n = set_of(only_stmt(&parse("SET SESSION AUTHORIZATION DEFAULT;")));
-    assert_eq!((n.kind, n.name), (VAR_SET_DEFAULT, Some("session_authorization")));
+    assert_eq!(
+        (n.kind, n.name),
+        (VAR_SET_DEFAULT, Some("session_authorization"))
+    );
     let n = set_of(only_stmt(&parse("RESET SESSION AUTHORIZATION;")));
     assert_eq!((n.kind, n.name), (VAR_RESET, Some("session_authorization")));
 }
@@ -1070,22 +1298,27 @@ fn reset_and_show_forms() {
     ] {
         let list = parse(sql);
         let rs = only_stmt(&list);
-        let n = rs.stmt.unwrap().as_variable_show_stmt().expect("VariableShowStmt");
+        let n = rs
+            .stmt
+            .unwrap()
+            .as_variable_show_stmt()
+            .expect("VariableShowStmt");
         assert_eq!(n.name, Some(want));
     }
 }
 
 fn target_expr<'a>(list: &NodeList<'a>) -> types_nodes::Node<'a> {
     let sel = select_of(only_stmt(list));
-    sel.targetList.nth(0).as_res_target().expect("ResTarget").val.expect("val")
+    sel.targetList
+        .nth(0)
+        .as_res_target()
+        .expect("ResTarget")
+        .val
+        .expect("val")
 }
 
 #[track_caller]
-fn assert_system_func<'a>(
-    f: &types_nodes::FuncCall<'a>,
-    name: &str,
-    nargs: usize,
-) {
+fn assert_system_func<'a>(f: &types_nodes::FuncCall<'a>, name: &str, nargs: usize) {
     assert_eq!(f.funcname.len(), 2);
     assert_eq!(f.funcname.nth(0).as_string().unwrap().sval, "pg_catalog");
     assert_eq!(f.funcname.nth(1).as_string().unwrap().sval, name);
@@ -1100,7 +1333,9 @@ fn at_time_zone_and_at_local() {
     assert_system_func(f, "timezone", 2);
     // C arg order: (zone, operand).
     let z = f.args.nth(0).as_a_const().expect("A_Const");
-    let Some(ValUnion::String(s)) = z.val else { panic!("String") };
+    let Some(ValUnion::String(s)) = z.val else {
+        panic!("String")
+    };
     assert_eq!(s.sval, "UTC");
     assert!(f.args.nth(1).as_column_ref().is_some());
     assert_eq!(f.location, 9);
@@ -1118,14 +1353,18 @@ fn extract_shapes() {
     let f = target_expr(&list).as_func_call().expect("FuncCall");
     assert_system_func(f, "extract", 2);
     let a = f.args.nth(0).as_a_const().expect("A_Const");
-    let Some(ValUnion::String(s)) = a.val else { panic!("String") };
+    let Some(ValUnion::String(s)) = a.val else {
+        panic!("String")
+    };
     assert_eq!(s.sval, "epoch");
     assert!(f.args.nth(1).as_column_ref().is_some());
 
     let list = parse("SELECT EXTRACT('timezone_hour' FROM x);");
     let f = target_expr(&list).as_func_call().expect("FuncCall");
     let a = f.args.nth(0).as_a_const().expect("A_Const");
-    let Some(ValUnion::String(s)) = a.val else { panic!("String") };
+    let Some(ValUnion::String(s)) = a.val else {
+        panic!("String")
+    };
     assert_eq!(s.sval, "timezone_hour");
 
     for (sql, kw) in [
@@ -1139,7 +1378,9 @@ fn extract_shapes() {
         let list = parse(sql);
         let f = target_expr(&list).as_func_call().expect("FuncCall");
         let a = f.args.nth(0).as_a_const().expect("A_Const");
-        let Some(ValUnion::String(s)) = a.val else { panic!("String") };
+        let Some(ValUnion::String(s)) = a.val else {
+            panic!("String")
+        };
         assert_eq!(s.sval, kw);
     }
 }
@@ -1148,7 +1389,10 @@ fn extract_shapes() {
 fn set_time_zone() {
     use types_nodes::parsenodes::VariableSetKind::*;
     let n = set_of(only_stmt(&parse("SET TIME ZONE 'UTC';")));
-    assert_eq!((n.kind, n.name, n.jumble_args), (VAR_SET_VALUE, Some("timezone"), true));
+    assert_eq!(
+        (n.kind, n.name, n.jumble_args),
+        (VAR_SET_VALUE, Some("timezone"), true)
+    );
     let c = n.args.nth(0).as_a_const().unwrap();
     assert!(matches!(c.val, Some(ValUnion::String(s)) if s.sval == "UTC"));
 
@@ -1198,43 +1442,81 @@ fn xact_modes<'a>(n: &types_nodes::parsenodes::TransactionStmt<'a>) -> Vec<(&'a 
 fn transaction_forms() {
     use types_nodes::parsenodes::TransactionStmtKind::*;
     let list = parse("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY, DEFERRABLE;");
-    let n = only_stmt(&list).stmt.unwrap().as_transaction_stmt().unwrap();
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_transaction_stmt()
+        .unwrap();
     assert_eq!(n.kind, TRANS_STMT_BEGIN);
     assert_eq!(
         xact_modes(n),
-        [("transaction_isolation", -1), ("transaction_read_only", 1), ("transaction_deferrable", 1)]
+        [
+            ("transaction_isolation", -1),
+            ("transaction_read_only", 1),
+            ("transaction_deferrable", 1)
+        ]
     );
-    let iso = n.options.nth(0).as_def_elem().unwrap().arg.unwrap().as_a_const().unwrap();
+    let iso = n
+        .options
+        .nth(0)
+        .as_def_elem()
+        .unwrap()
+        .arg
+        .unwrap()
+        .as_a_const()
+        .unwrap();
     assert!(matches!(iso.val, Some(ValUnion::String(s)) if s.sval == "repeatable read"));
 
     let list = parse("START TRANSACTION ISOLATION LEVEL SERIALIZABLE READ WRITE;");
-    let n = only_stmt(&list).stmt.unwrap().as_transaction_stmt().unwrap();
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_transaction_stmt()
+        .unwrap();
     assert_eq!(n.kind, TRANS_STMT_START);
     assert_eq!(
         xact_modes(n),
         [("transaction_isolation", -1), ("transaction_read_only", 0)]
     );
 
-    let n = only_stmt(&parse("END;")).stmt.unwrap().as_transaction_stmt().unwrap();
+    let n = only_stmt(&parse("END;"))
+        .stmt
+        .unwrap()
+        .as_transaction_stmt()
+        .unwrap();
     assert_eq!((n.kind, n.chain), (TRANS_STMT_COMMIT, false));
-    let n = only_stmt(&parse("END AND CHAIN;")).stmt.unwrap().as_transaction_stmt().unwrap();
+    let n = only_stmt(&parse("END AND CHAIN;"))
+        .stmt
+        .unwrap()
+        .as_transaction_stmt()
+        .unwrap();
     assert_eq!((n.kind, n.chain), (TRANS_STMT_COMMIT, true));
-    let n = only_stmt(&parse("ABORT AND NO CHAIN;")).stmt.unwrap().as_transaction_stmt().unwrap();
+    let n = only_stmt(&parse("ABORT AND NO CHAIN;"))
+        .stmt
+        .unwrap()
+        .as_transaction_stmt()
+        .unwrap();
     assert_eq!((n.kind, n.chain), (TRANS_STMT_ROLLBACK, false));
 
-    let n = set_of(only_stmt(&parse("SET TRANSACTION ISOLATION LEVEL READ COMMITTED;")));
+    let n = set_of(only_stmt(&parse(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED;",
+    )));
     assert_eq!(
         (n.kind, n.name, n.jumble_args),
-        (types_nodes::parsenodes::VariableSetKind::VAR_SET_MULTI, Some("TRANSACTION"), true)
+        (
+            types_nodes::parsenodes::VariableSetKind::VAR_SET_MULTI,
+            Some("TRANSACTION"),
+            true
+        )
     );
-    let n = set_of(only_stmt(&parse("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;")));
+    let n = set_of(only_stmt(&parse(
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;",
+    )));
     assert_eq!(n.name, Some("SESSION CHARACTERISTICS"));
     assert_eq!(xact_modes_of_set(n), [("transaction_read_only", 1)]);
 }
 
-fn xact_modes_of_set<'a>(
-    n: &types_nodes::parsenodes::VariableSetStmt<'a>,
-) -> Vec<(&'a str, i32)> {
+fn xact_modes_of_set<'a>(n: &types_nodes::parsenodes::VariableSetStmt<'a>) -> Vec<(&'a str, i32)> {
     n.args
         .iter()
         .map(|o| {
@@ -1261,22 +1543,46 @@ fn discard_forms() {
         ("DISCARD TEMPORARY;", DISCARD_TEMP),
     ] {
         let list = parse(sql);
-        let n = only_stmt(&list).stmt.unwrap().as_discard_stmt().expect("DiscardStmt");
+        let n = only_stmt(&list)
+            .stmt
+            .unwrap()
+            .as_discard_stmt()
+            .expect("DiscardStmt");
         assert_eq!(n.target, want, "{sql}");
     }
 }
 
 #[test]
 fn listen_notify_unlisten() {
-    let n = only_stmt(&parse("LISTEN ch;")).stmt.unwrap().as_listen_stmt().unwrap();
+    let n = only_stmt(&parse("LISTEN ch;"))
+        .stmt
+        .unwrap()
+        .as_listen_stmt()
+        .unwrap();
     assert_eq!(n.conditionname, Some("ch"));
-    let n = only_stmt(&parse("UNLISTEN ch;")).stmt.unwrap().as_unlisten_stmt().unwrap();
+    let n = only_stmt(&parse("UNLISTEN ch;"))
+        .stmt
+        .unwrap()
+        .as_unlisten_stmt()
+        .unwrap();
     assert_eq!(n.conditionname, Some("ch"));
-    let n = only_stmt(&parse("UNLISTEN *;")).stmt.unwrap().as_unlisten_stmt().unwrap();
+    let n = only_stmt(&parse("UNLISTEN *;"))
+        .stmt
+        .unwrap()
+        .as_unlisten_stmt()
+        .unwrap();
     assert_eq!(n.conditionname, None);
-    let n = only_stmt(&parse("NOTIFY ch;")).stmt.unwrap().as_notify_stmt().unwrap();
+    let n = only_stmt(&parse("NOTIFY ch;"))
+        .stmt
+        .unwrap()
+        .as_notify_stmt()
+        .unwrap();
     assert_eq!((n.conditionname, n.payload), (Some("ch"), None));
-    let n = only_stmt(&parse("NOTIFY ch, 'pay';")).stmt.unwrap().as_notify_stmt().unwrap();
+    let n = only_stmt(&parse("NOTIFY ch, 'pay';"))
+        .stmt
+        .unwrap()
+        .as_notify_stmt()
+        .unwrap();
     assert_eq!((n.conditionname, n.payload), (Some("ch"), Some("pay")));
 }
 
@@ -1313,14 +1619,20 @@ fn sql_value_functions() {
         ("SELECT CURRENT_TIME;", Op::SVFOP_CURRENT_TIME, -1),
         ("SELECT CURRENT_TIME(2);", Op::SVFOP_CURRENT_TIME_N, 2),
         ("SELECT CURRENT_TIMESTAMP;", Op::SVFOP_CURRENT_TIMESTAMP, -1),
-        ("SELECT CURRENT_TIMESTAMP(3);", Op::SVFOP_CURRENT_TIMESTAMP_N, 3),
+        (
+            "SELECT CURRENT_TIMESTAMP(3);",
+            Op::SVFOP_CURRENT_TIMESTAMP_N,
+            3,
+        ),
         ("SELECT LOCALTIME;", Op::SVFOP_LOCALTIME, -1),
         ("SELECT LOCALTIME(1);", Op::SVFOP_LOCALTIME_N, 1),
         ("SELECT LOCALTIMESTAMP;", Op::SVFOP_LOCALTIMESTAMP, -1),
         ("SELECT LOCALTIMESTAMP(6);", Op::SVFOP_LOCALTIMESTAMP_N, 6),
     ] {
         let list = parse(sql);
-        let svf = target_expr(&list).as_sql_value_function().expect("SQLValueFunction");
+        let svf = target_expr(&list)
+            .as_sql_value_function()
+            .expect("SQLValueFunction");
         assert_eq!(svf.op, op, "{sql}");
         assert_eq!(svf.typmod, typmod, "{sql}");
         assert_eq!(svf.r#type, 0);
@@ -1333,28 +1645,67 @@ fn create_function_sql() {
     use types_nodes::rawnodes::TypeName;
     let list = parse("CREATE FUNCTION add1(int) RETURNS int AS 'select $1 + 1' LANGUAGE sql;");
     let rs = only_stmt(&list);
-    let n = rs.stmt.expect("stmt").as_create_function_stmt().expect("CreateFunctionStmt");
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_create_function_stmt()
+        .expect("CreateFunctionStmt");
     assert!(!n.is_procedure && !n.replace && n.sql_body.is_none());
     assert_eq!(n.funcname.len(), 1);
     assert_eq!(n.funcname.nth(0).as_string().expect("name").sval, "add1");
     assert_eq!(n.parameters.len(), 1);
-    let p = n.parameters.nth(0).as_function_parameter().expect("FunctionParameter");
+    let p = n
+        .parameters
+        .nth(0)
+        .as_function_parameter()
+        .expect("FunctionParameter");
     assert!(p.name.is_none() && p.defexpr.is_none());
-    assert_eq!(p.mode, types_nodes::parsenodes::FunctionParameterMode::FUNC_PARAM_DEFAULT);
-    let pt = p.argType.expect("argType").as_variant::<TypeName>().expect("TypeName");
-    assert_eq!(pt.names.nth(pt.names.len() - 1).as_string().expect("t").sval, "int4");
-    let rt = n.returnType.expect("returnType").as_variant::<TypeName>().expect("TypeName");
+    assert_eq!(
+        p.mode,
+        types_nodes::parsenodes::FunctionParameterMode::FUNC_PARAM_DEFAULT
+    );
+    let pt = p
+        .argType
+        .expect("argType")
+        .as_variant::<TypeName>()
+        .expect("TypeName");
+    assert_eq!(
+        pt.names
+            .nth(pt.names.len() - 1)
+            .as_string()
+            .expect("t")
+            .sval,
+        "int4"
+    );
+    let rt = n
+        .returnType
+        .expect("returnType")
+        .as_variant::<TypeName>()
+        .expect("TypeName");
     assert!(!rt.setof);
-    assert_eq!(rt.names.nth(rt.names.len() - 1).as_string().expect("t").sval, "int4");
+    assert_eq!(
+        rt.names
+            .nth(rt.names.len() - 1)
+            .as_string()
+            .expect("t")
+            .sval,
+        "int4"
+    );
     assert_eq!(n.options.len(), 2);
     let as_el = n.options.nth(0).as_def_elem().expect("DefElem");
     assert_eq!(as_el.defname, Some("as"));
     let as_list = as_el.arg.expect("arg").as_list().expect("List");
     assert_eq!(as_list.len(), 1);
-    assert_eq!(as_list.nth(0).as_string().expect("src").sval, "select $1 + 1");
+    assert_eq!(
+        as_list.nth(0).as_string().expect("src").sval,
+        "select $1 + 1"
+    );
     let lang = n.options.nth(1).as_def_elem().expect("DefElem");
     assert_eq!(lang.defname, Some("language"));
-    assert_eq!(lang.arg.expect("arg").as_string().expect("lang").sval, "sql");
+    assert_eq!(
+        lang.arg.expect("arg").as_string().expect("lang").sval,
+        "sql"
+    );
 }
 
 #[test]
@@ -1370,13 +1721,26 @@ fn create_or_replace_function_options() {
     assert!(n.replace && !n.is_procedure);
     assert!(n.parameters.is_nil());
     assert_eq!(n.options.len(), 5);
-    let names: Vec<_> =
-        n.options.iter().map(|o| o.as_def_elem().unwrap().defname.unwrap()).collect();
+    let names: Vec<_> = n
+        .options
+        .iter()
+        .map(|o| o.as_def_elem().unwrap().defname.unwrap())
+        .collect();
     assert_eq!(names, ["as", "language", "strict", "volatility", "cost"]);
     let strict = n.options.nth(2).as_def_elem().unwrap();
-    assert!(strict.arg.expect("arg").as_boolean().expect("Boolean").boolval);
+    assert!(
+        strict
+            .arg
+            .expect("arg")
+            .as_boolean()
+            .expect("Boolean")
+            .boolval
+    );
     let vol = n.options.nth(3).as_def_elem().unwrap();
-    assert_eq!(vol.arg.expect("arg").as_string().expect("Str").sval, "immutable");
+    assert_eq!(
+        vol.arg.expect("arg").as_string().expect("Str").sval,
+        "immutable"
+    );
     let cost = n.options.nth(4).as_def_elem().unwrap();
     assert!(cost.arg.expect("arg").as_integer().is_some());
 }
@@ -1394,15 +1758,28 @@ fn create_function_param_modes_and_default() {
         .as_create_function_stmt()
         .expect("CreateFunctionStmt");
     assert_eq!(n.parameters.len(), 4);
-    let modes = [M::FUNC_PARAM_DEFAULT, M::FUNC_PARAM_OUT, M::FUNC_PARAM_VARIADIC, M::FUNC_PARAM_IN];
+    let modes = [
+        M::FUNC_PARAM_DEFAULT,
+        M::FUNC_PARAM_OUT,
+        M::FUNC_PARAM_VARIADIC,
+        M::FUNC_PARAM_IN,
+    ];
     let names = ["a", "b", "c", "d"];
     for (i, (m, nm)) in modes.iter().zip(names).enumerate() {
-        let p = n.parameters.nth(i).as_variant::<FunctionParameter>().expect("FunctionParameter");
+        let p = n
+            .parameters
+            .nth(i)
+            .as_variant::<FunctionParameter>()
+            .expect("FunctionParameter");
         assert_eq!(p.mode, *m, "param {nm}");
         assert_eq!(p.name, Some(nm));
         assert_eq!(p.defexpr.is_some(), i == 3, "param {nm}");
     }
-    let d = n.parameters.nth(3).as_variant::<FunctionParameter>().unwrap();
+    let d = n
+        .parameters
+        .nth(3)
+        .as_variant::<FunctionParameter>()
+        .unwrap();
     let c = d.defexpr.expect("defexpr").as_a_const().expect("A_Const");
     assert!(matches!(c.val, Some(ValUnion::String(_))));
 }
@@ -1435,7 +1812,11 @@ fn parses_sql_value_functions() {
         let list = parse(sql);
         let sel = select_of(only_stmt(&list));
         let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
-        let svf = rt.val.expect("val").as_sql_value_function().expect("SQLValueFunction");
+        let svf = rt
+            .val
+            .expect("val")
+            .as_sql_value_function()
+            .expect("SQLValueFunction");
         assert_eq!(svf.op, op, "{sql}");
         assert_eq!(svf.r#type, 0);
         assert_eq!(svf.typmod, -1);
@@ -1446,12 +1827,24 @@ fn parses_sql_value_functions() {
 #[test]
 fn create_materialized_view_stmt() {
     use types_nodes::rawnodes::{CreateTableAsStmt, IntoClause};
-    let list = parse("CREATE UNLOGGED MATERIALIZED VIEW IF NOT EXISTS s.mv (x) AS SELECT 1 WITH NO DATA");
+    let list =
+        parse("CREATE UNLOGGED MATERIALIZED VIEW IF NOT EXISTS s.mv (x) AS SELECT 1 WITH NO DATA");
     let rs = only_stmt(&list);
-    let c = rs.stmt.expect("stmt").as_variant::<CreateTableAsStmt>().expect("CreateTableAsStmt");
-    assert_eq!(c.objtype, types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW);
+    let c = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<CreateTableAsStmt>()
+        .expect("CreateTableAsStmt");
+    assert_eq!(
+        c.objtype,
+        types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW
+    );
     assert!(c.if_not_exists && !c.is_select_into);
-    let into = c.into.expect("into").as_variant::<IntoClause>().expect("IntoClause");
+    let into = c
+        .into
+        .expect("into")
+        .as_variant::<IntoClause>()
+        .expect("IntoClause");
     assert!(into.skipData);
     assert_eq!(into.colNames.len(), 1);
     let rv = into.rel.expect("rel").as_range_var().expect("RangeVar");
@@ -1459,10 +1852,17 @@ fn create_materialized_view_stmt() {
     assert_eq!(rv.relpersistence, b'u');
 
     let list = parse("CREATE MATERIALIZED VIEW mv AS SELECT 1");
-    let c = only_stmt(&list).stmt.unwrap().as_variant::<CreateTableAsStmt>().unwrap();
+    let c = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<CreateTableAsStmt>()
+        .unwrap();
     let into = c.into.unwrap().as_variant::<IntoClause>().unwrap();
     assert!(!into.skipData && !c.if_not_exists);
-    assert_eq!(into.rel.unwrap().as_range_var().unwrap().relpersistence, b'p');
+    assert_eq!(
+        into.rel.unwrap().as_range_var().unwrap().relpersistence,
+        b'p'
+    );
 }
 
 #[test]
@@ -1475,7 +1875,11 @@ fn refresh_materialized_view_stmt() {
         ("REFRESH MATERIALIZED VIEW mv WITH DATA", false, false),
     ] {
         let list = parse(sql);
-        let r = only_stmt(&list).stmt.unwrap().as_variant::<RefreshMatViewStmt>().expect("RefreshMatViewStmt");
+        let r = only_stmt(&list)
+            .stmt
+            .unwrap()
+            .as_variant::<RefreshMatViewStmt>()
+            .expect("RefreshMatViewStmt");
         assert_eq!(r.concurrent, concurrent, "{sql}");
         assert_eq!(r.skipData, skip, "{sql}");
         assert_eq!(r.relation.expect("relation").relname, Some("mv"));
@@ -1530,7 +1934,11 @@ fn parses_op_any_array() {
 fn parses_subquery_op_sub_type_select() {
     let list = parse("select 1 where 'x' = any(select 'x')");
     let sel = select_of(only_stmt(&list));
-    let sl = sel.whereClause.expect("where").as_sub_link().expect("SubLink");
+    let sl = sel
+        .whereClause
+        .expect("where")
+        .as_sub_link()
+        .expect("SubLink");
     assert_eq!(sl.subLinkType, types_nodes::SubLinkType::ANY_SUBLINK);
     assert_eq!(sl.operName.nth(0).as_string().unwrap().sval, "=");
 }
@@ -1541,14 +1949,25 @@ fn parses_array_bounds() {
     let sel = select_of(only_stmt(&list));
     let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
     let tc = rt.val.expect("val").as_type_cast().expect("TypeCast");
-    let tn = tc.typeName.expect("typeName").as_type_name().expect("TypeName");
+    let tn = tc
+        .typeName
+        .expect("typeName")
+        .as_type_name()
+        .expect("TypeName");
     assert_eq!(tn.arrayBounds.len(), 1);
-    assert_eq!(tn.arrayBounds.nth(0).as_integer().expect("Integer").ival, -1);
+    assert_eq!(
+        tn.arrayBounds.nth(0).as_integer().expect("Integer").ival,
+        -1
+    );
     let list = parse("select '1'::int2[3]");
     let sel = select_of(only_stmt(&list));
     let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
     let tc = rt.val.expect("val").as_type_cast().expect("TypeCast");
-    let tn = tc.typeName.expect("typeName").as_type_name().expect("TypeName");
+    let tn = tc
+        .typeName
+        .expect("typeName")
+        .as_type_name()
+        .expect("TypeName");
     assert_eq!(tn.arrayBounds.nth(0).as_integer().expect("Integer").ival, 3);
 }
 
@@ -1569,7 +1988,11 @@ fn parses_collate_clause() {
     let list = parse("select '^(t)$' collate pg_catalog.default");
     let sel = select_of(only_stmt(&list));
     let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
-    let cc = rt.val.expect("val").as_collate_clause().expect("CollateClause");
+    let cc = rt
+        .val
+        .expect("val")
+        .as_collate_clause()
+        .expect("CollateClause");
     assert_eq!(cc.collname.len(), 2);
     assert_eq!(cc.collname.nth(0).as_string().unwrap().sval, "pg_catalog");
     assert_eq!(cc.collname.nth(1).as_string().unwrap().sval, "default");
@@ -1592,7 +2015,7 @@ fn parses_regex_operators() {
 
 #[test]
 fn constraint_statements_parse() {
-    use types_nodes::rawnodes::{Constraint, ConstrType};
+    use types_nodes::rawnodes::{ConstrType, Constraint};
     for s in [
         "create table t (id int primary key, name text default 'x', qty int, check (qty > 0))",
         "create table u2 (a int unique)",
@@ -1609,8 +2032,16 @@ fn constraint_statements_parse() {
     }
 
     let l = parse("create table v (a int, b int, constraint foo primary key (a, b))");
-    let cs = only_stmt(&l).stmt.unwrap().as_variant::<types_nodes::rawnodes::CreateStmt>().unwrap();
-    let con = cs.tableElts.nth(2).as_variant::<Constraint>().expect("Constraint");
+    let cs = only_stmt(&l)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::rawnodes::CreateStmt>()
+        .unwrap();
+    let con = cs
+        .tableElts
+        .nth(2)
+        .as_variant::<Constraint>()
+        .expect("Constraint");
     assert_eq!(con.contype, ConstrType::CONSTR_PRIMARY);
     assert_eq!(con.conname, Some("foo"));
     assert_eq!(con.keys.len(), 2);
@@ -1618,8 +2049,16 @@ fn constraint_statements_parse() {
     assert!(!con.deferrable && !con.initdeferred);
 
     let l = parse("create table y (a int unique nulls not distinct)");
-    let cs = only_stmt(&l).stmt.unwrap().as_variant::<types_nodes::rawnodes::CreateStmt>().unwrap();
-    let cd = cs.tableElts.nth(0).as_variant::<types_nodes::rawnodes::ColumnDef>().unwrap();
+    let cs = only_stmt(&l)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::rawnodes::CreateStmt>()
+        .unwrap();
+    let cd = cs
+        .tableElts
+        .nth(0)
+        .as_variant::<types_nodes::rawnodes::ColumnDef>()
+        .unwrap();
     let con = cd.constraints.nth(0).as_variant::<Constraint>().unwrap();
     assert_eq!(con.contype, ConstrType::CONSTR_UNIQUE);
     assert!(con.nulls_not_distinct);
@@ -1627,19 +2066,35 @@ fn constraint_statements_parse() {
 
 #[test]
 fn check_constraint_not_enforced() {
-    use types_nodes::rawnodes::{Constraint, ConstrType};
+    use types_nodes::rawnodes::{ConstrType, Constraint};
     // processCASbits: NOT ENFORCED clears is_enforced and implies NOT VALID.
     let l = parse("create table t (x int, constraint c check (x > 3) not enforced)");
-    let cs = only_stmt(&l).stmt.unwrap().as_variant::<types_nodes::rawnodes::CreateStmt>().unwrap();
-    let con = cs.tableElts.nth(1).as_variant::<Constraint>().expect("Constraint");
+    let cs = only_stmt(&l)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::rawnodes::CreateStmt>()
+        .unwrap();
+    let con = cs
+        .tableElts
+        .nth(1)
+        .as_variant::<Constraint>()
+        .expect("Constraint");
     assert_eq!(con.contype, ConstrType::CONSTR_CHECK);
     assert!(!con.is_enforced);
     assert!(con.skip_validation);
     assert!(!con.initially_valid);
 
     let l = parse("create table t (x int, check (x > 3) enforced)");
-    let cs = only_stmt(&l).stmt.unwrap().as_variant::<types_nodes::rawnodes::CreateStmt>().unwrap();
-    let con = cs.tableElts.nth(1).as_variant::<Constraint>().expect("Constraint");
+    let cs = only_stmt(&l)
+        .stmt
+        .unwrap()
+        .as_variant::<types_nodes::rawnodes::CreateStmt>()
+        .unwrap();
+    let con = cs
+        .tableElts
+        .nth(1)
+        .as_variant::<Constraint>()
+        .expect("Constraint");
     assert!(con.is_enforced);
     assert!(!con.skip_validation);
     assert!(con.initially_valid);
@@ -1650,14 +2105,26 @@ fn check_constraint_not_enforced() {
 
 #[test]
 fn create_view_stmt() {
-    let list = parse("CREATE VIEW v1 AS SELECT t1.a, t2.d FROM t1 JOIN t2 ON t1.a = t2.a WHERE t1.b > 10");
+    let list =
+        parse("CREATE VIEW v1 AS SELECT t1.a, t2.d FROM t1 JOIN t2 ON t1.a = t2.a WHERE t1.b > 10");
     let rs = only_stmt(&list);
-    let v = rs.stmt.expect("stmt").as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
+    let v = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<types_nodes::rawnodes::ViewStmt>()
+        .expect("ViewStmt");
     assert_eq!(v.view.expect("view").relname, Some("v1"));
     assert!(!v.replace);
     assert!(v.aliases.is_nil() && v.options.is_nil());
-    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
-    let sel = v.query.expect("query").as_select_stmt().expect("SelectStmt");
+    assert_eq!(
+        v.withCheckOption,
+        types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION
+    );
+    let sel = v
+        .query
+        .expect("query")
+        .as_select_stmt()
+        .expect("SelectStmt");
     assert_eq!(sel.targetList.len(), 2);
     assert!(sel.whereClause.is_some());
 }
@@ -1666,26 +2133,42 @@ fn create_view_stmt() {
 fn create_or_replace_view_with_aliases() {
     let list = parse("CREATE OR REPLACE VIEW v2 (x, y) AS SELECT 1, 2");
     let rs = only_stmt(&list);
-    let v = rs.stmt.expect("stmt").as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
+    let v = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<types_nodes::rawnodes::ViewStmt>()
+        .expect("ViewStmt");
     assert!(v.replace);
     assert_eq!(v.aliases.len(), 2);
     assert_eq!(v.aliases.nth(0).as_string().unwrap().sval, "x");
-    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
+    assert_eq!(
+        v.withCheckOption,
+        types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION
+    );
 }
 
 #[test]
 fn create_view_with_check_option_kinds() {
     for (sql, want) in [
-        ("CREATE VIEW vc AS SELECT 1 WITH CHECK OPTION",
-         types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION),
-        ("CREATE VIEW vc AS SELECT 1 WITH CASCADED CHECK OPTION",
-         types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION),
-        ("CREATE VIEW vc AS SELECT 1 WITH LOCAL CHECK OPTION",
-         types_nodes::rawnodes::ViewCheckOption::LOCAL_CHECK_OPTION),
+        (
+            "CREATE VIEW vc AS SELECT 1 WITH CHECK OPTION",
+            types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION,
+        ),
+        (
+            "CREATE VIEW vc AS SELECT 1 WITH CASCADED CHECK OPTION",
+            types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION,
+        ),
+        (
+            "CREATE VIEW vc AS SELECT 1 WITH LOCAL CHECK OPTION",
+            types_nodes::rawnodes::ViewCheckOption::LOCAL_CHECK_OPTION,
+        ),
     ] {
         let list = parse(sql);
-        let v = only_stmt(&list).stmt.unwrap()
-            .as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
+        let v = only_stmt(&list)
+            .stmt
+            .unwrap()
+            .as_variant::<types_nodes::rawnodes::ViewStmt>()
+            .expect("ViewStmt");
         assert_eq!(v.withCheckOption, want, "{sql}");
     }
 }
@@ -1696,21 +2179,44 @@ fn create_recursive_view_shapes() {
     // gram.y makeRecursiveViewSelect: query becomes WITH RECURSIVE vr (n) AS
     // (SELECT 1) SELECT n FROM vr.
     let list = parse("CREATE RECURSIVE VIEW vr (n) AS SELECT 1");
-    let v = only_stmt(&list).stmt.unwrap().as_variant::<ViewStmt>().expect("ViewStmt");
+    let v = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<ViewStmt>()
+        .expect("ViewStmt");
     assert_eq!(v.view.expect("view").relname, Some("vr"));
     assert!(!v.replace);
     assert_eq!(v.aliases.len(), 1);
-    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
-    let sel = v.query.expect("query").as_select_stmt().expect("SelectStmt");
-    let w = sel.withClause.expect("withClause").as_with_clause().expect("WithClause");
+    assert_eq!(
+        v.withCheckOption,
+        types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION
+    );
+    let sel = v
+        .query
+        .expect("query")
+        .as_select_stmt()
+        .expect("SelectStmt");
+    let w = sel
+        .withClause
+        .expect("withClause")
+        .as_with_clause()
+        .expect("WithClause");
     assert!(w.recursive);
     assert_eq!(w.location, -1);
     assert_eq!(w.ctes.len(), 1);
-    let cte = w.ctes.nth(0).as_common_table_expr().expect("CommonTableExpr");
+    let cte = w
+        .ctes
+        .nth(0)
+        .as_common_table_expr()
+        .expect("CommonTableExpr");
     assert_eq!(cte.ctename, Some("vr"));
     assert_eq!(cte.aliascolnames.len(), 1);
     assert_eq!(cte.aliascolnames.nth(0).as_string().unwrap().sval, "n");
-    let inner = cte.ctequery.expect("ctequery").as_select_stmt().expect("SelectStmt");
+    let inner = cte
+        .ctequery
+        .expect("ctequery")
+        .as_select_stmt()
+        .expect("SelectStmt");
     assert_eq!(inner.targetList.len(), 1);
     assert_eq!(sel.targetList.len(), 1);
     let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
@@ -1718,19 +2224,34 @@ fn create_recursive_view_shapes() {
     assert_eq!(rt.location, -1);
     let cr = rt.val.unwrap().as_column_ref().expect("ColumnRef");
     assert_eq!(cr.fields.nth(0).as_string().unwrap().sval, "n");
-    let rv = sel.fromClause.nth(0).as_variant::<types_nodes::RangeVar>().expect("RangeVar");
+    let rv = sel
+        .fromClause
+        .nth(0)
+        .as_variant::<types_nodes::RangeVar>()
+        .expect("RangeVar");
     assert_eq!(rv.relname, Some("vr"));
     assert!(rv.schemaname.is_none());
 
     let list = parse("CREATE OR REPLACE TEMP RECURSIVE VIEW s.vr (a, b) AS SELECT 1, 2");
-    let v = only_stmt(&list).stmt.unwrap().as_variant::<ViewStmt>().expect("ViewStmt");
+    let v = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<ViewStmt>()
+        .expect("ViewStmt");
     assert!(v.replace);
     let view_rv = v.view.expect("view");
     assert_eq!(view_rv.relname, Some("vr"));
     assert_eq!(view_rv.schemaname, Some("s"));
-    assert_eq!(view_rv.relpersistence, types_core::catalog::RELPERSISTENCE_TEMP);
+    assert_eq!(
+        view_rv.relpersistence,
+        types_core::catalog::RELPERSISTENCE_TEMP
+    );
     assert_eq!(v.aliases.len(), 2);
-    let sel = v.query.expect("query").as_select_stmt().expect("SelectStmt");
+    let sel = v
+        .query
+        .expect("query")
+        .as_select_stmt()
+        .expect("SelectStmt");
     assert_eq!(sel.targetList.len(), 2);
     let rt = sel.targetList.nth(1).as_res_target().unwrap();
     let cr = rt.val.unwrap().as_column_ref().expect("ColumnRef");
@@ -1779,14 +2300,30 @@ fn create_rule_full_shape() {
 #[test]
 fn create_rule_events_and_nothing() {
     for (sql, event, instead, nact) in [
-        ("CREATE RULE r AS ON INSERT TO t DO ALSO NOTHING",
-         types_nodes::nodes_enums::CmdType::CMD_INSERT, false, 0),
-        ("CREATE RULE r AS ON DELETE TO t DO INSTEAD NOTHING",
-         types_nodes::nodes_enums::CmdType::CMD_DELETE, true, 0),
-        ("CREATE RULE r AS ON SELECT TO t DO INSTEAD SELECT 1",
-         types_nodes::nodes_enums::CmdType::CMD_SELECT, true, 1),
-        ("CREATE RULE r AS ON UPDATE TO t DO UPDATE t2 SET a = 1",
-         types_nodes::nodes_enums::CmdType::CMD_UPDATE, false, 1),
+        (
+            "CREATE RULE r AS ON INSERT TO t DO ALSO NOTHING",
+            types_nodes::nodes_enums::CmdType::CMD_INSERT,
+            false,
+            0,
+        ),
+        (
+            "CREATE RULE r AS ON DELETE TO t DO INSTEAD NOTHING",
+            types_nodes::nodes_enums::CmdType::CMD_DELETE,
+            true,
+            0,
+        ),
+        (
+            "CREATE RULE r AS ON SELECT TO t DO INSTEAD SELECT 1",
+            types_nodes::nodes_enums::CmdType::CMD_SELECT,
+            true,
+            1,
+        ),
+        (
+            "CREATE RULE r AS ON UPDATE TO t DO UPDATE t2 SET a = 1",
+            types_nodes::nodes_enums::CmdType::CMD_UPDATE,
+            false,
+            1,
+        ),
     ] {
         let list = parse(sql);
         let r = only_stmt(&list)
@@ -1810,15 +2347,25 @@ fn drop_rule_shapes() {
         .unwrap()
         .as_drop_stmt()
         .expect("DropStmt");
-    assert_eq!(d.removeType, types_nodes::parsenodes::ObjectType::OBJECT_RULE);
+    assert_eq!(
+        d.removeType,
+        types_nodes::parsenodes::ObjectType::OBJECT_RULE
+    );
     assert!(!d.missing_ok);
-    assert_eq!(d.behavior, types_nodes::parsenodes::DropBehavior::DROP_CASCADE);
+    assert_eq!(
+        d.behavior,
+        types_nodes::parsenodes::DropBehavior::DROP_CASCADE
+    );
     let names = d.objects.nth(0).as_list().expect("name list");
     assert_eq!(names.len(), 3);
     assert_eq!(names.nth(2).as_string().unwrap().sval, "r1");
 
     let list = parse("DROP RULE IF EXISTS r1 ON t");
-    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
     assert!(d.missing_ok);
     let names = d.objects.nth(0).as_list().expect("name list");
     assert_eq!(names.len(), 2);
@@ -1829,10 +2376,26 @@ fn drop_rule_shapes() {
 fn alter_table_enable_disable_rule() {
     use types_nodes::parsenodes::{AlterTableCmd, AlterTableType};
     for (sql, subtype, name) in [
-        ("ALTER TABLE t ENABLE RULE r", AlterTableType::AT_EnableRule, "r"),
-        ("ALTER TABLE t ENABLE ALWAYS RULE r", AlterTableType::AT_EnableAlwaysRule, "r"),
-        ("ALTER TABLE t ENABLE REPLICA RULE r", AlterTableType::AT_EnableReplicaRule, "r"),
-        ("ALTER TABLE t DISABLE RULE r", AlterTableType::AT_DisableRule, "r"),
+        (
+            "ALTER TABLE t ENABLE RULE r",
+            AlterTableType::AT_EnableRule,
+            "r",
+        ),
+        (
+            "ALTER TABLE t ENABLE ALWAYS RULE r",
+            AlterTableType::AT_EnableAlwaysRule,
+            "r",
+        ),
+        (
+            "ALTER TABLE t ENABLE REPLICA RULE r",
+            AlterTableType::AT_EnableReplicaRule,
+            "r",
+        ),
+        (
+            "ALTER TABLE t DISABLE RULE r",
+            AlterTableType::AT_DisableRule,
+            "r",
+        ),
     ] {
         let list = parse(sql);
         let a = only_stmt(&list)
@@ -1840,7 +2403,11 @@ fn alter_table_enable_disable_rule() {
             .unwrap()
             .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
             .expect("AlterTableStmt");
-        let cmd = a.cmds.nth(0).as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+        let cmd = a
+            .cmds
+            .nth(0)
+            .as_variant::<AlterTableCmd>()
+            .expect("AlterTableCmd");
         assert_eq!(cmd.subtype, subtype, "{sql}");
         assert_eq!(cmd.name, Some(name), "{sql}");
     }
@@ -1850,42 +2417,82 @@ fn alter_table_enable_disable_rule() {
 fn drop_function_shapes() {
     use types_nodes::parsenodes::{DropBehavior, ObjectType};
     let list = parse("DROP FUNCTION f(int, text), s.g() CASCADE");
-    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
     assert_eq!(d.removeType, ObjectType::OBJECT_FUNCTION);
     assert!(!d.missing_ok);
     assert_eq!(d.behavior, DropBehavior::DROP_CASCADE);
     assert_eq!(d.objects.len(), 2);
-    let f = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    let f = d
+        .objects
+        .nth(0)
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert!(!f.args_unspecified);
     assert_eq!(f.objname.len(), 1);
     assert_eq!(f.objname.nth(0).as_string().unwrap().sval, "f");
     assert_eq!(f.objargs.len(), 2);
     assert_eq!(f.objfuncargs.len(), 2);
-    let g = d.objects.nth(1).as_object_with_args().expect("ObjectWithArgs");
+    let g = d
+        .objects
+        .nth(1)
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert_eq!(g.objname.len(), 2);
     assert_eq!(g.objargs.len(), 0);
     assert!(!g.args_unspecified);
 
     let list = parse("DROP FUNCTION IF EXISTS f");
-    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
     assert!(d.missing_ok);
-    let f = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    let f = d
+        .objects
+        .nth(0)
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert!(f.args_unspecified);
     assert_eq!(f.objargs.len(), 0);
 
     let list = parse("DROP PROCEDURE p(OUT a int, INOUT b text, VARIADIC c int)");
-    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
     assert_eq!(d.removeType, ObjectType::OBJECT_PROCEDURE);
-    let p = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    let p = d
+        .objects
+        .nth(0)
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert_eq!(p.objfuncargs.len(), 3);
     assert_eq!(p.objargs.len(), 2);
 
     let list = parse("DROP AGGREGATE agg(int), agg2(*)");
-    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
     assert_eq!(d.removeType, ObjectType::OBJECT_AGGREGATE);
-    let a = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    let a = d
+        .objects
+        .nth(0)
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert_eq!(a.objargs.len(), 1);
-    let a2 = d.objects.nth(1).as_object_with_args().expect("ObjectWithArgs");
+    let a2 = d
+        .objects
+        .nth(1)
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert_eq!(a2.objargs.len(), 0);
     assert!(!a2.args_unspecified);
 }
@@ -1896,53 +2503,102 @@ fn oper_argtypes_none_shapes() {
     use types_nodes::rawnodes::TypeName;
     // Left unary: NONE cell is None (C's NULL TypeName).
     let list = parse("DROP OPERATOR !!! (NONE, integer)");
-    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
     assert_eq!(d.removeType, ObjectType::OBJECT_OPERATOR);
-    let o = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    let o = d
+        .objects
+        .nth(0)
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert_eq!(o.objname.nth(0).as_string().unwrap().sval, "!!!");
     assert_eq!(o.objargs.len(), 2);
     assert!(o.objargs.nth(0).is_none());
-    let r = o.objargs.nth(1).expect("right type").as_variant::<TypeName>().unwrap();
+    let r = o
+        .objargs
+        .nth(1)
+        .expect("right type")
+        .as_variant::<TypeName>()
+        .unwrap();
     assert_eq!(r.names.nth(1).as_string().unwrap().sval, "int4");
 
     // Right unary (postfix operators are gone, but the gram form remains).
     let list = parse("DROP OPERATOR IF EXISTS s.@#@ (bigint, NONE) CASCADE");
-    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
     assert!(d.missing_ok);
-    let o = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    let o = d
+        .objects
+        .nth(0)
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert_eq!(o.objname.len(), 2);
     assert!(o.objargs.nth(0).is_some());
     assert!(o.objargs.nth(1).is_none());
 
     // Binary form still carries two Some cells.
     let list = parse("DROP OPERATOR + (integer, integer)");
-    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
-    let o = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    let d = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_drop_stmt()
+        .expect("DropStmt");
+    let o = d
+        .objects
+        .nth(0)
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert!(o.objargs.nth(0).is_some() && o.objargs.nth(1).is_some());
 
     let list = parse("COMMENT ON OPERATOR !!! (NONE, boolean) IS 'prefix'");
-    let c = only_stmt(&list).stmt.unwrap().as_comment_stmt().expect("CommentStmt");
+    let c = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_comment_stmt()
+        .expect("CommentStmt");
     assert_eq!(c.objtype, ObjectType::OBJECT_OPERATOR);
-    let o = c.object.unwrap().as_object_with_args().expect("ObjectWithArgs");
+    let o = c
+        .object
+        .unwrap()
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert!(o.objargs.nth(0).is_none() && o.objargs.nth(1).is_some());
 
     // '(' Typename ')' is C's missing-argument syntax error.
     let e = parse_err("DROP OPERATOR !!! (integer)");
-    assert!(format!("{e:?}").contains("missing argument"), "unexpected error: {e:?}");
+    assert!(
+        format!("{e:?}").contains("missing argument"),
+        "unexpected error: {e:?}"
+    );
 }
 
 #[test]
 fn alter_materialized_view_shapes() {
     use types_nodes::parsenodes::{AlterTableStmt, ObjectType};
     let list = parse("ALTER MATERIALIZED VIEW mv OWNER TO r");
-    let a = only_stmt(&list).stmt.unwrap().as_variant::<AlterTableStmt>().expect("AlterTableStmt");
+    let a = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<AlterTableStmt>()
+        .expect("AlterTableStmt");
     assert_eq!(a.objtype, ObjectType::OBJECT_MATVIEW);
     assert!(!a.missing_ok);
     assert_eq!(a.relation.expect("relation").relname, Some("mv"));
     assert_eq!(a.cmds.len(), 1);
 
-    let list = parse("ALTER MATERIALIZED VIEW IF EXISTS s.mv SET (fillfactor = 70), CLUSTER ON idx");
-    let a = only_stmt(&list).stmt.unwrap().as_variant::<AlterTableStmt>().expect("AlterTableStmt");
+    let list =
+        parse("ALTER MATERIALIZED VIEW IF EXISTS s.mv SET (fillfactor = 70), CLUSTER ON idx");
+    let a = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<AlterTableStmt>()
+        .expect("AlterTableStmt");
     assert_eq!(a.objtype, ObjectType::OBJECT_MATVIEW);
     assert!(a.missing_ok);
     let rel = a.relation.expect("relation");
@@ -1954,14 +2610,22 @@ fn alter_materialized_view_shapes() {
 fn grant_all_in_schema_shapes() {
     use types_nodes::parsenodes::{GrantStmt, GrantTargetType, ObjectType};
     let list = parse("GRANT SELECT ON ALL TABLES IN SCHEMA s, s2 TO u");
-    let g = only_stmt(&list).stmt.unwrap().as_variant::<GrantStmt>().expect("GrantStmt");
+    let g = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<GrantStmt>()
+        .expect("GrantStmt");
     assert!(g.is_grant);
     assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA);
     assert_eq!(g.objtype, ObjectType::OBJECT_TABLE);
     assert_eq!(g.objects.len(), 2);
 
     let list = parse("REVOKE ALL ON ALL SEQUENCES IN SCHEMA s FROM u CASCADE");
-    let g = only_stmt(&list).stmt.unwrap().as_variant::<GrantStmt>().expect("GrantStmt");
+    let g = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<GrantStmt>()
+        .expect("GrantStmt");
     assert!(!g.is_grant);
     assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA);
     assert_eq!(g.objtype, ObjectType::OBJECT_SEQUENCE);
@@ -2055,15 +2719,27 @@ fn gram_train_2_rule_numbers_match_tables() {
 fn comment_on_function_shape() {
     use types_nodes::parsenodes::ObjectType;
     let list = parse("COMMENT ON FUNCTION s.f(int) IS 'c'");
-    let c = only_stmt(&list).stmt.unwrap().as_comment_stmt().expect("CommentStmt");
+    let c = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_comment_stmt()
+        .expect("CommentStmt");
     assert_eq!(c.objtype, ObjectType::OBJECT_FUNCTION);
     assert_eq!(c.comment, Some("c"));
-    let f = c.object.unwrap().as_object_with_args().expect("ObjectWithArgs");
+    let f = c
+        .object
+        .unwrap()
+        .as_object_with_args()
+        .expect("ObjectWithArgs");
     assert_eq!(f.objname.len(), 2);
     assert_eq!(f.objargs.len(), 1);
 
     let list = parse("COMMENT ON AGGREGATE agg(text) IS NULL");
-    let c = only_stmt(&list).stmt.unwrap().as_comment_stmt().expect("CommentStmt");
+    let c = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_comment_stmt()
+        .expect("CommentStmt");
     assert_eq!(c.objtype, ObjectType::OBJECT_AGGREGATE);
     assert_eq!(c.comment, None);
 }
@@ -2072,7 +2748,11 @@ fn comment_on_function_shape() {
 fn alter_function_shapes() {
     use types_nodes::parsenodes::ObjectType;
     let list = parse("ALTER FUNCTION f(int) STRICT IMMUTABLE RESTRICT");
-    let a = only_stmt(&list).stmt.unwrap().as_alter_function_stmt().expect("AlterFunctionStmt");
+    let a = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_alter_function_stmt()
+        .expect("AlterFunctionStmt");
     assert_eq!(a.objtype, ObjectType::OBJECT_FUNCTION);
     assert_eq!(a.actions.len(), 2);
     assert_eq!(a.func.unwrap().objargs.len(), 1);
@@ -2088,7 +2768,11 @@ fn alter_function_shapes() {
     assert!(r.object.unwrap().as_object_with_args().is_some());
 
     let list = parse("ALTER ROUTINE r(int) OWNER TO alice");
-    let o = only_stmt(&list).stmt.unwrap().as_alter_owner_stmt().expect("AlterOwnerStmt");
+    let o = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_alter_owner_stmt()
+        .expect("AlterOwnerStmt");
     assert_eq!(o.objectType, ObjectType::OBJECT_ROUTINE);
     assert_eq!(o.newowner.unwrap().rolename, Some("alice"));
     assert!(o.object.unwrap().as_object_with_args().is_some());
@@ -2107,7 +2791,13 @@ fn grant_on_function_shapes() {
     assert_eq!(g.objtype, ObjectType::OBJECT_FUNCTION);
     assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_OBJECT);
     assert_eq!(g.objects.len(), 2);
-    assert!(g.objects.nth(1).as_object_with_args().unwrap().args_unspecified);
+    assert!(
+        g.objects
+            .nth(1)
+            .as_object_with_args()
+            .unwrap()
+            .args_unspecified
+    );
 
     let list = parse("REVOKE ALL ON ALL PROCEDURES IN SCHEMA s FROM u");
     let g = only_stmt(&list)
@@ -2136,7 +2826,10 @@ fn grant_on_parameter_shapes() {
     assert_eq!(g.objects.len(), 2);
     assert_eq!(g.objects.nth(0).as_string().unwrap().sval, "work_mem");
     assert_eq!(g.objects.nth(1).as_string().unwrap().sval, "plperl.on_init");
-    assert_eq!(g.privileges.nth(0).as_access_priv().unwrap().priv_name, Some("set"));
+    assert_eq!(
+        g.privileges.nth(0).as_access_priv().unwrap().priv_name,
+        Some("set")
+    );
 
     let list = parse("REVOKE ALL ON PARAMETER work_mem FROM pg_monitor");
     let g = only_stmt(&list)
@@ -2152,7 +2845,12 @@ fn grant_on_parameter_shapes() {
 #[test]
 fn aggregate_output_args_rejected() {
     let err = parse_err("DROP AGGREGATE a(OUT x int)");
-    assert!(err.message().contains("aggregates cannot have output arguments"), "{}", err.message());
+    assert!(
+        err.message()
+            .contains("aggregates cannot have output arguments"),
+        "{}",
+        err.message()
+    );
 }
 
 #[test]
@@ -2162,13 +2860,20 @@ fn create_fdw_and_server() {
     let list =
         parse("CREATE FOREIGN DATA WRAPPER postgresql VALIDATOR postgresql_fdw_validator OPTIONS (debug 'true');");
     let rs = only_stmt(&list);
-    let n = rs.stmt.expect("stmt").as_variant::<CreateFdwStmt>().expect("CreateFdwStmt");
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<CreateFdwStmt>()
+        .expect("CreateFdwStmt");
     assert_eq!(n.fdwname, Some("postgresql"));
     assert_eq!(n.func_options.len(), 1);
     let v = n.func_options.nth(0).as_def_elem().expect("DefElem");
     assert_eq!(v.defname, Some("validator"));
     let names = v.arg.expect("arg").as_list().expect("handler_name");
-    assert_eq!(names.nth(0).as_string().expect("name").sval, "postgresql_fdw_validator");
+    assert_eq!(
+        names.nth(0).as_string().expect("name").sval,
+        "postgresql_fdw_validator"
+    );
     assert_eq!(n.options.len(), 1);
     let o = n.options.nth(0).as_def_elem().expect("DefElem");
     assert_eq!(o.defname, Some("debug"));
@@ -2200,23 +2905,43 @@ fn alter_fdw_and_server_option_actions() {
         "ALTER FOREIGN DATA WRAPPER foo NO VALIDATOR OPTIONS (ADD x '1', SET y '2', DROP z);",
     );
     let rs = only_stmt(&list);
-    let n = rs.stmt.expect("stmt").as_variant::<AlterFdwStmt>().expect("AlterFdwStmt");
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<AlterFdwStmt>()
+        .expect("AlterFdwStmt");
     assert_eq!(n.fdwname, Some("foo"));
     let v = n.func_options.nth(0).as_def_elem().expect("DefElem");
     assert_eq!(v.defname, Some("validator"));
     assert!(v.arg.is_none());
-    let actions: Vec<DefElemAction> =
-        n.options.iter().map(|o| o.as_def_elem().expect("DefElem").defaction).collect();
+    let actions: Vec<DefElemAction> = n
+        .options
+        .iter()
+        .map(|o| o.as_def_elem().expect("DefElem").defaction)
+        .collect();
     assert_eq!(
         actions,
-        [DefElemAction::DEFELEM_ADD, DefElemAction::DEFELEM_SET, DefElemAction::DEFELEM_DROP]
+        [
+            DefElemAction::DEFELEM_ADD,
+            DefElemAction::DEFELEM_SET,
+            DefElemAction::DEFELEM_DROP
+        ]
     );
-    assert!(n.options.nth(2).as_def_elem().expect("DefElem").arg.is_none());
+    assert!(n
+        .options
+        .nth(2)
+        .as_def_elem()
+        .expect("DefElem")
+        .arg
+        .is_none());
 
     let list = parse("ALTER SERVER s1 VERSION NULL;");
     let rs = only_stmt(&list);
-    let n =
-        rs.stmt.expect("stmt").as_variant::<AlterForeignServerStmt>().expect("AlterForeignServerStmt");
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<AlterForeignServerStmt>()
+        .expect("AlterForeignServerStmt");
     assert_eq!(n.servername, Some("s1"));
     assert!(n.has_version && n.version.is_none() && n.options.is_nil());
 }
@@ -2230,20 +2955,34 @@ fn user_mapping_and_foreign_table() {
     };
     let list = parse("CREATE USER MAPPING FOR public SERVER s1 OPTIONS (\"user\" 'guest');");
     let rs = only_stmt(&list);
-    let n =
-        rs.stmt.expect("stmt").as_variant::<CreateUserMappingStmt>().expect("CreateUserMappingStmt");
-    assert_eq!(n.user.expect("RoleSpec").roletype, RoleSpecType::ROLESPEC_PUBLIC);
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<CreateUserMappingStmt>()
+        .expect("CreateUserMappingStmt");
+    assert_eq!(
+        n.user.expect("RoleSpec").roletype,
+        RoleSpecType::ROLESPEC_PUBLIC
+    );
     assert_eq!(n.servername, Some("s1"));
     assert_eq!(n.options.len(), 1);
 
     let list = parse("DROP USER MAPPING IF EXISTS FOR USER SERVER s1;");
     let rs = only_stmt(&list);
-    let n =
-        rs.stmt.expect("stmt").as_variant::<DropUserMappingStmt>().expect("DropUserMappingStmt");
-    assert_eq!(n.user.expect("RoleSpec").roletype, RoleSpecType::ROLESPEC_CURRENT_USER);
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<DropUserMappingStmt>()
+        .expect("DropUserMappingStmt");
+    assert_eq!(
+        n.user.expect("RoleSpec").roletype,
+        RoleSpecType::ROLESPEC_CURRENT_USER
+    );
     assert!(n.missing_ok);
 
-    let list = parse("CREATE FOREIGN TABLE ft1 (c1 int NOT NULL, c2 text) SERVER s1 OPTIONS (delimiter ',');");
+    let list = parse(
+        "CREATE FOREIGN TABLE ft1 (c1 int NOT NULL, c2 text) SERVER s1 OPTIONS (delimiter ',');",
+    );
     let rs = only_stmt(&list);
     let n = rs
         .stmt
@@ -2265,7 +3004,10 @@ fn user_mapping_and_foreign_table() {
     assert_eq!(n.server_name, Some("s1"));
     assert_eq!(n.remote_schema, Some("rs"));
     assert_eq!(n.local_schema, Some("public"));
-    assert_eq!(n.list_type, ImportForeignSchemaType::FDW_IMPORT_SCHEMA_LIMIT_TO);
+    assert_eq!(
+        n.list_type,
+        ImportForeignSchemaType::FDW_IMPORT_SCHEMA_LIMIT_TO
+    );
     assert_eq!(n.table_list.len(), 2);
 }
 
@@ -2289,7 +3031,9 @@ fn normalize_shapes() {
     let f = target_expr(&list).as_func_call().expect("FuncCall");
     assert_system_func(f, "normalize", 2);
     let a = f.args.nth(1).as_a_const().expect("A_Const");
-    let Some(ValUnion::String(s)) = a.val else { panic!("String") };
+    let Some(ValUnion::String(s)) = a.val else {
+        panic!("String")
+    };
     assert_eq!(s.sval, "NFKC");
 }
 
@@ -2308,7 +3052,10 @@ fn overlay_shapes() {
     assert_eq!(f.funcname.len(), 1);
     assert_eq!(f.funcname.nth(0).as_string().unwrap().sval, "overlay");
     assert_eq!(f.args.len(), 2);
-    assert_eq!(f.funcformat, types_nodes::CoercionForm::COERCE_EXPLICIT_CALL);
+    assert_eq!(
+        f.funcformat,
+        types_nodes::CoercionForm::COERCE_EXPLICIT_CALL
+    );
 }
 
 #[test]
@@ -2331,7 +3078,10 @@ fn treat_shape() {
     assert_eq!(f.funcname.nth(0).as_string().unwrap().sval, "pg_catalog");
     assert_eq!(f.funcname.nth(1).as_string().unwrap().sval, "text");
     assert_eq!(f.args.len(), 1);
-    assert_eq!(f.funcformat, types_nodes::CoercionForm::COERCE_EXPLICIT_CALL);
+    assert_eq!(
+        f.funcformat,
+        types_nodes::CoercionForm::COERCE_EXPLICIT_CALL
+    );
 }
 
 #[test]
@@ -2365,11 +3115,19 @@ fn nullif_shape() {
 
 #[test]
 fn typed_table_shapes() {
-    use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, CreateStmt, TypeName};
+    use types_nodes::rawnodes::{ColumnDef, ConstrType, Constraint, CreateStmt, TypeName};
     let list = parse("CREATE TABLE t OF ty (a WITH OPTIONS NOT NULL, b NOT NULL)");
-    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<CreateStmt>()
+        .unwrap();
     assert!(!n.if_not_exists && n.inhRelations.is_nil());
-    let of = n.ofTypename.expect("ofTypename").as_variant::<TypeName>().unwrap();
+    let of = n
+        .ofTypename
+        .expect("ofTypename")
+        .as_variant::<TypeName>()
+        .unwrap();
     assert_eq!(of.names.len(), 1);
     assert_eq!(of.names.nth(0).as_string().unwrap().sval, "ty");
     assert_eq!(n.tableElts.len(), 2);
@@ -2382,7 +3140,11 @@ fn typed_table_shapes() {
     }
 
     let list = parse("CREATE TABLE IF NOT EXISTS t OF s.ty");
-    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<CreateStmt>()
+        .unwrap();
     assert!(n.if_not_exists && n.tableElts.is_nil());
     let of = n.ofTypename.unwrap().as_variant::<TypeName>().unwrap();
     assert_eq!(of.names.len(), 2);
@@ -2391,9 +3153,15 @@ fn typed_table_shapes() {
 
 #[test]
 fn partition_of_with_column_options_shapes() {
-    use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, CreateStmt, PartitionBoundSpec};
+    use types_nodes::rawnodes::{
+        ColumnDef, ConstrType, Constraint, CreateStmt, PartitionBoundSpec,
+    };
     let list = parse("CREATE TABLE p2 PARTITION OF p (a NOT NULL) FOR VALUES FROM (1) TO (10)");
-    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<CreateStmt>()
+        .unwrap();
     assert!(!n.if_not_exists);
     assert_eq!(n.inhRelations.len(), 1);
     let cd = n.tableElts.nth(0).as_variant::<ColumnDef>().unwrap();
@@ -2401,20 +3169,32 @@ fn partition_of_with_column_options_shapes() {
     assert!(cd.typeName.is_none() && cd.is_local);
     let c = cd.constraints.nth(0).as_variant::<Constraint>().unwrap();
     assert_eq!(c.contype, ConstrType::CONSTR_NOTNULL);
-    let pb = n.partbound.expect("partbound").as_variant::<PartitionBoundSpec>().unwrap();
+    let pb = n
+        .partbound
+        .expect("partbound")
+        .as_variant::<PartitionBoundSpec>()
+        .unwrap();
     assert_eq!(pb.lowerdatums.len(), 1);
     assert_eq!(pb.upperdatums.len(), 1);
 
     let list = parse(
         "CREATE TABLE IF NOT EXISTS p3 PARTITION OF p (a WITH OPTIONS NOT NULL) FOR VALUES IN (1)",
     );
-    let n = only_stmt(&list).stmt.unwrap().as_variant::<CreateStmt>().unwrap();
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<CreateStmt>()
+        .unwrap();
     assert!(n.if_not_exists);
     assert_eq!(n.inhRelations.len(), 1);
     let cd = n.tableElts.nth(0).as_variant::<ColumnDef>().unwrap();
     assert_eq!(cd.colname, Some("a"));
     assert!(cd.typeName.is_none());
-    let pb = n.partbound.expect("partbound").as_variant::<PartitionBoundSpec>().unwrap();
+    let pb = n
+        .partbound
+        .expect("partbound")
+        .as_variant::<PartitionBoundSpec>()
+        .unwrap();
     assert_eq!(pb.listdatums.len(), 1);
 }
 
@@ -2430,7 +3210,11 @@ fn named_arg_shapes() {
     let na = fc.args.nth(1).as_variant::<NamedArgExpr>().unwrap();
     assert_eq!(na.name, Some("silent"));
     assert_eq!(na.argnumber, -1);
-    assert!(na.arg.expect("NamedArgExpr has an arg").as_a_const().is_some());
+    assert!(na
+        .arg
+        .expect("NamedArgExpr has an arg")
+        .as_a_const()
+        .is_some());
 
     let list = parse("SELECT f(silent => true)");
     let sel = select_of(only_stmt(&list));
@@ -2506,22 +3290,38 @@ fn alter_system_shapes() {
     use types_nodes::parsenodes::VariableSetKind;
 
     let list = parse("ALTER SYSTEM SET work_mem = '64MB';");
-    let n = only_stmt(&list).stmt.unwrap().as_alter_system_stmt().expect("AlterSystemStmt");
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_alter_system_stmt()
+        .expect("AlterSystemStmt");
     assert_eq!(n.setstmt.kind, VariableSetKind::VAR_SET_VALUE);
     assert_eq!(n.setstmt.name, Some("work_mem"));
     assert_eq!(n.setstmt.args.len(), 1);
 
     let list = parse("ALTER SYSTEM RESET work_mem;");
-    let n = only_stmt(&list).stmt.unwrap().as_alter_system_stmt().expect("AlterSystemStmt");
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_alter_system_stmt()
+        .expect("AlterSystemStmt");
     assert_eq!(n.setstmt.kind, VariableSetKind::VAR_RESET);
     assert_eq!(n.setstmt.name, Some("work_mem"));
 
     let list = parse("ALTER SYSTEM RESET ALL;");
-    let n = only_stmt(&list).stmt.unwrap().as_alter_system_stmt().expect("AlterSystemStmt");
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_alter_system_stmt()
+        .expect("AlterSystemStmt");
     assert_eq!(n.setstmt.kind, VariableSetKind::VAR_RESET_ALL);
 
     let list = parse("ALTER SYSTEM SET search_path TO DEFAULT;");
-    let n = only_stmt(&list).stmt.unwrap().as_alter_system_stmt().expect("AlterSystemStmt");
+    let n = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_alter_system_stmt()
+        .expect("AlterSystemStmt");
     assert_eq!(n.setstmt.kind, VariableSetKind::VAR_SET_DEFAULT);
 }
 
@@ -2536,15 +3336,33 @@ fn create_function_transform_option() {
          LANGUAGE sql AS 'select $1';",
     );
     let rs = only_stmt(&list);
-    let n = rs.stmt.expect("stmt").as_create_function_stmt().expect("CreateFunctionStmt");
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_create_function_stmt()
+        .expect("CreateFunctionStmt");
     let tr = n.options.nth(0).as_def_elem().expect("DefElem");
     assert_eq!(tr.defname, Some("transform"));
     let types = tr.arg.expect("arg").as_list().expect("List");
     assert_eq!(types.len(), 2);
     let t0 = types.nth(0).as_variant::<TypeName>().expect("TypeName");
-    assert_eq!(t0.names.nth(t0.names.len() - 1).as_string().expect("t").sval, "int4");
+    assert_eq!(
+        t0.names
+            .nth(t0.names.len() - 1)
+            .as_string()
+            .expect("t")
+            .sval,
+        "int4"
+    );
     let t1 = types.nth(1).as_variant::<TypeName>().expect("TypeName");
-    assert_eq!(t1.names.nth(t1.names.len() - 1).as_string().expect("t").sval, "text");
+    assert_eq!(
+        t1.names
+            .nth(t1.names.len() - 1)
+            .as_string()
+            .expect("t")
+            .sval,
+        "text"
+    );
 }
 
 #[test]
@@ -2681,13 +3499,25 @@ fn regress_check_indirection_nonterminal_star() {
 
     // UPDATE set_target (single and multiassign forms).
     let e = parse_err("UPDATE t SET x.*.c = 1;");
-    assert!(e.message().starts_with("improper use of \"*\""), "got: {}", e.message());
+    assert!(
+        e.message().starts_with("improper use of \"*\""),
+        "got: {}",
+        e.message()
+    );
     let e = parse_err("UPDATE t SET (a, x.*.c) = (1, 2);");
-    assert!(e.message().starts_with("improper use of \"*\""), "got: {}", e.message());
+    assert!(
+        e.message().starts_with("improper use of \"*\""),
+        "got: {}",
+        e.message()
+    );
 
     // insert_column_item.
     let e = parse_err("INSERT INTO t (x.*.c) VALUES (1);");
-    assert!(e.message().starts_with("improper use of \"*\""), "got: {}", e.message());
+    assert!(
+        e.message().starts_with("improper use of \"*\""),
+        "got: {}",
+        e.message()
+    );
 
     // Control: a TERMINAL `.*` stays legal on the same productions.
     let _ = parse("UPDATE t SET x.* = 1;");
@@ -2768,8 +3598,14 @@ fn udeescape_hard_failures_carry_an_error_cursor() {
     );
     // Escape at body offset 0 of the token at byte 7: location 0 + 7 + 3,
     // rendered as a 1-based character position.
-    let err = parser.udeescape_failure(UdeescapeFailure::Hard { error: hard, location: 10 });
-    assert_eq!(err.message(), "conversion between UTF8 and LATIN1 is not supported");
+    let err = parser.udeescape_failure(UdeescapeFailure::Hard {
+        error: hard,
+        location: 10,
+    });
+    assert_eq!(
+        err.message(),
+        "conversion between UTF8 and LATIN1 is not supported"
+    );
     assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
     assert_eq!(err.cursor_position(), Some(11));
 }
@@ -2821,6 +3657,8 @@ fn sql_ascii_escape_literal_with_non_utf8_bytes_errors_cleanly() {
     let sel = select_of(only_stmt(&list));
     let target = sel.targetList.nth(0).as_res_target().expect("ResTarget");
     let aconst = target.val.expect("val").as_a_const().expect("A_Const");
-    let Some(ValUnion::String(s)) = aconst.val else { panic!("String") };
+    let Some(ValUnion::String(s)) = aconst.val else {
+        panic!("String")
+    };
     assert_eq!(s.sval, "\u{e9}");
 }

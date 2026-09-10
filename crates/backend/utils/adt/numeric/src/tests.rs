@@ -24,15 +24,33 @@ fn binary_wire_round_trip() {
 
     let ctx = MemoryContext::new("numeric-wire-test");
     let mcx = ctx.mcx();
-    for s in ["0", "1", "-1", "12345678901234567890", "-0.00001",
-              "3.14159265358979323846", "NaN", "Infinity", "-Infinity", "12.30400"] {
+    for s in [
+        "0",
+        "1",
+        "-1",
+        "12345678901234567890",
+        "-0.00001",
+        "3.14159265358979323846",
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        "12.30400",
+    ] {
         let img = n(s);
         let bytea = io::numeric_send(mcx, img.num()).unwrap();
         let mut buf = StringInfo::new_in(mcx).unwrap();
         buf.append_bytes(bytea.data()).unwrap();
         let back = io::numeric_recv(&mut buf, -1).unwrap();
-        assert_eq!(buf.cursor, buf.len(), "recv must consume the whole buffer for {s}");
-        assert_eq!(img.as_bytes(), back.as_bytes(), "wire round-trip mismatch for {s}");
+        assert_eq!(
+            buf.cursor,
+            buf.len(),
+            "recv must consume the whole buffer for {s}"
+        );
+        assert_eq!(
+            img.as_bytes(),
+            back.as_bytes(),
+            "wire round-trip mismatch for {s}"
+        );
     }
 }
 
@@ -72,7 +90,10 @@ fn in_underscores_and_bases() {
     assert_eq!(rt("0o17"), "15");
     assert_eq!(rt("0b101"), "5");
     assert_eq!(rt("-0xff"), "-255");
-    assert_eq!(rt("0xffff_ffff_ffff_ffff_ffff"), "1208925819614629174706175");
+    assert_eq!(
+        rt("0xffff_ffff_ffff_ffff_ffff"),
+        "1208925819614629174706175"
+    );
 }
 
 #[test]
@@ -121,8 +142,14 @@ fn short_header_packing() {
 fn add_sub_mul_div() {
     let a = n("123.45");
     let b = n("0.55");
-    assert_eq!(out(&numeric_add_common(a.num(), b.num()).unwrap()), "124.00");
-    assert_eq!(out(&numeric_sub_common(a.num(), b.num()).unwrap()), "122.90");
+    assert_eq!(
+        out(&numeric_add_common(a.num(), b.num()).unwrap()),
+        "124.00"
+    );
+    assert_eq!(
+        out(&numeric_sub_common(a.num(), b.num()).unwrap()),
+        "122.90"
+    );
     assert_eq!(
         out(&numeric_mul_common(a.num(), b.num()).unwrap()),
         "67.8975"
@@ -168,7 +195,10 @@ fn arith_specials() {
     let pinf = NumericImage::pinf();
     let ninf = NumericImage::ninf();
     let one = n("1");
-    assert_eq!(out(&numeric_add_common(nan.num(), one.num()).unwrap()), "NaN");
+    assert_eq!(
+        out(&numeric_add_common(nan.num(), one.num()).unwrap()),
+        "NaN"
+    );
     assert_eq!(
         out(&numeric_add_common(pinf.num(), ninf.num()).unwrap()),
         "NaN"
@@ -189,7 +219,10 @@ fn arith_specials() {
         out(&numeric_mul_common(pinf.num(), n("-2").num()).unwrap()),
         "-Infinity"
     );
-    assert_eq!(out(&numeric_div_common(one.num(), pinf.num()).unwrap()), "0");
+    assert_eq!(
+        out(&numeric_div_common(one.num(), pinf.num()).unwrap()),
+        "0"
+    );
     assert_eq!(
         out(&numeric_div_common(pinf.num(), n("-1").num()).unwrap()),
         "-Infinity"
@@ -246,13 +279,22 @@ fn round_trunc() {
         out(&numeric_round_common(n("123.4567").num(), 0).unwrap()),
         "123"
     );
-    assert_eq!(out(&numeric_round_common(n("125").num(), -1).unwrap()), "130");
-    assert_eq!(out(&numeric_round_common(n("-2.5").num(), 0).unwrap()), "-3");
+    assert_eq!(
+        out(&numeric_round_common(n("125").num(), -1).unwrap()),
+        "130"
+    );
+    assert_eq!(
+        out(&numeric_round_common(n("-2.5").num(), 0).unwrap()),
+        "-3"
+    );
     assert_eq!(
         out(&numeric_trunc_common(n("123.4567").num(), 2).unwrap()),
         "123.45"
     );
-    assert_eq!(out(&numeric_trunc_common(n("-2.9").num(), 0).unwrap()), "-2");
+    assert_eq!(
+        out(&numeric_trunc_common(n("-2.9").num(), 0).unwrap()),
+        "-2"
+    );
     assert_eq!(
         out(&numeric_round_common(NumericImage::nan().num(), 2).unwrap()),
         "NaN"
@@ -267,7 +309,10 @@ fn sign_ops() {
     assert_eq!(out(&numeric_uminus(n("1.5").num())), "-1.5");
     assert_eq!(out(&numeric_uminus(n("-1.5").num())), "1.5");
     assert_eq!(out(&numeric_uminus(n("0").num())), "0");
-    assert_eq!(out(&numeric_uminus(NumericImage::pinf().num())), "-Infinity");
+    assert_eq!(
+        out(&numeric_uminus(NumericImage::pinf().num())),
+        "-Infinity"
+    );
     assert_eq!(out(&numeric_uplus(n("-7").num())), "-7");
     let long = n("1e260");
     assert!(!long.num().is_short());
@@ -378,7 +423,10 @@ fn discard_inverse_transition() {
     assert!(!do_numeric_discard(&mut state, ctx.mcx(), n("1.01").num()).unwrap());
     // Removing the dscale-0 input is fine.
     assert!(do_numeric_discard(&mut state, ctx.mcx(), n("2").num()).unwrap());
-    assert_eq!(out(&numeric_sum(Some(&mut state)).unwrap().unwrap()), "1.01");
+    assert_eq!(
+        out(&numeric_sum(Some(&mut state)).unwrap().unwrap()),
+        "1.01"
+    );
 }
 
 #[test]
@@ -406,8 +454,14 @@ fn int128_poly_aggregates() {
 
 #[test]
 fn int64_div_fast() {
-    assert_eq!(out(&int64_div_fast_to_numeric(123456, 2).unwrap()), "1234.56");
-    assert_eq!(out(&int64_div_fast_to_numeric(123456, 0).unwrap()), "123456");
+    assert_eq!(
+        out(&int64_div_fast_to_numeric(123456, 2).unwrap()),
+        "1234.56"
+    );
+    assert_eq!(
+        out(&int64_div_fast_to_numeric(123456, 0).unwrap()),
+        "123456"
+    );
     assert_eq!(out(&int64_div_fast_to_numeric(1, 6).unwrap()), "0.000001");
     assert_eq!(
         out(&int64_div_fast_to_numeric(i64::MAX, 3).unwrap()),
@@ -460,10 +514,18 @@ fn int_avg_div_matches_numeric_avg_div_bytes() {
         }
     }
     // Beyond-i64 int128 sums (avg(int8) accumulations).
-    for &s in &[i64::MAX as i128 * 37, i64::MIN as i128 * 1000 - 1, 10i128.pow(30)] {
+    for &s in &[
+        i64::MAX as i128 * 37,
+        i64::MIN as i128 * 1000 - 1,
+        10i128.pow(30),
+    ] {
         for &c in &[1i64, 3, 1_000_000_007] {
             let fast = int128_avg_div(s, c).unwrap();
-            assert_eq!(fast.as_bytes(), i128_slow(s, c).as_bytes(), "i128 sum={s} count={c}");
+            assert_eq!(
+                fast.as_bytes(),
+                i128_slow(s, c).as_bytes(),
+                "i128 sum={s} count={c}"
+            );
         }
     }
     // Rounding-tie and near-tie corners (the integer quotient's half-away
@@ -497,9 +559,17 @@ fn int_avg_div_matches_numeric_avg_div_bytes() {
     // time (avg-of-groups shapes) and full-range the other half.
     let mut x: u64 = 0x9e3779b97f4a7c15;
     for i in 0..20_000u32 {
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let s = if i % 4 < 2 { (x as i64) % 2_000_000 } else { x as i64 };
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let s = if i % 4 < 2 {
+            (x as i64) % 2_000_000
+        } else {
+            x as i64
+        };
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let c = if i % 2 == 0 {
             ((x % 1000) as i64).max(1)
         } else {
@@ -511,14 +581,24 @@ fn int_avg_div_matches_numeric_avg_div_bytes() {
         // The i128 leg through the same pairs plus a widened sum.
         let s128 = (s as i128) * ((x as i8) as i128).max(1);
         let fast128 = int128_avg_div(s128, c).unwrap();
-        assert_eq!(fast128.as_bytes(), i128_slow(s128, c).as_bytes(), "i128 sum={s128} count={c}");
+        assert_eq!(
+            fast128.as_bytes(),
+            i128_slow(s128, c).as_bytes(),
+            "i128 sum={s128} count={c}"
+        );
     }
 }
 
 #[test]
 fn sqrt_family() {
-    assert_eq!(out(&numeric_sqrt(n("2").num()).unwrap()), "1.414213562373095");
-    assert_eq!(out(&numeric_sqrt(n("0").num()).unwrap()), "0.000000000000000");
+    assert_eq!(
+        out(&numeric_sqrt(n("2").num()).unwrap()),
+        "1.414213562373095"
+    );
+    assert_eq!(
+        out(&numeric_sqrt(n("0").num()).unwrap()),
+        "0.000000000000000"
+    );
     assert_eq!(
         out(&numeric_sqrt(n("1e100").num()).unwrap()),
         format!("1{}", "0".repeat(50))
@@ -528,39 +608,78 @@ fn sqrt_family() {
         "0.70710678118654752"
     );
     // rounds at every requested digit: 30-digit perfect square
-    let sq = numeric_mul_common(n("123456789.987654321").num(), n("123456789.987654321").num())
-        .unwrap();
+    let sq = numeric_mul_common(
+        n("123456789.987654321").num(),
+        n("123456789.987654321").num(),
+    )
+    .unwrap();
     assert_eq!(
         out(&numeric_sqrt(sq.num()).unwrap()),
         "123456789.987654321000000000"
     );
     let e = numeric_sqrt(n("-1").num()).unwrap_err();
     assert_eq!(e.message(), "cannot take square root of a negative number");
-    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION);
+    assert_eq!(
+        e.sqlstate(),
+        types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION
+    );
     assert!(numeric_sqrt(NumericImage::ninf().num()).is_err());
-    assert_eq!(out(&numeric_sqrt(NumericImage::pinf().num()).unwrap()), "Infinity");
-    assert_eq!(out(&numeric_sqrt(NumericImage::nan().num()).unwrap()), "NaN");
+    assert_eq!(
+        out(&numeric_sqrt(NumericImage::pinf().num()).unwrap()),
+        "Infinity"
+    );
+    assert_eq!(
+        out(&numeric_sqrt(NumericImage::nan().num()).unwrap()),
+        "NaN"
+    );
 }
 
 #[test]
 fn exp_ln_log() {
-    assert_eq!(out(&numeric_exp(n("1").num()).unwrap()), "2.7182818284590452");
-    assert_eq!(out(&numeric_exp(n("0").num()).unwrap()), "1.0000000000000000");
-    assert_eq!(out(&numeric_exp(n("-1").num()).unwrap()), "0.3678794411714423");
-    assert_eq!(out(&numeric_exp(n("10.5").num()).unwrap()), "36315.502674246638");
+    assert_eq!(
+        out(&numeric_exp(n("1").num()).unwrap()),
+        "2.7182818284590452"
+    );
+    assert_eq!(
+        out(&numeric_exp(n("0").num()).unwrap()),
+        "1.0000000000000000"
+    );
+    assert_eq!(
+        out(&numeric_exp(n("-1").num()).unwrap()),
+        "0.3678794411714423"
+    );
+    assert_eq!(
+        out(&numeric_exp(n("10.5").num()).unwrap()),
+        "36315.502674246638"
+    );
     // exp overflow threshold and the underflow-to-zero arm
     let e = numeric_exp(n("6000").num()).unwrap_err();
     assert_eq!(e.message(), "value overflows numeric format");
     let z = numeric_exp(n("-6000").num()).unwrap();
     assert_eq!(out(&z), format!("0.{}", "0".repeat(1000)));
     assert_eq!(out(&numeric_exp(NumericImage::ninf().num()).unwrap()), "0");
-    assert_eq!(out(&numeric_exp(NumericImage::pinf().num()).unwrap()), "Infinity");
+    assert_eq!(
+        out(&numeric_exp(NumericImage::pinf().num()).unwrap()),
+        "Infinity"
+    );
 
-    assert_eq!(out(&numeric_ln(n("2").num()).unwrap()), "0.6931471805599453");
-    assert_eq!(out(&numeric_ln(n("0.5").num()).unwrap()), "-0.6931471805599453");
+    assert_eq!(
+        out(&numeric_ln(n("2").num()).unwrap()),
+        "0.6931471805599453"
+    );
+    assert_eq!(
+        out(&numeric_ln(n("0.5").num()).unwrap()),
+        "-0.6931471805599453"
+    );
     // ln(1) picks rscale off a zero estimate
-    assert_eq!(out(&numeric_ln(n("1").num()).unwrap()), "0.0000000000000000");
-    assert_eq!(out(&numeric_ln(n("1e100").num()).unwrap()), "230.25850929940457");
+    assert_eq!(
+        out(&numeric_ln(n("1").num()).unwrap()),
+        "0.0000000000000000"
+    );
+    assert_eq!(
+        out(&numeric_ln(n("1e100").num()).unwrap()),
+        "230.25850929940457"
+    );
     let e = numeric_ln(n("0").num()).unwrap_err();
     assert_eq!(e.message(), "cannot take logarithm of zero");
     assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_ARGUMENT_FOR_LOG);
@@ -615,7 +734,10 @@ fn power_family() {
     );
     let e = numeric_power(n("0").num(), n("-1").num()).unwrap_err();
     assert_eq!(e.message(), "zero raised to a negative power is undefined");
-    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION);
+    assert_eq!(
+        e.sqlstate(),
+        types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION
+    );
     let e = numeric_power(n("-2").num(), n("0.5").num()).unwrap_err();
     assert_eq!(
         e.message(),
@@ -646,8 +768,14 @@ fn power_family() {
 
 #[test]
 fn mod_gcd_lcm_fac() {
-    assert_eq!(out(&numeric_mod_common(n("11").num(), n("4").num()).unwrap()), "3");
-    assert_eq!(out(&numeric_mod_common(n("-11").num(), n("4").num()).unwrap()), "-3");
+    assert_eq!(
+        out(&numeric_mod_common(n("11").num(), n("4").num()).unwrap()),
+        "3"
+    );
+    assert_eq!(
+        out(&numeric_mod_common(n("-11").num(), n("4").num()).unwrap()),
+        "-3"
+    );
     assert_eq!(
         out(&numeric_mod_common(n("11.5").num(), n("4.2").num()).unwrap()),
         "3.1"
@@ -663,7 +791,10 @@ fn mod_gcd_lcm_fac() {
         "7"
     );
 
-    assert_eq!(out(&numeric_gcd_common(n("48").num(), n("18").num()).unwrap()), "6");
+    assert_eq!(
+        out(&numeric_gcd_common(n("48").num(), n("18").num()).unwrap()),
+        "6"
+    );
     assert_eq!(
         out(&numeric_gcd_common(n("4.8").num(), n("1.8").num()).unwrap()),
         "0.6"
@@ -672,8 +803,14 @@ fn mod_gcd_lcm_fac() {
         out(&numeric_gcd_common(NumericImage::pinf().num(), n("1").num()).unwrap()),
         "NaN"
     );
-    assert_eq!(out(&numeric_lcm_common(n("4").num(), n("6").num()).unwrap()), "12");
-    assert_eq!(out(&numeric_lcm_common(n("0").num(), n("6").num()).unwrap()), "0");
+    assert_eq!(
+        out(&numeric_lcm_common(n("4").num(), n("6").num()).unwrap()),
+        "12"
+    );
+    assert_eq!(
+        out(&numeric_lcm_common(n("0").num(), n("6").num()).unwrap()),
+        "0"
+    );
 
     assert_eq!(out(&numeric_fac(5).unwrap()), "120");
     assert_eq!(out(&numeric_fac(0).unwrap()), "1");
@@ -708,23 +845,18 @@ fn out_sci_and_width_bucket() {
     assert_eq!(wb("9.99", "10.0", "0.0", 5).unwrap(), 1);
     let e = wb("1", "0", "10", 0).unwrap_err();
     assert_eq!(e.message(), "count must be greater than zero");
-    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION);
+    assert_eq!(
+        e.sqlstate(),
+        types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION
+    );
     let e = wb("1", "5", "5", 3).unwrap_err();
     assert_eq!(e.message(), "lower bound cannot equal upper bound");
-    assert!(width_bucket_numeric(
-        NumericImage::nan().num(),
-        n("0").num(),
-        n("1").num(),
-        2
-    )
-    .is_err());
-    assert!(width_bucket_numeric(
-        n("1").num(),
-        NumericImage::pinf().num(),
-        n("1").num(),
-        2
-    )
-    .is_err());
+    assert!(
+        width_bucket_numeric(NumericImage::nan().num(), n("0").num(), n("1").num(), 2).is_err()
+    );
+    assert!(
+        width_bucket_numeric(n("1").num(), NumericImage::pinf().num(), n("1").num(), 2).is_err()
+    );
     assert_eq!(
         width_bucket_numeric(NumericImage::pinf().num(), n("0").num(), n("1").num(), 2).unwrap(),
         3
@@ -765,23 +897,47 @@ mod fc_results {
         let ctx = MemoryContext::new_bump("t");
         let a = int64_to_numeric(6);
         let b = int64_to_numeric(7);
-        let d = direct_function_call2_coll_in(fc_numeric_mul, 0, ctx.mcx(), num_datum(&a), num_datum(&b))
-            .unwrap();
-        assert_eq!(crate::cmp_numerics(result_num(d), int64_to_numeric(42).num()), 0);
-        let d = direct_function_call2_coll_in(fc_numeric_add, 0, ctx.mcx(), num_datum(&a), num_datum(&b))
-            .unwrap();
-        assert_eq!(crate::cmp_numerics(result_num(d), int64_to_numeric(13).num()), 0);
+        let d = direct_function_call2_coll_in(
+            fc_numeric_mul,
+            0,
+            ctx.mcx(),
+            num_datum(&a),
+            num_datum(&b),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cmp_numerics(result_num(d), int64_to_numeric(42).num()),
+            0
+        );
+        let d = direct_function_call2_coll_in(
+            fc_numeric_add,
+            0,
+            ctx.mcx(),
+            num_datum(&a),
+            num_datum(&b),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cmp_numerics(result_num(d), int64_to_numeric(13).num()),
+            0
+        );
     }
 
     #[test]
     fn cmp_and_pointer_returning_rows() {
         let a = int64_to_numeric(1);
         let b = int64_to_numeric(2);
-        let d = types_fmgr::direct_function_call2_coll(fc_numeric_cmp, 0, num_datum(&a), num_datum(&b))
-            .unwrap();
+        let d =
+            types_fmgr::direct_function_call2_coll(fc_numeric_cmp, 0, num_datum(&a), num_datum(&b))
+                .unwrap();
         assert_eq!(d.as_i32(), -1);
-        let d = types_fmgr::direct_function_call2_coll(fc_numeric_larger, 0, num_datum(&a), num_datum(&b))
-            .unwrap();
+        let d = types_fmgr::direct_function_call2_coll(
+            fc_numeric_larger,
+            0,
+            num_datum(&a),
+            num_datum(&b),
+        )
+        .unwrap();
         assert_eq!(d.as_usize(), num_datum(&b).as_usize());
     }
 
@@ -869,7 +1025,10 @@ mod fc_results {
         let ctx = MemoryContext::new_bump("t");
         let d = direct_function_call1_coll_in(fc_int8_numeric, 0, ctx.mcx(), Datum::from_i64(-9))
             .unwrap();
-        assert_eq!(crate::cmp_numerics(result_num(d), int64_to_numeric(-9).num()), 0);
+        assert_eq!(
+            crate::cmp_numerics(result_num(d), int64_to_numeric(-9).num()),
+            0
+        );
     }
 }
 
@@ -883,7 +1042,9 @@ fn stddev_variance_finals() {
         do_numeric_accum(&mut state, ctx.mcx(), n(v).num()).unwrap();
     }
     let f = |s: &mut NumericAggState, variance, sample| {
-        out(&numeric_stddev_internal(Some(s), variance, sample).unwrap().unwrap())
+        out(&numeric_stddev_internal(Some(s), variance, sample)
+            .unwrap()
+            .unwrap())
     };
     assert_eq!(f(&mut state, false, true), "1.5811388300841897");
     assert_eq!(f(&mut state, true, true), "2.5000000000000000");
@@ -892,28 +1053,40 @@ fn stddev_variance_finals() {
 
     let mut one = NumericAggState::new(true);
     do_numeric_accum(&mut one, ctx.mcx(), n("7").num()).unwrap();
-    assert!(numeric_stddev_internal(Some(&mut one), false, true).unwrap().is_none());
+    assert!(numeric_stddev_internal(Some(&mut one), false, true)
+        .unwrap()
+        .is_none());
     assert_eq!(
-        out(&numeric_stddev_internal(Some(&mut one), true, false).unwrap().unwrap()),
+        out(&numeric_stddev_internal(Some(&mut one), true, false)
+            .unwrap()
+            .unwrap()),
         "0"
     );
     do_numeric_accum(&mut one, ctx.mcx(), NumericImage::nan().num()).unwrap();
     assert_eq!(
-        out(&numeric_stddev_internal(Some(&mut one), false, true).unwrap().unwrap()),
+        out(&numeric_stddev_internal(Some(&mut one), false, true)
+            .unwrap()
+            .unwrap()),
         "NaN"
     );
-    assert!(numeric_stddev_internal(None, false, true).unwrap().is_none());
+    assert!(numeric_stddev_internal(None, false, true)
+        .unwrap()
+        .is_none());
 
     let mut poly = Int128AggState::new(true);
     for v in 1..=5i128 {
         do_int128_accum(&mut poly, v);
     }
     assert_eq!(
-        out(&numeric_poly_stddev_internal(Some(&poly), false, true).unwrap().unwrap()),
+        out(&numeric_poly_stddev_internal(Some(&poly), false, true)
+            .unwrap()
+            .unwrap()),
         "1.5811388300841897"
     );
     assert_eq!(
-        out(&numeric_poly_stddev_internal(Some(&poly), true, true).unwrap().unwrap()),
+        out(&numeric_poly_stddev_internal(Some(&poly), true, true)
+            .unwrap()
+            .unwrap()),
         "2.5000000000000000"
     );
 }
@@ -932,10 +1105,22 @@ fn scale_min_trim_int2() {
     assert_eq!(out(&numeric_trim_scale(n("1.2300").num()).unwrap()), "1.23");
     assert_eq!(out(&numeric_trim_scale(n("100.00").num()).unwrap()), "100");
     assert_eq!(out(&numeric_trim_scale(n("nan").num()).unwrap()), "NaN");
-    assert_eq!(out(&numeric_div_trunc_common(n("10.5").num(), n("0.3").num()).unwrap()), "35");
-    assert_eq!(out(&numeric_div_trunc_common(n("-10").num(), n("3").num()).unwrap()), "-3");
-    assert_eq!(out(&numeric_round_common(n("nan").num(), 1).unwrap()), "NaN");
-    assert_eq!(out(&numeric_trunc_common(n("-inf").num(), 1).unwrap()), "-Infinity");
+    assert_eq!(
+        out(&numeric_div_trunc_common(n("10.5").num(), n("0.3").num()).unwrap()),
+        "35"
+    );
+    assert_eq!(
+        out(&numeric_div_trunc_common(n("-10").num(), n("3").num()).unwrap()),
+        "-3"
+    );
+    assert_eq!(
+        out(&numeric_round_common(n("nan").num(), 1).unwrap()),
+        "NaN"
+    );
+    assert_eq!(
+        out(&numeric_trunc_common(n("-inf").num(), 1).unwrap()),
+        "-Infinity"
+    );
 }
 
 #[test]
@@ -967,9 +1152,15 @@ fn in_range_numeric_cases() {
     assert!(!ir(v("4.9").num(), v("10").num(), v("5").num(), true, false).unwrap());
     assert!(ir(v("15").num(), v("10").num(), v("5").num(), false, true).unwrap());
     let e = ir(v("1").num(), v("1").num(), v("-1").num(), true, true).unwrap_err();
-    assert_eq!(e.message(), "invalid preceding or following size in window function");
+    assert_eq!(
+        e.message(),
+        "invalid preceding or following size in window function"
+    );
     let e = ir(v("1").num(), v("1").num(), v("nan").num(), true, true).unwrap_err();
-    assert_eq!(e.message(), "invalid preceding or following size in window function");
+    assert_eq!(
+        e.message(),
+        "invalid preceding or following size in window function"
+    );
     assert!(ir(v("nan").num(), v("nan").num(), v("1").num(), true, true).unwrap());
     assert!(!ir(v("nan").num(), v("1").num(), v("1").num(), true, true).unwrap());
     assert!(ir(v("1").num(), v("nan").num(), v("1").num(), true, true).unwrap());
@@ -1003,24 +1194,34 @@ fn generate_series_numeric_walk() {
     assert_eq!(got, ["3", "2", "1"]);
     let mut g = GenerateSeriesNumeric::new(n("5").num(), n("4").num(), None).unwrap();
     assert!(g.next().unwrap().is_none());
-    let e = GenerateSeriesNumeric::new(n("nan").num(), n("1").num(), None).err().unwrap();
+    let e = GenerateSeriesNumeric::new(n("nan").num(), n("1").num(), None)
+        .err()
+        .unwrap();
     assert_eq!(e.message(), "start value cannot be NaN");
-    let e = GenerateSeriesNumeric::new(n("inf").num(), n("1").num(), None).err().unwrap();
+    let e = GenerateSeriesNumeric::new(n("inf").num(), n("1").num(), None)
+        .err()
+        .unwrap();
     assert_eq!(e.message(), "start value cannot be infinity");
-    let e = GenerateSeriesNumeric::new(n("1").num(), n("nan").num(), None).err().unwrap();
+    let e = GenerateSeriesNumeric::new(n("1").num(), n("nan").num(), None)
+        .err()
+        .unwrap();
     assert_eq!(e.message(), "stop value cannot be NaN");
-    let e =
-        GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("0.0").num())).err().unwrap();
+    let e = GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("0.0").num()))
+        .err()
+        .unwrap();
     assert_eq!(e.message(), "step size cannot equal zero");
-    let e =
-        GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("-inf").num())).err().unwrap();
+    let e = GenerateSeriesNumeric::new(n("1").num(), n("2").num(), Some(n("-inf").num()))
+        .err()
+        .unwrap();
     assert_eq!(e.message(), "step size cannot be infinity");
 }
 
 #[test]
 fn generate_series_numeric_rows_estimate() {
     use crate::series::generate_series_numeric_rows;
-    let r = generate_series_numeric_rows(n("1").num(), n("10").num(), None).unwrap().unwrap();
+    let r = generate_series_numeric_rows(n("1").num(), n("10").num(), None)
+        .unwrap()
+        .unwrap();
     assert_eq!(r, 10.0);
     let r = generate_series_numeric_rows(n("1").num(), n("10").num(), Some(n("3").num()))
         .unwrap()
@@ -1030,7 +1231,11 @@ fn generate_series_numeric_rows_estimate() {
         .unwrap()
         .unwrap();
     assert_eq!(r, 0.0);
-    assert!(generate_series_numeric_rows(n("nan").num(), n("1").num(), None).unwrap().is_none());
+    assert!(
+        generate_series_numeric_rows(n("nan").num(), n("1").num(), None)
+            .unwrap()
+            .is_none()
+    );
     assert!(
         generate_series_numeric_rows(n("1").num(), n("2").num(), Some(n("0").num()))
             .unwrap()
@@ -1117,7 +1322,16 @@ fn numeric_agg_serialize_round_trip() {
     let mcx = ctx.mcx();
     for with_sum_x2 in [true, false] {
         let mut state = NumericAggState::new(with_sum_x2);
-        for v in ["1.5", "-2.25", "1000000.0001", "3", "NaN", "Infinity", "-Infinity", "0"] {
+        for v in [
+            "1.5",
+            "-2.25",
+            "1000000.0001",
+            "3",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "0",
+        ] {
             do_numeric_accum(&mut state, mcx, n(v).num()).unwrap();
         }
         let bytes = serialize_numeric_state(&mut state, with_sum_x2);
@@ -1148,13 +1362,17 @@ fn numeric_agg_deserialize_errors() {
 
     let mut buf = StringInfo::new_in(mcx).unwrap();
     buf.append_bytes(&bytes[..bytes.len() - 1]).unwrap();
-    let e = numeric_agg_state_deserialize(&mut buf, mcx, true).map(|_| ()).unwrap_err();
+    let e = numeric_agg_state_deserialize(&mut buf, mcx, true)
+        .map(|_| ())
+        .unwrap_err();
     assert_eq!(e.message(), "insufficient data left in message");
 
     let mut buf = StringInfo::new_in(mcx).unwrap();
     buf.append_bytes(&bytes).unwrap();
     buf.append_bytes(&[0]).unwrap();
-    let e = numeric_agg_state_deserialize(&mut buf, mcx, true).map(|_| ()).unwrap_err();
+    let e = numeric_agg_state_deserialize(&mut buf, mcx, true)
+        .map(|_| ())
+        .unwrap_err();
     assert_eq!(e.message(), "invalid message format");
 }
 
@@ -1215,7 +1433,10 @@ fn int128_agg_serialize_pinned_bytes() {
     assert_eq!(serialize_int128_state(&state, true), expected);
 
     // int8_avg_serialize drops the sumX2 leg only.
-    assert_eq!(serialize_int128_state(&state, false), expected[..26].to_vec());
+    assert_eq!(
+        serialize_int128_state(&state, false),
+        expected[..26].to_vec()
+    );
 }
 
 #[test]
@@ -1242,7 +1463,10 @@ fn int128_agg_serialize_round_trip() {
         } else {
             assert_eq!(back.sum_x2, 0);
         }
-        assert_eq!(serialize_int128_state(&back, with_sum_x2), bytes[..bytes.len()].to_vec());
+        assert_eq!(
+            serialize_int128_state(&back, with_sum_x2),
+            bytes[..bytes.len()].to_vec()
+        );
     }
 }
 
@@ -1276,7 +1500,13 @@ fn int128_agg_combine_matches_serial() {
 // placements below puts the digits at an odd address (panicked pre-fix).
 #[test]
 fn float8_no_overflow_any_realigns_odd_payloads() {
-    for s in ["123.456", "-0.38676990993745586", "12345678901234567890", "NaN", "Infinity"] {
+    for s in [
+        "123.456",
+        "-0.38676990993745586",
+        "12345678901234567890",
+        "NaN",
+        "Infinity",
+    ] {
         let img = n(s);
         let payload = img.num().as_bytes();
         let want = numeric_float8_no_overflow(img.num()).to_bits();
@@ -1312,21 +1542,48 @@ fn int_sum_transitions_wrap_like_c() {
 // DigitBuf::realloc_uninit": the fixed mirrors must be behavior-identical.
 // ---------------------------------------------------------------------------
 
-fn check_fixed_agree(op: &str, got: VarView<'_>, want: VarView<'_>, v1: VarView<'_>, v2: VarView<'_>) {
-    let g = (got.ndigits, got.weight, got.sign, got.dscale, got.digits.to_vec());
-    let w = (want.ndigits, want.weight, want.sign, want.dscale, want.digits.to_vec());
-    assert_eq!(g, w, "{op} fixed-vs-allocating mismatch for {v1:?} x {v2:?}");
+fn check_fixed_agree(
+    op: &str,
+    got: VarView<'_>,
+    want: VarView<'_>,
+    v1: VarView<'_>,
+    v2: VarView<'_>,
+) {
+    let g = (
+        got.ndigits,
+        got.weight,
+        got.sign,
+        got.dscale,
+        got.digits.to_vec(),
+    );
+    let w = (
+        want.ndigits,
+        want.weight,
+        want.sign,
+        want.dscale,
+        want.digits.to_vec(),
+    );
+    assert_eq!(
+        g, w,
+        "{op} fixed-vs-allocating mismatch for {v1:?} x {v2:?}"
+    );
 }
 
 fn check_fixed_ops(v1: VarView<'_>, v2: VarView<'_>) {
     let mut f = FixedVar::<40>::new();
-    assert!(add_var_fixed(v1, v2, &mut f).is_some(), "add fit {v1:?} {v2:?}");
+    assert!(
+        add_var_fixed(v1, v2, &mut f).is_some(),
+        "add fit {v1:?} {v2:?}"
+    );
     let mut a = NumericVar::new();
     add_var(v1, v2, &mut a);
     check_fixed_agree("add", f.view(), a.view(), v1, v2);
 
     let mut f = FixedVar::<40>::new();
-    assert!(sub_var_fixed(v1, v2, &mut f).is_some(), "sub fit {v1:?} {v2:?}");
+    assert!(
+        sub_var_fixed(v1, v2, &mut f).is_some(),
+        "sub fit {v1:?} {v2:?}"
+    );
     let mut a = NumericVar::new();
     sub_var(v1, v2, &mut a);
     check_fixed_agree("sub", f.view(), a.view(), v1, v2);
@@ -1422,19 +1679,31 @@ fn fixed_kernels_agree_randomized_wide() {
     for _ in 0..20_000 {
         let n1 = (rng.next() % 13) as usize;
         let n2 = (rng.next() % 13) as usize;
-        let d1: Vec<NumericDigit> = (0..n1).map(|_| (rng.next() % 10000) as NumericDigit).collect();
-        let d2: Vec<NumericDigit> = (0..n2).map(|_| (rng.next() % 10000) as NumericDigit).collect();
+        let d1: Vec<NumericDigit> = (0..n1)
+            .map(|_| (rng.next() % 10000) as NumericDigit)
+            .collect();
+        let d2: Vec<NumericDigit> = (0..n2)
+            .map(|_| (rng.next() % 10000) as NumericDigit)
+            .collect();
         let v1 = VarView {
             ndigits: n1 as i32,
             weight: (rng.next() % 31) as i32 - 15,
-            sign: if rng.next() % 2 == 0 { NUMERIC_POS } else { NUMERIC_NEG },
+            sign: if rng.next() % 2 == 0 {
+                NUMERIC_POS
+            } else {
+                NUMERIC_NEG
+            },
             dscale: (rng.next() % 7) as i32,
             digits: &d1,
         };
         let v2 = VarView {
             ndigits: n2 as i32,
             weight: (rng.next() % 31) as i32 - 15,
-            sign: if rng.next() % 2 == 0 { NUMERIC_POS } else { NUMERIC_NEG },
+            sign: if rng.next() % 2 == 0 {
+                NUMERIC_POS
+            } else {
+                NUMERIC_NEG
+            },
             dscale: (rng.next() % 7) as i32,
             digits: &d2,
         };
@@ -1551,7 +1820,8 @@ mod wrap_parity {
         let p = a.0.as_mut_ptr();
         // SAFETY: in-bounds writes into the 40-byte backing array.
         unsafe {
-            p.cast::<u32>().write(::types_tuple::varatt::set_varsize_4b_word(40));
+            p.cast::<u32>()
+                .write(::types_tuple::varatt::set_varsize_4b_word(40));
             p.add(4).cast::<i32>().write(1); // ndim
             p.add(8).cast::<i32>().write(0); // dataoffset: 0 = no null bitmap
             p.add(12).cast::<u32>().write(20); // elemtype: int8
@@ -1566,7 +1836,12 @@ mod wrap_parity {
     pub(super) fn read2(d: Datum) -> [i64; 2] {
         let p = d.as_usize() as *const u8;
         // SAFETY: result is a live validated int8[2] transarray image.
-        unsafe { [p.add(24).cast::<i64>().read(), p.add(32).cast::<i64>().read()] }
+        unsafe {
+            [
+                p.add(24).cast::<i64>().read(),
+                p.add(32).cast::<i64>().read(),
+            ]
+        }
     }
 
     #[test]
@@ -1575,7 +1850,10 @@ mod wrap_parity {
         // C 18.x returns {2,-9223372036854775808}; debug builds must too.
         let ctx = MemoryContext::new_bump("t");
         for (fc, arg) in [
-            (fc_int4_avg_accum as ::types_fmgr::PGFunction, Datum::from_i32(1)),
+            (
+                fc_int4_avg_accum as ::types_fmgr::PGFunction,
+                Datum::from_i32(1),
+            ),
             (fc_int2_avg_accum, Datum::from_i16(1)),
         ] {
             let arr = transarray(1, i64::MAX);
@@ -1602,7 +1880,10 @@ mod wrap_parity {
     fn int_avg_accum_inv_wraps() {
         let ctx = MemoryContext::new_bump("t");
         for (fc, arg) in [
-            (fc_int4_avg_accum_inv as ::types_fmgr::PGFunction, Datum::from_i32(1)),
+            (
+                fc_int4_avg_accum_inv as ::types_fmgr::PGFunction,
+                Datum::from_i32(1),
+            ),
             (fc_int2_avg_accum_inv, Datum::from_i16(1)),
         ] {
             let arr = transarray(i64::MIN, i64::MIN);
@@ -1808,23 +2089,45 @@ fn pending_interrupt_cancels_gcd_and_factorial() {
 #[test]
 fn make_numeric_typmod_safe_soft_errors() {
     use types_error::{SoftErrorContext, ERRCODE_INVALID_PARAMETER_VALUE};
-    assert_eq!(make_numeric_typmod_safe(5, 2, None).unwrap(), make_numeric_typmod(5, 2));
+    assert_eq!(
+        make_numeric_typmod_safe(5, 2, None).unwrap(),
+        make_numeric_typmod(5, 2)
+    );
     let e = make_numeric_typmod_safe(0, 6, None).unwrap_err();
-    assert_eq!(e.message(), "NUMERIC precision 0 must be between 1 and 1000");
+    assert_eq!(
+        e.message(),
+        "NUMERIC precision 0 must be between 1 and 1000"
+    );
     assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
     let e = make_numeric_typmod_safe(6, 1001, None).unwrap_err();
-    assert_eq!(e.message(), "NUMERIC scale 1001 must be between -1000 and 1000");
+    assert_eq!(
+        e.message(),
+        "NUMERIC scale 1001 must be between -1000 and 1000"
+    );
     assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
     // with a soft-error context the failure is recorded, not thrown
     for (p, s) in [(0, 6), (1001, 6), (-6, 2), (6, -1001), (6, 1001)] {
         let mut esc = SoftErrorContext::new(false);
-        assert_eq!(make_numeric_typmod_safe(p, s, Some(&mut esc)).unwrap(), -1, "({p}, {s})");
+        assert_eq!(
+            make_numeric_typmod_safe(p, s, Some(&mut esc)).unwrap(),
+            -1,
+            "({p}, {s})"
+        );
         assert!(esc.error_occurred(), "({p}, {s})");
     }
     // numerictypmodin itself still throws (no context)
     let e = numerictypmodin_core(&[0]).unwrap_err();
-    assert_eq!(e.message(), "NUMERIC precision 0 must be between 1 and 1000");
+    assert_eq!(
+        e.message(),
+        "NUMERIC precision 0 must be between 1 and 1000"
+    );
     let e = numerictypmodin_core(&[6, 1001]).unwrap_err();
-    assert_eq!(e.message(), "NUMERIC scale 1001 must be between -1000 and 1000");
-    assert_eq!(numerictypmodin_core(&[5]).unwrap(), make_numeric_typmod(5, 0));
+    assert_eq!(
+        e.message(),
+        "NUMERIC scale 1001 must be between -1000 and 1000"
+    );
+    assert_eq!(
+        numerictypmodin_core(&[5]).unwrap(),
+        make_numeric_typmod(5, 0)
+    );
 }

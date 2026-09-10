@@ -247,12 +247,16 @@ fc1t! {
 // only through fmgr, so the registry row is the compat surface.
 pub fn fc_hashint4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
-    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(a.value.as_i32() as u32)))
+    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(
+        a.value.as_i32() as u32,
+    )))
 }
 
 pub fn fc_hashint2(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
-    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(a.value.as_i16() as i32 as u32)))
+    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(
+        a.value.as_i16() as i32 as u32,
+    )))
 }
 
 pub fn fc_hashint2extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -375,7 +379,11 @@ pub fn fc_generate_series_step_int4(
     if !flinfo.has_fn_extra() {
         let start = fcinfo.arg(0).as_i32();
         let finish = fcinfo.arg(1).as_i32();
-        let step = if fcinfo.nargs() == 3 { fcinfo.arg(2).as_i32() } else { 1 };
+        let step = if fcinfo.nargs() == 3 {
+            fcinfo.arg(2).as_i32()
+        } else {
+            1
+        };
         let state = crate::series::GenerateSeriesInt4::new(start, finish, step)?;
         let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
         fctx.user_fctx = Some(alloc::boxed::Box::new(state));
@@ -388,7 +396,11 @@ pub fn fc_generate_series_step_int4(
         .expect("generate_series_int4: user_fctx is GenerateSeriesInt4")
         .next();
     match next {
-        Some(v) => Ok(::funcapi::srf_return_next(flinfo, fcinfo, Datum::from_i32(v))),
+        Some(v) => Ok(::funcapi::srf_return_next(
+            flinfo,
+            fcinfo,
+            Datum::from_i32(v),
+        )),
         None => Ok(::funcapi::srf_return_done(flinfo, fcinfo)),
     }
 }
@@ -463,7 +475,14 @@ pub fn fc_generate_series_int4_support(
 }
 
 const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
-    FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs,
+        strict: true,
+        retset: true,
+        func,
+    }
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
@@ -485,9 +504,24 @@ pub const INT_BUILTINS: &[FmgrBuiltin] = &[
     b(2405, "int2send", 1, fc_int2send),
     b(2406, "int4recv", 1, fc_int4recv),
     b(2407, "int4send", 1, fc_int4send),
-    srf(1066, "generate_series_step_int4", 3, fc_generate_series_step_int4),
-    srf(1067, "generate_series_int4", 2, fc_generate_series_step_int4),
-    b(3994, "generate_series_int4_support", 1, fc_generate_series_int4_support),
+    srf(
+        1066,
+        "generate_series_step_int4",
+        3,
+        fc_generate_series_step_int4,
+    ),
+    srf(
+        1067,
+        "generate_series_int4",
+        2,
+        fc_generate_series_step_int4,
+    ),
+    b(
+        3994,
+        "generate_series_int4_support",
+        1,
+        fc_generate_series_int4_support,
+    ),
     b(38, "int2in", 1, fc_int2in),
     b(39, "int2out", 1, fc_int2out),
     b(40, "int2vectorin", 1, fc_int2vectorin),
@@ -584,8 +618,18 @@ pub const INT_BUILTINS: &[FmgrBuiltin] = &[
     b(4130, "in_range_int2_int8", 5, fc_in_range_int2_int8),
 ];
 
-const fn t(foid: Oid, nargs: i16, func: PGFunction, thin: ::types_fmgr::PGFunctionThin) -> ThinBuiltin {
-    ThinBuiltin { foid, nargs, func, thin }
+const fn t(
+    foid: Oid,
+    nargs: i16,
+    func: PGFunction,
+    thin: ::types_fmgr::PGFunctionThin,
+) -> ThinBuiltin {
+    ThinBuiltin {
+        foid,
+        nargs,
+        func,
+        thin,
+    }
 }
 
 // Thin-ABI twins of the fc1!/fc1t!/fc2!/fc2t! wrappers above (same cores, so

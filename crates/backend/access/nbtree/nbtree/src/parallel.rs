@@ -8,9 +8,7 @@ use ::types_nbtree::{BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsValid, P_
 use ::types_relscan::{
     BTParallelScanShared, BtParallelArrayElem, BtParallelScanState, BtParallelSkipArg, BtPsState,
 };
-use ::types_scan::scankey::{
-    SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_SKIP, SK_ISNULL, SK_SEARCHNULL,
-};
+use ::types_scan::scankey::{SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_SKIP, SK_ISNULL, SK_SEARCHNULL};
 use ::types_tuple::varatt::varsize_any;
 
 fn lock(shared: &BTParallelScanShared) -> pgsync::MutexGuard<'_, BtParallelScanState> {
@@ -178,10 +176,7 @@ pub(crate) fn bt_parallel_release(
 /// shared-state arm is outlined so fat LTO keeps it out of the serial
 /// descent.
 #[inline]
-pub(crate) fn bt_parallel_done(
-    so: &BTScanOpaqueData<'_>,
-    parallel: Option<&BTParallelScanShared>,
-) {
+pub(crate) fn bt_parallel_done(so: &BTScanOpaqueData<'_>, parallel: Option<&BTParallelScanShared>) {
     debug_assert!(!BTScanPosIsValid(&so.currPos));
 
     let Some(shared) = parallel else { return };
@@ -238,7 +233,9 @@ fn serialize_arrays(so: &BTScanOpaqueData<'_>) -> Vec<BtParallelArrayElem> {
         let skey = &so.keyData[array.scan_key as usize];
         if array.num_elems != -1 {
             debug_assert!(skey.sk_flags & SK_BT_SKIP == 0);
-            out.push(BtParallelArrayElem::Saop { cur_elem: array.cur_elem });
+            out.push(BtParallelArrayElem::Saop {
+                cur_elem: array.cur_elem,
+            });
             continue;
         }
         debug_assert!(skey.sk_flags & SK_BT_SKIP != 0);
@@ -270,23 +267,25 @@ fn serialize_arrays(so: &BTScanOpaqueData<'_>) -> Vec<BtParallelArrayElem> {
             };
             Some(BtParallelSkipArg::Byref(bytes))
         };
-        out.push(BtParallelArrayElem::Skip { flags: skey.sk_flags, arg });
+        out.push(BtParallelArrayElem::Skip {
+            flags: skey.sk_flags,
+            arg,
+        });
     }
     out
 }
 
 // _bt_parallel_restore_arrays; caller holds the state lock. C divergence: the
 // superseded by-ref sk_argument stays in the scan-lifetime arena (no pfree).
-fn restore_arrays(
-    elems: &[BtParallelArrayElem],
-    so: &mut BTScanOpaqueData<'_>,
-) -> PgResult<()> {
+fn restore_arrays(elems: &[BtParallelArrayElem], so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
     let mcx: Mcx<'_> = *so.keyData.allocator();
     #[cfg(test)]
     if RESTORE_ARRAYS_FAULT.with(|f| f.get()) {
         return Err(Box::new(mcx.oom(0)));
     }
-    let BTScanOpaqueData { keyData, arrayKeys, .. } = so;
+    let BTScanOpaqueData {
+        keyData, arrayKeys, ..
+    } = so;
     debug_assert!(elems.len() == arrayKeys.len());
     for (array, elem) in arrayKeys.iter_mut().zip(elems.iter()) {
         let skey = &mut keyData[array.scan_key as usize];

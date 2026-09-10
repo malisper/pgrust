@@ -10,9 +10,7 @@ use ::types_error::PgResult;
 use ::types_nbtree::{MaxTIDsPerBTreePage, BTP_HAS_GARBAGE, XLOG_BTREE_DELETE};
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{MaxIndexTuplesPerPage, PageRef};
-use ::types_tuple::itemptr::{
-    InvalidOffsetNumber, ItemPointerCompare, ItemPointerGetBlockNumber,
-};
+use ::types_tuple::itemptr::{InvalidOffsetNumber, ItemPointerCompare, ItemPointerGetBlockNumber};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD};
 use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
@@ -59,7 +57,10 @@ pub(crate) unsafe fn bt_simpledel_pass<'mcx>(
 
         if !bt_tuple_is_posting(itup) {
             let tid = t_tid(itup);
-            if deadblocks.binary_search(&ItemPointerGetBlockNumber(&tid)).is_err() {
+            if deadblocks
+                .binary_search(&ItemPointerGetBlockNumber(&tid))
+                .is_err()
+            {
                 debug_assert!(!itemid.is_dead());
                 continue;
             }
@@ -74,7 +75,10 @@ pub(crate) unsafe fn bt_simpledel_pass<'mcx>(
         } else {
             for p in 0..bt_tuple_get_nposting(itup) {
                 let tid = bt_tuple_get_posting_n(itup, p);
-                if deadblocks.binary_search(&ItemPointerGetBlockNumber(&tid)).is_err() {
+                if deadblocks
+                    .binary_search(&ItemPointerGetBlockNumber(&tid))
+                    .is_err()
+                {
                     debug_assert!(!itemid.is_dead());
                     continue;
                 }
@@ -156,7 +160,6 @@ pub(crate) unsafe fn bt_delitems_delete_check<'mcx>(
         return Ok(());
     }
 
-
     let mut deletable = [0 as OffsetNumber; MaxIndexTuplesPerPage];
     let mut ndeletable = 0usize;
     let mut updatable: PgVec<'mcx, VacPosting<'mcx>> = PgVec::new_in(mcx);
@@ -223,7 +226,11 @@ pub(crate) unsafe fn bt_delitems_delete_check<'mcx>(
                     deletetids: vec_with_capacity_in(mcx, nitem)?,
                 });
             }
-            vacposting.as_mut().expect("created above").deletetids.push(p as u16);
+            vacposting
+                .as_mut()
+                .expect("created above")
+                .deletetids
+                .push(p as u16);
         }
 
         match vacposting {
@@ -270,7 +277,13 @@ unsafe fn bt_delitems_delete<'s>(
     let mut updatedoffsets = [0 as OffsetNumber; MaxIndexTuplesPerPage];
     let mut updatedbuf: PgVec<'s, u8> = PgVec::new_in(scx);
     if !updatable.is_empty() {
-        bt_delitems_update(scx, updatable, &mut updatedoffsets, needswal, &mut updatedbuf)?;
+        bt_delitems_update(
+            scx,
+            updatable,
+            &mut updatedoffsets,
+            needswal,
+            &mut updatedbuf,
+        )?;
     }
 
     StartCriticalSection();

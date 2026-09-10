@@ -61,7 +61,12 @@ pub fn cmp_var_common(
             return 1;
         }
         return cmp_abs_common(
-            var1digits, var1ndigits, var1weight, var2digits, var2ndigits, var2weight,
+            var1digits,
+            var1ndigits,
+            var1weight,
+            var2digits,
+            var2ndigits,
+            var2weight,
         );
     }
 
@@ -70,7 +75,12 @@ pub fn cmp_var_common(
     }
 
     cmp_abs_common(
-        var2digits, var2ndigits, var2weight, var1digits, var1ndigits, var1weight,
+        var2digits,
+        var2ndigits,
+        var2weight,
+        var1digits,
+        var1ndigits,
+        var1weight,
     )
 }
 
@@ -679,7 +689,10 @@ pub fn div_var(
     let var2ndigits = var2.ndigits;
 
     if var2ndigits == 0 || var2.digits[0] == 0 {
-        return Err(division_by_zero_error().into());
+        // C numeric.c:9438 (18.6): div_var's own ereport (wire F/L/R)
+        return Err(division_by_zero_error()
+            .with_location("numeric.c", 9438, "div_var")
+            .into());
     }
 
     if var2ndigits <= 2 {

@@ -33,8 +33,10 @@ impl Default for NumericSumAccum {
 
 fn alloc_zeroed_digits(mcx: Mcx<'_>, n: usize) -> PgResult<*mut i32> {
     let layout = core::alloc::Layout::array::<i32>(n).expect("digit buffer layout");
-    let raw: core::ptr::NonNull<u8> =
-        mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+    let raw: core::ptr::NonNull<u8> = mcx
+        .allocate(layout)
+        .map_err(|_| mcx.oom(layout.size()))?
+        .cast();
     let p = raw.as_ptr().cast::<i32>();
     // SAFETY: fresh allocation of n i32 slots.
     unsafe { core::ptr::write_bytes(p, 0, n) };
@@ -89,7 +91,11 @@ impl NumericSumAccum {
         self.rescale(mcx, val)?;
 
         let start = (self.weight - val.weight) as usize;
-        let accum_digits = if val.sign == NUMERIC_POS { self.pos() } else { self.neg() };
+        let accum_digits = if val.sign == NUMERIC_POS {
+            self.pos()
+        } else {
+            self.neg()
+        };
         for (i, &d) in val.digits.iter().enumerate() {
             accum_digits[start + i] += d as i32;
         }
@@ -687,7 +693,14 @@ fn stddev_from_sums(
     }
     let rscale = select_div_scale(numerator.view(), denom.view());
     let mut result = NumericVar::new();
-    div_var(numerator.view(), denom.view(), &mut result, rscale, true, true)?;
+    div_var(
+        numerator.view(),
+        denom.view(),
+        &mut result,
+        rscale,
+        true,
+        true,
+    )?;
     if !variance {
         let arg = core::mem::replace(&mut result, NumericVar::new());
         sqrt_var(arg.view(), &mut result, rscale)?;
@@ -717,7 +730,9 @@ pub fn numeric_stddev_internal(
     let mut vsum_x2 = NumericVar::new();
     state.sum_x.finalize(&mut vsum_x);
     state.sum_x2.finalize(&mut vsum_x2);
-    Ok(Some(stddev_from_sums(state.n, &vsum_x, vsum_x2, variance, sample)?))
+    Ok(Some(stddev_from_sums(
+        state.n, &vsum_x, vsum_x2, variance, sample,
+    )?))
 }
 
 /// C `numeric_poly_stddev_internal` (HAVE_INT128). None = SQL NULL.
@@ -735,7 +750,9 @@ pub fn numeric_poly_stddev_internal(
     let mut vsum_x2 = NumericVar::new();
     crate::var::int128_to_var(state.sum_x, &mut vsum_x);
     crate::var::int128_to_var(state.sum_x2, &mut vsum_x2);
-    Ok(Some(stddev_from_sums(state.n, &vsum_x, vsum_x2, variance, sample)?))
+    Ok(Some(stddev_from_sums(
+        state.n, &vsum_x, vsum_x2, variance, sample,
+    )?))
 }
 
 /// C's Int128AggState (HAVE_INT128 poly aggregate fast path).

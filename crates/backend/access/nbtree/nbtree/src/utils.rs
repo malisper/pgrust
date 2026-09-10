@@ -10,16 +10,16 @@ use ::types_core::{AttrNumber, OffsetNumber, XLogRecPtr};
 use ::types_error::PgResult;
 use ::types_fmgr::FmgrInfo;
 use ::types_nbtree::{
-    BTArrayKeyInfo, BTScanOpaqueData, BTScanPosIsPinned, BTScanPosIsValid, BTPageOpaqueData,
-    BTP_HAS_GARBAGE, BT_READ, MaxTIDsPerBTreePage, P_FIRSTDATAKEY,
+    BTArrayKeyInfo, BTPageOpaqueData, BTScanOpaqueData, BTScanPosIsPinned, BTScanPosIsValid,
+    MaxTIDsPerBTreePage, BTP_HAS_GARBAGE, BT_READ, P_FIRSTDATAKEY,
 };
 use ::types_rel::Relation;
 use ::types_scan::scankey::{
     BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
-    BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy, ScanKeyData,
-    SK_BT_INDOPTION_SHIFT, SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_NEXT, SK_BT_PRIOR, SK_BT_REQBKWD,
-    SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_END, SK_ROW_HEADER, SK_ROW_MEMBER,
-    SK_SEARCHARRAY, SK_SEARCHNULL, SK_BT_DESC, SK_BT_NULLS_FIRST,
+    BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy, ScanKeyData, SK_BT_DESC,
+    SK_BT_INDOPTION_SHIFT, SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_NEXT, SK_BT_NULLS_FIRST, SK_BT_PRIOR,
+    SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_END, SK_ROW_HEADER, SK_ROW_MEMBER,
+    SK_SEARCHARRAY, SK_SEARCHNULL,
 };
 use ::types_scan::sdir::{
     BackwardScanDirection, ForwardScanDirection, ScanDirection, ScanDirectionIsBackward,
@@ -74,7 +74,11 @@ fn bt_compare_array_skey(
             1
         })
     } else if cur.sk_flags & SK_ISNULL != 0 {
-        Ok(if cur.sk_flags & SK_BT_NULLS_FIRST != 0 { 1 } else { -1 })
+        Ok(if cur.sk_flags & SK_BT_NULLS_FIRST != 0 {
+            1
+        } else {
+            -1
+        })
     } else {
         let mut result = frame.cmp_proc(orderproc, cur.sk_collation, tupdatum, arrdatum)?;
         if cur.sk_flags & SK_BT_DESC != 0 {
@@ -179,7 +183,9 @@ pub(crate) fn bt_start_array_keys(so: &mut BTScanOpaqueData<'_>, dir: ScanDirect
     debug_assert!(so.qual_ok);
 
     {
-        let BTScanOpaqueData { keyData, arrayKeys, .. } = &mut *so;
+        let BTScanOpaqueData {
+            keyData, arrayKeys, ..
+        } = &mut *so;
         for array in arrayKeys.iter_mut() {
             let skey = &mut keyData[array.scan_key as usize];
             debug_assert!(skey.sk_flags & SK_SEARCHARRAY != 0);
@@ -306,7 +312,11 @@ fn bt_array_step<'mcx>(
 
     if array.num_elems != -1 {
         debug_assert!(skey.sk_flags & (SK_BT_SKIP | SK_BT_MINVAL | SK_BT_MAXVAL) == 0);
-        let next = if forward { array.cur_elem + 1 } else { array.cur_elem - 1 };
+        let next = if forward {
+            array.cur_elem + 1
+        } else {
+            array.cur_elem - 1
+        };
         if next < 0 || next >= array.num_elems {
             return Ok(false);
         }
@@ -335,7 +345,11 @@ fn bt_array_step<'mcx>(
     if skey.sk_flags & SK_ISNULL != 0 {
         debug_assert!(forward == nulls_first);
         skey.sk_flags &= !(SK_SEARCHNULL | SK_ISNULL);
-        let elem = if forward { sksup.low_elem } else { sksup.high_elem };
+        let elem = if forward {
+            sksup.low_elem
+        } else {
+            sksup.high_elem
+        };
         skey.sk_argument = skip_datum_copy(mcx, elem, array.attbyval, array.attlen)?;
         return Ok(true);
     }
@@ -354,7 +368,11 @@ fn bt_array_step<'mcx>(
         return Ok(false);
     }
 
-    let bound = if forward { array.high_compare.as_mut() } else { array.low_compare.as_mut() };
+    let bound = if forward {
+        array.high_compare.as_mut()
+    } else {
+        array.low_compare.as_mut()
+    };
     if let Some(bound) = bound {
         let arg = bound.sk_argument;
         if !frame.test(bound, new_sk_argument, arg)? {
@@ -374,7 +392,9 @@ fn bt_advance_array_keys_increment(
     frame: &mut OrderProcFrame,
 ) -> PgResult<bool> {
     {
-        let BTScanOpaqueData { keyData, arrayKeys, .. } = &mut *so;
+        let BTScanOpaqueData {
+            keyData, arrayKeys, ..
+        } = &mut *so;
         let mcx = *keyData.allocator();
         for array in arrayKeys.iter_mut().rev() {
             let skey = &mut keyData[array.scan_key as usize];
@@ -413,12 +433,20 @@ fn bt_binsrch_skiparray_skey(
     }
 
     if tupnull {
-        *set_elem_result = if sk_flags & SK_BT_NULLS_FIRST != 0 { -1 } else { 1 };
+        *set_elem_result = if sk_flags & SK_BT_NULLS_FIRST != 0 {
+            -1
+        } else {
+            1
+        };
         return Ok(());
     }
 
     *set_elem_result = 0;
-    let BTArrayKeyInfo { low_compare, high_compare, .. } = array;
+    let BTArrayKeyInfo {
+        low_compare,
+        high_compare,
+        ..
+    } = array;
     if ScanDirectionIsForward(dir) {
         if !cur_elem_trig {
             if let Some(k) = low_compare.as_mut() {
@@ -480,7 +508,13 @@ unsafe fn bt_tuple_before_array_skeys(
         *sb = false;
     }
 
-    let BTScanOpaqueData { keyData, orderProcs, arrayKeys, numberOfKeys, .. } = &mut *so;
+    let BTScanOpaqueData {
+        keyData,
+        orderProcs,
+        arrayKeys,
+        numberOfKeys,
+        ..
+    } = &mut *so;
     for ikey in sktrig as usize..*numberOfKeys as usize {
         let cur = &keyData[ikey];
         debug_assert!(!readpagetup || ikey == sktrig as usize);
@@ -539,7 +573,9 @@ unsafe fn bt_tuple_before_array_skeys(
                 .find(|a| a.scan_key == ikey as i32)
                 .expect("sentinel key has a skip array");
             let mut r = 0;
-            bt_binsrch_skiparray_skey(frame, false, dir, tupdatum, tupnull, array, sk_flags, &mut r)?;
+            bt_binsrch_skiparray_skey(
+                frame, false, dir, tupdatum, tupnull, array, sk_flags, &mut r,
+            )?;
             if r == 0 {
                 return Ok(false); // in range: time to advance the arrays
             }
@@ -600,7 +636,9 @@ unsafe fn bt_advance_array_keys(
     debug_assert!(sktrig_required == pstate.is_some());
 
     if sktrig_required {
-        let p = pstate.as_deref_mut().expect("required caller passes pstate");
+        let p = pstate
+            .as_deref_mut()
+            .expect("required caller passes pstate");
         p.rechecks = 0;
         p.targetdistance = 0;
     } else if sktrig < so.numberOfKeys - 1
@@ -833,9 +871,7 @@ unsafe fn bt_advance_array_keys(
 
         if !continuescan {
             debug_assert!(sktrig_required);
-            debug_assert!(
-                so.keyData[nsktrig as usize].sk_strategy != BTEqualStrategyNumber
-            );
+            debug_assert!(so.keyData[nsktrig as usize].sk_strategy != BTEqualStrategyNumber);
             debug_assert!(!beyond_end_advance);
             let satisfied =
                 bt_advance_array_keys(rel, so, pstate, tuple, tupnatts, nsktrig, true, frame)?;
@@ -1212,7 +1248,14 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
             debug_assert!(required_same_dir || forcenonrequired);
             let trig = *ikey;
             return check_compare_sentinel(
-                rel, so, tuple, tupnatts, trig, forcenonrequired, continuescan, frame,
+                rel,
+                so,
+                tuple,
+                tupnatts,
+                trig,
+                forcenonrequired,
+                continuescan,
+                frame,
             );
         }
 
@@ -1266,14 +1309,12 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
                 return advance_nonrequired_cold(rel, so, tuple, tupnatts, trig, frame);
             }
             if key.sk_flags & SK_BT_NULLS_FIRST != 0 {
-                if (required_same_dir || required_opposite_dir_only)
-                    && ScanDirectionIsBackward(dir)
+                if (required_same_dir || required_opposite_dir_only) && ScanDirectionIsBackward(dir)
                 {
                     *continuescan = false;
                 }
             } else {
-                if (required_same_dir || required_opposite_dir_only)
-                    && ScanDirectionIsForward(dir)
+                if (required_same_dir || required_opposite_dir_only) && ScanDirectionIsForward(dir)
                 {
                     *continuescan = false;
                 }
@@ -1290,9 +1331,7 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
                 && key.sk_flags & SK_SEARCHARRAY != 0
             {
                 let trig = *ikey;
-                return bt_advance_array_keys(
-                    rel, so, None, tuple, tupnatts, trig, false, frame,
-                );
+                return bt_advance_array_keys(rel, so, None, tuple, tupnatts, trig, false, frame);
             }
             return Ok(false);
         }
@@ -1436,11 +1475,7 @@ unsafe fn datum_image_eq(a: Datum, b: Datum, attbyval: bool, attlen: i16) -> boo
 ///
 /// # Safety
 /// As [`bt_checkkeys`] for both tuples.
-pub unsafe fn bt_keep_natts_fast(
-    rel: &Relation<'_>,
-    lastleft: ITup,
-    firstright: ITup,
-) -> i32 {
+pub unsafe fn bt_keep_natts_fast(rel: &Relation<'_>, lastleft: ITup, firstright: ITup) -> i32 {
     let tupdesc: &TupleDescData<'_> = &rel.rd_att;
     let keysz = rel.indnkeyatts();
     let mut keepnatts = 1;
@@ -1487,8 +1522,14 @@ pub(crate) unsafe fn bt_set_startikey(
 
     let firstchangingattnum = bt_keep_natts_fast(rel, firsttup, lasttup);
 
-    let BTScanOpaqueData { keyData, arrayKeys, orderProcs, numberOfKeys, skipScan, .. } =
-        &mut *so;
+    let BTScanOpaqueData {
+        keyData,
+        arrayKeys,
+        orderProcs,
+        numberOfKeys,
+        skipScan,
+        ..
+    } = &mut *so;
     let mut start_past_saop_eq = false;
     let mut arrayidx = 0usize;
     let mut startikey: i32 = 0;
@@ -1655,10 +1696,7 @@ unsafe fn set_has_garbage(page: &PageRef<'_>) {
 }
 
 /// _bt_killitems.
-pub(crate) fn bt_killitems(
-    rel: &Relation<'_>,
-    so: &mut BTScanOpaqueData<'_>,
-) -> PgResult<()> {
+pub(crate) fn bt_killitems(rel: &Relation<'_>, so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
     let num_killed = so.numKilled as usize;
     debug_assert!(num_killed > 0);
     debug_assert!(BTScanPosIsValid(&so.currPos));
@@ -1771,8 +1809,7 @@ pub unsafe fn bt_truncate<'mcx>(
 ) -> PgResult<crate::itup::ItupBuf<'mcx>> {
     use crate::itup::{
         bt_tuple_get_max_heap_tid, bt_tuple_get_posting_offset, bt_tuple_set_natts,
-        index_truncate_tuple, maxalign, index_tuple_size, set_t_info, t_info,
-        INDEX_SIZE_MASK,
+        index_truncate_tuple, index_tuple_size, maxalign, set_t_info, t_info, INDEX_SIZE_MASK,
     };
 
     let tupdesc: &TupleDescData<'_> = &rel.rd_att;
@@ -1800,8 +1837,8 @@ pub unsafe fn bt_truncate<'mcx>(
         return Ok(pivot);
     }
 
-    let newsize =
-        maxalign(index_tuple_size(pivot.as_ptr())) + maxalign(core::mem::size_of::<ItemPointerData>());
+    let newsize = maxalign(index_tuple_size(pivot.as_ptr()))
+        + maxalign(core::mem::size_of::<ItemPointerData>());
     let mut tidpivot = crate::itup::ItupBuf::with_size(mcx, newsize)?;
     core::ptr::copy_nonoverlapping(
         pivot.as_ptr(),
@@ -1822,8 +1859,10 @@ pub unsafe fn bt_truncate<'mcx>(
         .write_unaligned(pivotheaptid);
 
     debug_assert!(
-        ItemPointerCompare(&bt_tuple_get_max_heap_tid(lastleft),
-            &bt_tuple_get_heap_tid(firstright).expect("non-pivot")) < 0
+        ItemPointerCompare(
+            &bt_tuple_get_max_heap_tid(lastleft),
+            &bt_tuple_get_heap_tid(firstright).expect("non-pivot")
+        ) < 0
     );
     Ok(tidpivot)
 }
@@ -1866,7 +1905,8 @@ unsafe fn bt_keep_natts(
     }
 
     debug_assert!(
-        !itup_key.allequalimage || keepnatts == bt_keep_natts_fast(rel, lastleft, firstright) as usize
+        !itup_key.allequalimage
+            || keepnatts == bt_keep_natts_fast(rel, lastleft, firstright) as usize
     );
     Ok(keepnatts)
 }
@@ -1885,7 +1925,9 @@ pub unsafe fn bt_check_third_page(
     page: &PageRef<'_>,
     newtup: ITup,
 ) -> PgResult<()> {
-    use ::types_nbtree::{BTMaxItemSize, BTMaxItemSizeNoHeapTid, P_ISLEAF, BTREE_NOVAC_VERSION, BTREE_VERSION};
+    use ::types_nbtree::{
+        BTMaxItemSize, BTMaxItemSizeNoHeapTid, BTREE_NOVAC_VERSION, BTREE_VERSION, P_ISLEAF,
+    };
 
     let itemsz = crate::itup::maxalign(crate::itup::index_tuple_size(newtup));
     if itemsz <= BTMaxItemSize {
@@ -1964,7 +2006,8 @@ struct BTVacInfo {
 // offsetof(BTVacInfo, vacuums) == 12 and sizeof(BTOneVacInfo) == 12 (LP64).
 const _: () = assert!(core::mem::size_of::<BTVacInfo>() == 12);
 const _: () = assert!(core::mem::size_of::<BTOneVacInfo>() == 12);
-const _: () = assert!(core::mem::size_of::<BTVacInfo>() % core::mem::align_of::<BTOneVacInfo>() == 0);
+const _: () =
+    assert!(core::mem::size_of::<BTVacInfo>() % core::mem::align_of::<BTOneVacInfo>() == 0);
 
 // C: `static BTVacInfo *btvacinfo` — set once by BTreeShmemInit.
 static BTVACINFO: core::sync::atomic::AtomicPtr<BTVacInfo> =
@@ -1972,7 +2015,10 @@ static BTVACINFO: core::sync::atomic::AtomicPtr<BTVacInfo> =
 
 fn btvacinfo() -> *mut BTVacInfo {
     let p = BTVACINFO.load(core::sync::atomic::Ordering::Acquire);
-    assert!(!p.is_null(), "BTree Vacuum State not initialized (BTreeShmemInit)");
+    assert!(
+        !p.is_null(),
+        "BTree Vacuum State not initialized (BTreeShmemInit)"
+    );
     p
 }
 
@@ -2026,7 +2072,10 @@ pub fn BTreeShmemInit() -> PgResult<()> {
         // of BTreeShmemSize() >= size_of::<BTVacInfo>() bytes.
         unsafe { info.write(fresh_btvacinfo()) };
     } else {
-        debug_assert!(found, "BTreeShmemInit: child attached before the postmaster initialized");
+        debug_assert!(
+            found,
+            "BTreeShmemInit: child attached before the postmaster initialized"
+        );
     }
     BTVACINFO.store(info, core::sync::atomic::Ordering::Release);
     Ok(())
@@ -2123,7 +2172,11 @@ pub(crate) fn bt_start_vacuum(rel: &Relation<'_>) -> PgResult<::types_nbtree::BT
                 ),
             ));
         }
-        vacs.add(n).write(BTOneVacInfo { rel_id, db_id, cycleid: result });
+        vacs.add(n).write(BTOneVacInfo {
+            rel_id,
+            db_id,
+            cycleid: result,
+        });
         (*info).num_vacuums += 1;
         result
     };

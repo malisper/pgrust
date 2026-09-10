@@ -110,12 +110,14 @@ fn install_fixture() {
             })
         });
         syscache_seams::lookup_pg_cast_shape::set(|src, tgt| {
-            Ok((src == INT4OID && tgt == INT8OID).then_some(syscache_seams::PgCastShape {
-                oid: 10001,
-                castfunc: F_INT48,
-                castcontext: b'i' as i8,
-                castmethod: b'f' as i8,
-            }))
+            Ok(
+                (src == INT4OID && tgt == INT8OID).then_some(syscache_seams::PgCastShape {
+                    oid: 10001,
+                    castfunc: F_INT48,
+                    castcontext: b'i' as i8,
+                    castmethod: b'f' as i8,
+                }),
+            )
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok(match funcid {
@@ -204,8 +206,17 @@ fn int_a_const<'mcx>(mcx: Mcx<'mcx>, ival: i32, location: i32) -> Node<'mcx> {
 }
 
 fn int4_tle<'mcx>(mcx: Mcx<'mcx>, v: i32, resno: i16, resname: Option<&'mcx str>) -> Node<'mcx> {
-    let c = Node::mk_const(mcx, INT4OID, -1, InvalidOid, 4, datum::Datum::from_i32(v), false, true)
-        .unwrap();
+    let c = Node::mk_const(
+        mcx,
+        INT4OID,
+        -1,
+        InvalidOid,
+        4,
+        datum::Datum::from_i32(v),
+        false,
+        true,
+    )
+    .unwrap();
     Node::mk_target_entry(mcx, c, resno, resname, false).unwrap()
 }
 
@@ -365,12 +376,26 @@ fn order_by_position_resolves_default_and_desc() {
     assert_eq!(sortlist.len(), 2);
     let s1 = sortlist.nth(0).as_sort_group_clause().unwrap();
     assert_eq!(
-        (s1.tleSortGroupRef, s1.sortop, s1.eqop, s1.reverse_sort, s1.nulls_first, s1.hashable),
+        (
+            s1.tleSortGroupRef,
+            s1.sortop,
+            s1.eqop,
+            s1.reverse_sort,
+            s1.nulls_first,
+            s1.hashable
+        ),
         (1, INT4_LT, INT4_EQ, false, false, true)
     );
     let s2 = sortlist.nth(1).as_sort_group_clause().unwrap();
     assert_eq!(
-        (s2.tleSortGroupRef, s2.sortop, s2.eqop, s2.reverse_sort, s2.nulls_first, s2.hashable),
+        (
+            s2.tleSortGroupRef,
+            s2.sortop,
+            s2.eqop,
+            s2.reverse_sort,
+            s2.nulls_first,
+            s2.hashable
+        ),
         (2, INT4_GT, INT4_EQ, true, true, true)
     );
     assert_eq!(tlist.nth(0).as_target_entry().unwrap().ressortgroupref, 1);
@@ -387,12 +412,29 @@ fn order_by_name_nulls_first_and_dedup() {
 
     let name_ref = |loc| {
         let f = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "foo" }).unwrap()).unwrap();
-        Node::mk(mcx, ColumnRef { fields: f, location: loc }).unwrap()
+        Node::mk(
+            mcx,
+            ColumnRef {
+                fields: f,
+                location: loc,
+            },
+        )
+        .unwrap()
     };
     let orderby = NodeList::make2(
         mcx,
-        sort_by(mcx, name_ref(20), SortByDir::SORTBY_ASC, SortByNulls::SORTBY_NULLS_FIRST),
-        sort_by(mcx, name_ref(30), SortByDir::SORTBY_ASC, SortByNulls::SORTBY_NULLS_FIRST),
+        sort_by(
+            mcx,
+            name_ref(20),
+            SortByDir::SORTBY_ASC,
+            SortByNulls::SORTBY_NULLS_FIRST,
+        ),
+        sort_by(
+            mcx,
+            name_ref(30),
+            SortByDir::SORTBY_ASC,
+            SortByNulls::SORTBY_NULLS_FIRST,
+        ),
     )
     .unwrap();
 
@@ -406,9 +448,16 @@ fn order_by_name_nulls_first_and_dedup() {
     )
     .unwrap();
 
-    assert_eq!(sortlist.len(), 1, "duplicate ORDER BY item must be suppressed");
+    assert_eq!(
+        sortlist.len(),
+        1,
+        "duplicate ORDER BY item must be suppressed"
+    );
     let s = sortlist.nth(0).as_sort_group_clause().unwrap();
-    assert_eq!((s.tleSortGroupRef, s.sortop, s.nulls_first), (1, INT4_LT, true));
+    assert_eq!(
+        (s.tleSortGroupRef, s.sortop, s.nulls_first),
+        (1, INT4_LT, true)
+    );
 }
 
 #[test]
@@ -439,7 +488,10 @@ fn order_by_bad_position_is_42p10() {
     )
     .map(|_| ())
     .unwrap_err();
-    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_COLUMN_REFERENCE);
+    assert_eq!(
+        err.sqlstate(),
+        types_error::ERRCODE_INVALID_COLUMN_REFERENCE
+    );
     assert_eq!(err.message(), "ORDER BY position 2 is not in select list");
 }
 
@@ -453,7 +505,12 @@ fn order_by_non_integer_constant_is_42601() {
     let sconst = Node::mk_a_const(mcx, Some(ValUnion::String(PgStr { sval: "x" })), 20).unwrap();
     let orderby = NodeList::make1(
         mcx,
-        sort_by(mcx, sconst, SortByDir::SORTBY_DEFAULT, SortByNulls::SORTBY_NULLS_DEFAULT),
+        sort_by(
+            mcx,
+            sconst,
+            SortByDir::SORTBY_DEFAULT,
+            SortByNulls::SORTBY_NULLS_DEFAULT,
+        ),
     )
     .unwrap();
 
@@ -493,12 +550,18 @@ fn limit_count_coerces_to_int8_funcexpr() {
     assert_eq!(f.funcid, F_INT48);
     assert_eq!(f.funcresulttype, INT8OID);
     assert!(!f.funcretset && !f.funcvariadic);
-    assert_eq!(f.funcformat, types_nodes::CoercionForm::COERCE_IMPLICIT_CAST);
+    assert_eq!(
+        f.funcformat,
+        types_nodes::CoercionForm::COERCE_IMPLICIT_CAST
+    );
     assert_eq!((f.funccollid, f.inputcollid), (InvalidOid, InvalidOid));
     assert_eq!(f.location, -1);
     assert_eq!(f.args.len(), 1);
     let arg = f.args.nth(0).as_const().unwrap();
-    assert_eq!((arg.consttype, arg.constvalue), (INT4OID, datum::Datum::from_i32(1)));
+    assert_eq!(
+        (arg.consttype, arg.constvalue),
+        (INT4OID, datum::Datum::from_i32(1))
+    );
     assert_eq!(arg.location, 15);
 }
 
@@ -543,8 +606,14 @@ fn limit_null_with_ties_is_2201w() {
     )
     .map(|_| ())
     .unwrap_err();
-    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE);
-    assert_eq!(err.message(), "row count cannot be null in FETCH FIRST ... WITH TIES clause");
+    assert_eq!(
+        err.sqlstate(),
+        types_error::ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE
+    );
+    assert_eq!(
+        err.message(),
+        "row count cannot be null in FETCH FIRST ... WITH TIES clause"
+    );
 }
 
 #[test]
@@ -565,8 +634,14 @@ fn limit_with_variable_is_42p10() {
     )
     .map(|_| ())
     .unwrap_err();
-    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_COLUMN_REFERENCE);
-    assert_eq!(err.message(), "argument of LIMIT must not contain variables");
+    assert_eq!(
+        err.sqlstate(),
+        types_error::ERRCODE_INVALID_COLUMN_REFERENCE
+    );
+    assert_eq!(
+        err.message(),
+        "argument of LIMIT must not contain variables"
+    );
 }
 
 #[test]
@@ -584,7 +659,14 @@ fn group_by_name_and_position_with_dedup() {
 
     let name_ref = |name: &'static str, loc| {
         let f = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: name }).unwrap()).unwrap();
-        Node::mk(mcx, ColumnRef { fields: f, location: loc }).unwrap()
+        Node::mk(
+            mcx,
+            ColumnRef {
+                fields: f,
+                location: loc,
+            },
+        )
+        .unwrap()
     };
     let mut grouplist = NodeList::make2(mcx, name_ref("foo", 20), int_a_const(mcx, 2, 28)).unwrap();
     grouplist.lappend(mcx, name_ref("foo", 35)).unwrap();
@@ -606,11 +688,21 @@ fn group_by_name_and_position_with_dedup() {
     assert_eq!(group.len(), 2, "duplicate GROUP BY item must be suppressed");
     let g1 = group.nth(0).as_sort_group_clause().unwrap();
     assert_eq!(
-        (g1.tleSortGroupRef, g1.eqop, g1.sortop, g1.reverse_sort, g1.nulls_first, g1.hashable),
+        (
+            g1.tleSortGroupRef,
+            g1.eqop,
+            g1.sortop,
+            g1.reverse_sort,
+            g1.nulls_first,
+            g1.hashable
+        ),
         (1, INT4_EQ, INT4_LT, false, false, true)
     );
     let g2 = group.nth(1).as_sort_group_clause().unwrap();
-    assert_eq!((g2.tleSortGroupRef, g2.eqop, g2.sortop), (2, INT4_EQ, INT4_LT));
+    assert_eq!(
+        (g2.tleSortGroupRef, g2.eqop, g2.sortop),
+        (2, INT4_EQ, INT4_LT)
+    );
     assert_eq!(tlist.nth(0).as_target_entry().unwrap().ressortgroupref, 1);
     assert_eq!(tlist.nth(1).as_target_entry().unwrap().ressortgroupref, 2);
 }
@@ -660,10 +752,25 @@ fn group_by_copies_matching_order_by_operators() {
     assert_eq!(group.len(), 1);
     let g = group.nth(0).as_sort_group_clause().unwrap();
     let s = sortlist.nth(0).as_sort_group_clause().unwrap();
-    assert!(!group.nth(0).ptr_eq(sortlist.nth(0)), "C copyObject, not a shared node");
+    assert!(
+        !group.nth(0).ptr_eq(sortlist.nth(0)),
+        "C copyObject, not a shared node"
+    );
     assert_eq!(
-        (g.tleSortGroupRef, g.eqop, g.sortop, g.reverse_sort, g.nulls_first),
-        (s.tleSortGroupRef, s.eqop, s.sortop, s.reverse_sort, s.nulls_first)
+        (
+            g.tleSortGroupRef,
+            g.eqop,
+            g.sortop,
+            g.reverse_sort,
+            g.nulls_first
+        ),
+        (
+            s.tleSortGroupRef,
+            s.eqop,
+            s.sortop,
+            s.reverse_sort,
+            s.nulls_first
+        )
     );
 }
 
@@ -701,7 +808,10 @@ fn group_by_aggregate_rejected_42803() {
     )
     .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
-    assert_eq!(err.message(), "aggregate functions are not allowed in GROUP BY");
+    assert_eq!(
+        err.message(),
+        "aggregate functions are not allowed in GROUP BY"
+    );
 }
 
 #[test]
@@ -711,15 +821,30 @@ fn order_by_duplicate_name_same_value_resolves() {
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
     // C: duplicate output names naming equal() values are not ambiguous.
-    let mut tlist =
-        NodeList::make2(mcx, int4_tle(mcx, 7, 1, Some("foo")), int4_tle(mcx, 7, 2, Some("foo")))
-            .unwrap();
+    let mut tlist = NodeList::make2(
+        mcx,
+        int4_tle(mcx, 7, 1, Some("foo")),
+        int4_tle(mcx, 7, 2, Some("foo")),
+    )
+    .unwrap();
 
     let f = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "foo" }).unwrap()).unwrap();
-    let cref = Node::mk(mcx, ColumnRef { fields: f, location: 20 }).unwrap();
+    let cref = Node::mk(
+        mcx,
+        ColumnRef {
+            fields: f,
+            location: 20,
+        },
+    )
+    .unwrap();
     let orderby = NodeList::make1(
         mcx,
-        sort_by(mcx, cref, SortByDir::SORTBY_ASC, SortByNulls::SORTBY_NULLS_DEFAULT),
+        sort_by(
+            mcx,
+            cref,
+            SortByDir::SORTBY_ASC,
+            SortByNulls::SORTBY_NULLS_DEFAULT,
+        ),
     )
     .unwrap();
 
@@ -733,7 +858,14 @@ fn order_by_duplicate_name_same_value_resolves() {
     )
     .unwrap();
     assert_eq!(sortlist.len(), 1);
-    assert_eq!(sortlist.nth(0).as_sort_group_clause().unwrap().tleSortGroupRef, 1);
+    assert_eq!(
+        sortlist
+            .nth(0)
+            .as_sort_group_clause()
+            .unwrap()
+            .tleSortGroupRef,
+        1
+    );
     // The first matching entry wins the sortgroupref.
     assert_eq!(tlist.nth(0).as_target_entry().unwrap().ressortgroupref, 1);
     assert_eq!(tlist.nth(1).as_target_entry().unwrap().ressortgroupref, 0);
@@ -745,15 +877,30 @@ fn order_by_duplicate_name_distinct_values_is_42702() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    let mut tlist =
-        NodeList::make2(mcx, int4_tle(mcx, 7, 1, Some("foo")), int4_tle(mcx, 8, 2, Some("foo")))
-            .unwrap();
+    let mut tlist = NodeList::make2(
+        mcx,
+        int4_tle(mcx, 7, 1, Some("foo")),
+        int4_tle(mcx, 8, 2, Some("foo")),
+    )
+    .unwrap();
 
     let f = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "foo" }).unwrap()).unwrap();
-    let cref = Node::mk(mcx, ColumnRef { fields: f, location: 20 }).unwrap();
+    let cref = Node::mk(
+        mcx,
+        ColumnRef {
+            fields: f,
+            location: 20,
+        },
+    )
+    .unwrap();
     let orderby = NodeList::make1(
         mcx,
-        sort_by(mcx, cref, SortByDir::SORTBY_ASC, SortByNulls::SORTBY_NULLS_DEFAULT),
+        sort_by(
+            mcx,
+            cref,
+            SortByDir::SORTBY_ASC,
+            SortByNulls::SORTBY_NULLS_DEFAULT,
+        ),
     )
     .unwrap();
 
@@ -804,21 +951,29 @@ fn distinct_absorbs_order_by_then_remaining_columns() {
     )
     .unwrap();
 
-    let distinct =
-        transformDistinctClause(mcx, &mut pstate, &mut tlist, &sortlist, false).unwrap();
+    let distinct = transformDistinctClause(mcx, &mut pstate, &mut tlist, &sortlist, false).unwrap();
     assert_eq!(distinct.len(), 2);
     // First: the ORDER BY item's copied (DESC) semantics for "bar".
     let d1 = distinct.nth(0).as_sort_group_clause().unwrap();
     let s = sortlist.nth(0).as_sort_group_clause().unwrap();
-    assert!(!distinct.nth(0).ptr_eq(sortlist.nth(0)), "C copyObject, not a shared node");
+    assert!(
+        !distinct.nth(0).ptr_eq(sortlist.nth(0)),
+        "C copyObject, not a shared node"
+    );
     assert_eq!(
         (d1.tleSortGroupRef, d1.eqop, d1.sortop, d1.reverse_sort),
         (s.tleSortGroupRef, s.eqop, s.sortop, s.reverse_sort)
     );
     // Second: "foo" under default grouping semantics.
     let d2 = distinct.nth(1).as_sort_group_clause().unwrap();
-    assert_eq!((d2.eqop, d2.sortop, d2.reverse_sort, d2.hashable), (INT4_EQ, INT4_LT, false, true));
-    assert_eq!(tlist.nth(0).as_target_entry().unwrap().ressortgroupref, d2.tleSortGroupRef);
+    assert_eq!(
+        (d2.eqop, d2.sortop, d2.reverse_sort, d2.hashable),
+        (INT4_EQ, INT4_LT, false, true)
+    );
+    assert_eq!(
+        tlist.nth(0).as_target_entry().unwrap().ressortgroupref,
+        d2.tleSortGroupRef
+    );
 }
 
 // A resjunk ORDER BY expression under SELECT DISTINCT is 42P10.
@@ -839,10 +994,8 @@ fn distinct_with_junk_order_by_is_42p10() {
     .unwrap();
     let junk = Node::mk_target_entry(mcx, junk_expr, 2, None, true).unwrap();
     // SAFETY: freshly built tlist; no other reference is live.
-    unsafe {
-        junk.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 7)
-    }
-    .unwrap();
+    unsafe { junk.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 7) }
+        .unwrap();
     tlist.lappend(mcx, junk).unwrap();
     let sortlist = NodeList::make1(
         mcx,
@@ -861,38 +1014,58 @@ fn distinct_with_junk_order_by_is_42p10() {
     )
     .unwrap();
 
-    let err = transformDistinctClause(mcx, &mut pstate, &mut tlist, &sortlist, false)
-        .unwrap_err();
-    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_COLUMN_REFERENCE);
+    let err = transformDistinctClause(mcx, &mut pstate, &mut tlist, &sortlist, false).unwrap_err();
+    assert_eq!(
+        err.sqlstate(),
+        types_error::ERRCODE_INVALID_COLUMN_REFERENCE
+    );
     assert_eq!(
         err.message(),
         "for SELECT DISTINCT, ORDER BY expressions must appear in select list"
     );
 }
 
-fn generate_series_from_item<'mcx>(
-    mcx: Mcx<'mcx>,
-    alias: Option<&'mcx str>,
-) -> Node<'mcx> {
+fn generate_series_from_item<'mcx>(mcx: Mcx<'mcx>, alias: Option<&'mcx str>) -> Node<'mcx> {
     use types_nodes::rawnodes::FuncCall;
-    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "generate_series" }).unwrap())
-        .unwrap();
+    let name = NodeList::make1(
+        mcx,
+        Node::mk(
+            mcx,
+            PgStr {
+                sval: "generate_series",
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let mut args = NodeList::nil();
     for v in [1, 10] {
         args.lappend(mcx, int_a_const(mcx, v, -1)).unwrap();
     }
     let fc = Node::mk(
         mcx,
-        FuncCall { funcname: name, args, location: 14, ..Default::default() },
+        FuncCall {
+            funcname: name,
+            args,
+            location: 14,
+            ..Default::default()
+        },
     )
     .unwrap();
     let alias = alias.map(|a| {
-        Node::mk_mut(mcx, types_nodes::Alias { aliasname: Some(a), colnames: NodeList::nil() })
-            .unwrap()
-            .seal_ref() as &types_nodes::Alias<'_>
+        Node::mk_mut(
+            mcx,
+            types_nodes::Alias {
+                aliasname: Some(a),
+                colnames: NodeList::nil(),
+            },
+        )
+        .unwrap()
+        .seal_ref() as &types_nodes::Alias<'_>
     });
     let mut pair = NodeList::make1(mcx, fc).unwrap();
-    pair.lappend(mcx, Node::mk_list(mcx, NodeList::nil()).unwrap()).unwrap();
+    pair.lappend(mcx, Node::mk_list(mcx, NodeList::nil()).unwrap())
+        .unwrap();
     Node::mk(
         mcx,
         types_nodes::RangeFunction {
@@ -930,7 +1103,10 @@ fn from_generate_series_builds_function_rte() {
     let eref = rte.eref.unwrap();
     assert_eq!(eref.aliasname, Some("generate_series"));
     assert_eq!(eref.colnames.len(), 1);
-    assert_eq!(eref.colnames.nth(0).as_string().unwrap().sval, "generate_series");
+    assert_eq!(
+        eref.colnames.nth(0).as_string().unwrap().sval,
+        "generate_series"
+    );
     // The nsitem drives * expansion off its nscolumns.
     let ns = pstate.p_namespace.last().unwrap();
     assert_eq!(ns.p_nscolumns.len(), 1);
@@ -958,7 +1134,14 @@ use types_nodes::parsenodes::GroupingSetKind;
 
 fn name_ref<'mcx>(mcx: Mcx<'mcx>, name: &'static str, loc: i32) -> Node<'mcx> {
     let f = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: name }).unwrap()).unwrap();
-    Node::mk(mcx, ColumnRef { fields: f, location: loc }).unwrap()
+    Node::mk(
+        mcx,
+        ColumnRef {
+            fields: f,
+            location: loc,
+        },
+    )
+    .unwrap()
 }
 
 fn raw_gset<'mcx>(
@@ -977,7 +1160,10 @@ fn raw_gset<'mcx>(
 fn simple_refs(n: Node<'_>) -> Vec<i32> {
     let gs = n.as_grouping_set().unwrap();
     assert_eq!(gs.kind, GroupingSetKind::GROUPING_SET_SIMPLE);
-    gs.content.iter().map(|c| c.as_integer().unwrap().ival).collect()
+    gs.content
+        .iter()
+        .map(|c| c.as_integer().unwrap().ival)
+        .collect()
 }
 
 fn group_clause_fixture<'mcx>(
@@ -1024,7 +1210,10 @@ fn group_by_rollup_builds_tree_and_flat_clause() {
     assert_eq!(group.len(), 2);
     assert_eq!(gsets.len(), 1);
     let gs = gsets.nth(0).as_grouping_set().unwrap();
-    assert_eq!((gs.kind, gs.location), (GroupingSetKind::GROUPING_SET_ROLLUP, 13));
+    assert_eq!(
+        (gs.kind, gs.location),
+        (GroupingSetKind::GROUPING_SET_ROLLUP, 13)
+    );
     assert_eq!(gs.content.len(), 2);
     assert_eq!(simple_refs(gs.content.nth(0)), [1]);
     assert_eq!(simple_refs(gs.content.nth(1)), [2]);
@@ -1094,9 +1283,16 @@ fn group_by_empty_grouping_set_restores_canonical_form() {
     .unwrap();
 
     assert!(group.is_nil());
-    assert_eq!(gsets.len(), 1, "empty sets collapse to one canonical GROUP BY ()");
+    assert_eq!(
+        gsets.len(),
+        1,
+        "empty sets collapse to one canonical GROUP BY ()"
+    );
     let gs = gsets.nth(0).as_grouping_set().unwrap();
-    assert_eq!((gs.kind, gs.location), (GroupingSetKind::GROUPING_SET_EMPTY, 9));
+    assert_eq!(
+        (gs.kind, gs.location),
+        (GroupingSetKind::GROUPING_SET_EMPTY, 9)
+    );
     assert!(gs.content.is_nil());
 }
 
@@ -1137,7 +1333,11 @@ fn nested_grouping_sets_flatten() {
     assert_eq!(gsets.len(), 1);
     let gs = gsets.nth(0).as_grouping_set().unwrap();
     assert_eq!(gs.kind, GroupingSetKind::GROUPING_SET_SETS);
-    assert_eq!(gs.content.len(), 2, "SETS-in-SETS flattens into the outer list");
+    assert_eq!(
+        gs.content.len(),
+        2,
+        "SETS-in-SETS flattens into the outer list"
+    );
     assert_eq!(simple_refs(gs.content.nth(0)), [1]);
     assert_eq!(simple_refs(gs.content.nth(1)), [2]);
 }
@@ -1200,5 +1400,9 @@ fn grouping_set_sublist_dedups_locally() {
 
     assert_eq!(group.len(), 1);
     let gs = gsets.nth(0).as_grouping_set().unwrap();
-    assert_eq!(simple_refs(gs.content.nth(0)), [1], "sublist duplicates drop out");
+    assert_eq!(
+        simple_refs(gs.content.nth(0)),
+        [1],
+        "sublist duplicates drop out"
+    );
 }

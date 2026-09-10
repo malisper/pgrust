@@ -6,17 +6,16 @@ use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::types_core::xact::{FirstNormalFullTransactionId, FullTransactionId};
 use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, BLCKSZ};
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
-use init_small::globals::{EndCriticalSection, StartCriticalSection};
 use ::types_nbtree::{
     BTDeletedPageData, BTMetaPageData, BTPageOpaqueData, BTP_DELETED, BTP_HALF_DEAD,
-    BTP_HAS_FULLXID, BTP_LEAF, BTP_META, BTP_ROOT, P_HAS_FULLXID, P_IGNORE, P_ISDELETED, P_ISMETA,
-    P_LEFTMOST, P_RIGHTMOST, BTREE_MAGIC, BTREE_METAPAGE, BTREE_MIN_VERSION, BTREE_NOVAC_VERSION,
-    BTREE_VERSION, BT_READ, BT_WRITE, P_NONE, XLOG_BTREE_NEWROOT, XLOG_BTREE_REUSE_PAGE,
+    BTP_HAS_FULLXID, BTP_LEAF, BTP_META, BTP_ROOT, BTREE_MAGIC, BTREE_METAPAGE, BTREE_MIN_VERSION,
+    BTREE_NOVAC_VERSION, BTREE_VERSION, BT_READ, BT_WRITE, P_HAS_FULLXID, P_IGNORE, P_ISDELETED,
+    P_ISMETA, P_LEFTMOST, P_NONE, P_RIGHTMOST, XLOG_BTREE_NEWROOT, XLOG_BTREE_REUSE_PAGE,
 };
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{ItemIdData, PageMut, PageRef, SizeOfPageHeaderData};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
-
+use init_small::globals::{EndCriticalSection, StartCriticalSection};
 
 const PD_SPECIAL_OFF: usize = 16;
 const _: () = assert!(core::mem::size_of::<BTPageOpaqueData>() == 16);
@@ -26,7 +25,10 @@ pub(crate) fn page_special_off(page: &PageRef<'_>) -> usize {
     // SAFETY: pd_special lives at a 2-aligned in-page offset (PageRef contract).
     let off = unsafe { page.as_ptr().add(PD_SPECIAL_OFF).cast::<u16>().read() } as usize;
     // hard-validated once per acquisition (bt_checkpage, C's model)
-    debug_assert!(off >= SizeOfPageHeaderData && off <= BLCKSZ, "corrupt pd_special");
+    debug_assert!(
+        off >= SizeOfPageHeaderData && off <= BLCKSZ,
+        "corrupt pd_special"
+    );
     off.min(BLCKSZ - core::mem::size_of::<BTPageOpaqueData>())
 }
 
@@ -37,7 +39,6 @@ pub fn page_opaque(page: &PageRef<'_>) -> BTPageOpaqueData {
     // SAFETY: in-bounds (page_special_off clamps), 4-aligned (MAXALIGNed).
     unsafe { page.as_ptr().add(off).cast::<BTPageOpaqueData>().read() }
 }
-
 
 #[inline]
 pub fn page_item(page: &PageRef<'_>, id: ItemIdData) -> crate::itup::ITup {
@@ -53,7 +54,12 @@ pub fn page_item(page: &PageRef<'_>, id: ItemIdData) -> crate::itup::ITup {
 // (C reads those fields only after the version check).
 pub fn page_meta(page: &PageRef<'_>) -> BTMetaPageData {
     // SAFETY: metapage contents at +24, 48B in-bounds.
-    let b: [u8; 48] = unsafe { page.as_ptr().add(SizeOfPageHeaderData).cast::<[u8; 48]>().read() };
+    let b: [u8; 48] = unsafe {
+        page.as_ptr()
+            .add(SizeOfPageHeaderData)
+            .cast::<[u8; 48]>()
+            .read()
+    };
     let word = |i: usize| u32::from_ne_bytes(b[i..i + 4].try_into().expect("4B"));
     BTMetaPageData {
         btm_magic: word(0),
@@ -63,9 +69,7 @@ pub fn page_meta(page: &PageRef<'_>) -> BTMetaPageData {
         btm_fastroot: word(16),
         btm_fastlevel: word(20),
         btm_last_cleanup_num_delpages: word(24),
-        btm_last_cleanup_num_heap_tuples: f64::from_ne_bytes(
-            b[32..40].try_into().expect("8B"),
-        ),
+        btm_last_cleanup_num_heap_tuples: f64::from_ne_bytes(b[32..40].try_into().expect("8B")),
         btm_allequalimage: b[40] != 0,
     }
 }
@@ -186,9 +190,7 @@ pub(crate) fn bt_page_set_deleted(pm: &mut PageMut<'_>, safexid: FullTransaction
     opaque.btpo_flags &= !BTP_HALF_DEAD;
     opaque.btpo_flags |= BTP_DELETED | BTP_HAS_FULLXID;
     write_opaque(pm, &opaque);
-    pm.set_pd_lower(
-        (maxalign_hdr() + core::mem::size_of::<BTDeletedPageData>()) as u16,
-    );
+    pm.set_pd_lower((maxalign_hdr() + core::mem::size_of::<BTDeletedPageData>()) as u16);
     pm.set_pd_upper(pm.as_ref().pd_special());
     // SAFETY: PageGetContents at MAXALIGN(SizeOfPageHeaderData), 8-aligned,
     // 8B in-bounds; caller holds the exclusive lock.
@@ -576,7 +578,12 @@ pub fn bt_pageinit(page: &mut PageMut<'_>) {
 
 /// _bt_initmetapage: fill `page` with a fresh metapage image (index build /
 /// empty-index fixtures).
-pub fn bt_initmetapage(page: &mut PageMut<'_>, rootbknum: BlockNumber, level: u32, allequalimage: bool) {
+pub fn bt_initmetapage(
+    page: &mut PageMut<'_>,
+    rootbknum: BlockNumber,
+    level: u32,
+    allequalimage: bool,
+) {
     bt_pageinit(page);
     let img = BTMetaPageData {
         btm_magic: BTREE_MAGIC,
@@ -623,7 +630,10 @@ pub(crate) fn bt_conditionallockbuf(_rel: &Relation<'_>, pin: &BufferPin) -> PgR
 }
 
 /// _bt_allocbuf: a write-locked, freshly initialized page.
-pub(crate) fn bt_allocbuf(rel: &Relation<'_>, heaprel: &::types_rel::RelationData<'_>) -> PgResult<BufferPin> {
+pub(crate) fn bt_allocbuf(
+    rel: &Relation<'_>,
+    heaprel: &::types_rel::RelationData<'_>,
+) -> PgResult<BufferPin> {
     loop {
         let blkno = ::freespace::GetFreeIndexPage(rel)?;
         if blkno == InvalidBlockNumber {

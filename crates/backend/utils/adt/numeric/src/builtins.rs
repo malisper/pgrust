@@ -246,8 +246,13 @@ pub fn fc_width_bucket_numeric(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     // SAFETY: catalog args 0-2 are non-null numeric varlenas (strict fn).
-    let (operand, b1, b2) =
-        unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?, num_arg(fcinfo, 2)?) };
+    let (operand, b1, b2) = unsafe {
+        (
+            num_arg(fcinfo, 0)?,
+            num_arg(fcinfo, 1)?,
+            num_arg(fcinfo, 2)?,
+        )
+    };
     let count = fcinfo.arg_i32(3);
     Ok(Datum::from_i32(crate::width_bucket_numeric(
         operand, b1, b2, count,
@@ -354,8 +359,8 @@ fn agg_state_arg<'a, T>(
         return Ok((arg0.value.as_usize() as *mut T, agg_mcx));
     }
     let layout = core::alloc::Layout::new::<T>();
-    let raw = ::mcx::Allocator::allocate(&agg_mcx, layout)
-        .map_err(|_| agg_mcx.oom(layout.size()))?;
+    let raw =
+        ::mcx::Allocator::allocate(&agg_mcx, layout).map_err(|_| agg_mcx.oom(layout.size()))?;
     let p = raw.cast::<T>().as_ptr();
     // SAFETY: fresh allocation of the exact layout.
     unsafe { p.write(init()) };
@@ -401,7 +406,9 @@ fc_poly_accum! {
 #[cold]
 #[inline(never)]
 fn inv_null_state(name: &str) -> Box<::types_error::PgError> {
-    Box::new(::types_error::PgError::error(format!("{name} called with NULL state")))
+    Box::new(::types_error::PgError::error(format!(
+        "{name} called with NULL state"
+    )))
 }
 
 // int2/int4_accum_inv + int8_avg_accum_inv (numeric.c), HAVE_INT128 arm.
@@ -456,7 +463,10 @@ pub fn fc_int8_accum_inv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 
 // numeric_accum_inv (numeric.c): a false discard returns SQL NULL — the
 // window machinery's restart signal.
-pub fn fc_numeric_accum_inv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_numeric_accum_inv(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
     use crate::aggregates::NumericAggState;
     let [a, b] = *fcinfo.args_n::<2>();
     if a.isnull {
@@ -624,7 +634,10 @@ fn numeric_serialize_common(fcinfo: &mut Fcinfo, with_sum_x2: bool) -> PgResult<
     Ok(varlena_result(::pqformat::pq_endtypsend(buf)))
 }
 
-pub fn fc_numeric_serialize(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_numeric_serialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
     numeric_serialize_common(fcinfo, true)
 }
 
@@ -641,8 +654,7 @@ fn deserialize_buf<'a>(fcinfo: &'a Fcinfo) -> PgResult<::stringinfo::StringInfo<
     // SAFETY: strict fn — arg 0 is a non-null bytea varlena.
     let sstate = unsafe { fcinfo.arg_varlena_packed(0)? };
     let data = sstate.data();
-    let mut buf =
-        ::stringinfo::StringInfo::with_capacity_in(fcinfo.result_mcx(), data.len() + 1)?;
+    let mut buf = ::stringinfo::StringInfo::with_capacity_in(fcinfo.result_mcx(), data.len() + 1)?;
     buf.append_bytes(data)?;
     Ok(buf)
 }
@@ -833,7 +845,9 @@ const INT8_TRANSARRAY_SIZE: usize = ARR_OVERHEAD_NONULLS_1 + 16;
 #[cold]
 #[inline(never)]
 fn bad_int8_transarray() -> Box<::types_error::PgError> {
-    Box::new(::types_error::PgError::error("expected 2-element int8 array"))
+    Box::new(::types_error::PgError::error(
+        "expected 2-element int8 array",
+    ))
 }
 
 // PG_GETARG_ARRAYTYPE_P + the hasnull/size validation shared by the
@@ -866,7 +880,9 @@ unsafe fn int8_transarray_at(fcinfo: &Fcinfo, i: usize, copy: bool) -> PgResult<
                 .cast();
             let dst = raw.as_ptr();
             dst.cast::<u32>()
-                .write(::types_tuple::varatt::set_varsize_4b_word((payload_len + 4) as u32));
+                .write(::types_tuple::varatt::set_varsize_4b_word(
+                    (payload_len + 4) as u32,
+                ));
             core::ptr::copy_nonoverlapping(p.add(1), dst.add(4), payload_len);
             dst
         } else if !::types_tuple::varatt::varatt_is_4b_u(p) {
@@ -877,8 +893,8 @@ unsafe fn int8_transarray_at(fcinfo: &Fcinfo, i: usize, copy: bool) -> PgResult<
             let raw = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
             let mcx = fcinfo.result_mcx();
             let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
-            let layout = core::alloc::Layout::from_size_align(flat.len(), 8)
-                .expect("transarray layout");
+            let layout =
+                core::alloc::Layout::from_size_align(flat.len(), 8).expect("transarray layout");
             let dst: core::ptr::NonNull<u8> = ::mcx::Allocator::allocate(&mcx, layout)
                 .map_err(|_| mcx.oom(layout.size()))?
                 .cast();
@@ -974,7 +990,9 @@ pub fn fc_int4_avg_combine(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
         // C is compiled -fwrapv: overflow wraps silently (see accum).
         *td1 = (*td1).wrapping_add(*td2);
         *td1.add(1) = (*td1.add(1)).wrapping_add(*td2.add(1));
-        Ok(Datum::from_usize(td1.cast::<u8>().sub(ARR_OVERHEAD_NONULLS_1) as usize))
+        Ok(Datum::from_usize(
+            td1.cast::<u8>().sub(ARR_OVERHEAD_NONULLS_1) as usize,
+        ))
     }
 }
 
@@ -1004,7 +1022,6 @@ pub fn fc_int8_avg(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     let img = crate::ops::int64_avg_div(sum, count)?;
     img_result(fcinfo, &img)
 }
-
 
 pub fn fc_numerictypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
@@ -1044,7 +1061,10 @@ pub fn fc_numeric_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     Ok(Datum::from_i32(num.dscale()))
 }
 
-pub fn fc_numeric_min_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_numeric_min_scale(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
     let num = unsafe { num_arg(fcinfo, 0) }?;
     if num.is_special() {
@@ -1053,7 +1073,10 @@ pub fn fc_numeric_min_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo)
     Ok(Datum::from_i32(crate::numeric_min_scale(num)))
 }
 
-pub fn fc_numeric_trim_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_numeric_trim_scale(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
     let num = unsafe { num_arg(fcinfo, 0) }?;
     let img = crate::numeric_trim_scale(num)?;
@@ -1131,8 +1154,13 @@ pub fn fc_in_range_numeric_numeric(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     // SAFETY: catalog args 0-2 are non-null numeric varlenas (strict fn).
-    let (val, base, offset) =
-        unsafe { (num_arg(fcinfo, 0)?, num_arg(fcinfo, 1)?, num_arg(fcinfo, 2)?) };
+    let (val, base, offset) = unsafe {
+        (
+            num_arg(fcinfo, 0)?,
+            num_arg(fcinfo, 1)?,
+            num_arg(fcinfo, 2)?,
+        )
+    };
     let sub = fcinfo.arg_bool(3);
     let less = fcinfo.arg_bool(4);
     Ok(Datum::from_bool(crate::in_range_numeric_numeric(
@@ -1190,10 +1218,15 @@ unsafe fn num_from_const_datum<'a>(fcinfo: &'a Fcinfo, d: Datum) -> PgResult<Num
             let mcx = fcinfo.result_mcx();
             let layout =
                 core::alloc::Layout::from_size_align(src.len(), 8).expect("numeric const layout");
-            let dst: core::ptr::NonNull<u8> =
-                mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+            let dst: core::ptr::NonNull<u8> = mcx
+                .allocate(layout)
+                .map_err(|_| mcx.oom(layout.size()))?
+                .cast();
             core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), src.len());
-            Ok(Num::from_payload(core::slice::from_raw_parts(dst.as_ptr(), src.len())))
+            Ok(Num::from_payload(core::slice::from_raw_parts(
+                dst.as_ptr(),
+                src.len(),
+            )))
         } else {
             assert!(b0 & 0x03 == 0, "numeric const: compressed datum");
             Ok(Num::from_payload(::datum::VarlenaRef::from_ptr(p).data()))
@@ -1279,12 +1312,37 @@ pub fn fc_generate_series_numeric_support(
     }
 }
 
-const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunction) -> FmgrBuiltin {
-    FmgrBuiltin { foid, name, nargs, strict, retset: false, func }
+const fn b(
+    foid: ::types_core::Oid,
+    name: &'static str,
+    nargs: i16,
+    strict: bool,
+    func: PGFunction,
+) -> FmgrBuiltin {
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs,
+        strict,
+        retset: false,
+        func,
+    }
 }
 
-const fn srf(foid: ::types_core::Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
-    FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
+const fn srf(
+    foid: ::types_core::Oid,
+    name: &'static str,
+    nargs: i16,
+    func: PGFunction,
+) -> FmgrBuiltin {
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs,
+        strict: true,
+        retset: true,
+        func,
+    }
 }
 
 // pg_proc.dat rows, OID-ascending (1840/1841 proisstrict 'f', rest 't').
@@ -1335,7 +1393,13 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1836, "int8_accum", 2, false, fc_int8_accum),
     b(1837, "numeric_avg", 1, false, fc_numeric_avg),
     b(1838, "numeric_var_samp", 1, false, fc_numeric_var_samp),
-    b(1839, "numeric_stddev_samp", 1, false, fc_numeric_stddev_samp),
+    b(
+        1839,
+        "numeric_stddev_samp",
+        1,
+        false,
+        fc_numeric_stddev_samp,
+    ),
     b(1840, "int2_sum", 2, false, fc_int2_sum),
     b(1841, "int4_sum", 2, false, fc_int4_sum),
     b(1842, "int8_sum", 2, false, fc_int8_sum),
@@ -1366,29 +1430,101 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(3570, "int2_avg_accum_inv", 2, true, fc_int2_avg_accum_inv),
     b(3571, "int4_avg_accum_inv", 2, true, fc_int4_avg_accum_inv),
     b(3572, "int2int4_sum", 1, true, fc_int2int4_sum),
-    b(3283, "numeric_sortsupport", 1, true, ::types_fmgr::fc_internal_dispatch_only),
+    b(
+        3283,
+        "numeric_sortsupport",
+        1,
+        true,
+        ::types_fmgr::fc_internal_dispatch_only,
+    ),
     b(2858, "numeric_avg_accum", 2, false, fc_numeric_avg_accum),
     b(3341, "numeric_combine", 2, false, fc_numeric_combine),
-    b(3337, "numeric_avg_combine", 2, false, fc_numeric_avg_combine),
-    b(2740, "numeric_avg_serialize", 1, true, fc_numeric_avg_serialize),
-    b(2741, "numeric_avg_deserialize", 2, true, fc_numeric_avg_deserialize),
+    b(
+        3337,
+        "numeric_avg_combine",
+        2,
+        false,
+        fc_numeric_avg_combine,
+    ),
+    b(
+        2740,
+        "numeric_avg_serialize",
+        1,
+        true,
+        fc_numeric_avg_serialize,
+    ),
+    b(
+        2741,
+        "numeric_avg_deserialize",
+        2,
+        true,
+        fc_numeric_avg_deserialize,
+    ),
     b(3335, "numeric_serialize", 1, true, fc_numeric_serialize),
     b(3336, "numeric_deserialize", 2, true, fc_numeric_deserialize),
-    b(3338, "numeric_poly_combine", 2, false, fc_numeric_poly_combine),
-    b(3339, "numeric_poly_serialize", 1, true, fc_numeric_poly_serialize),
-    b(3340, "numeric_poly_deserialize", 2, true, fc_numeric_poly_deserialize),
+    b(
+        3338,
+        "numeric_poly_combine",
+        2,
+        false,
+        fc_numeric_poly_combine,
+    ),
+    b(
+        3339,
+        "numeric_poly_serialize",
+        1,
+        true,
+        fc_numeric_poly_serialize,
+    ),
+    b(
+        3340,
+        "numeric_poly_deserialize",
+        2,
+        true,
+        fc_numeric_poly_deserialize,
+    ),
     b(2785, "int8_avg_combine", 2, false, fc_int8_avg_combine),
     b(3324, "int4_avg_combine", 2, true, fc_int4_avg_combine),
     b(2786, "int8_avg_serialize", 1, true, fc_int8_avg_serialize),
-    b(2787, "int8_avg_deserialize", 2, true, fc_int8_avg_deserialize),
+    b(
+        2787,
+        "int8_avg_deserialize",
+        2,
+        true,
+        fc_int8_avg_deserialize,
+    ),
     b(2917, "numerictypmodin", 1, true, fc_numerictypmodin),
     b(3178, "numeric_sum", 1, false, fc_numeric_sum),
     b(3388, "numeric_poly_sum", 1, false, fc_numeric_poly_sum),
     b(3389, "numeric_poly_avg", 1, false, fc_numeric_poly_avg),
-    b(3390, "numeric_poly_var_pop", 1, false, fc_numeric_poly_var_pop),
-    b(3391, "numeric_poly_var_samp", 1, false, fc_numeric_poly_var_samp),
-    b(3392, "numeric_poly_stddev_pop", 1, false, fc_numeric_poly_stddev_pop),
-    b(3393, "numeric_poly_stddev_samp", 1, false, fc_numeric_poly_stddev_samp),
+    b(
+        3390,
+        "numeric_poly_var_pop",
+        1,
+        false,
+        fc_numeric_poly_var_pop,
+    ),
+    b(
+        3391,
+        "numeric_poly_var_samp",
+        1,
+        false,
+        fc_numeric_poly_var_samp,
+    ),
+    b(
+        3392,
+        "numeric_poly_stddev_pop",
+        1,
+        false,
+        fc_numeric_poly_stddev_pop,
+    ),
+    b(
+        3393,
+        "numeric_poly_stddev_samp",
+        1,
+        false,
+        fc_numeric_poly_stddev_samp,
+    ),
     b(5048, "gcd", 2, true, fc_numeric_gcd),
     b(5049, "lcm", 2, true, fc_numeric_lcm),
     b(1705, "abs", 1, true, fc_numeric_abs),
@@ -1399,9 +1535,27 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(2167, "ceiling", 1, true, fc_numeric_ceil),
     b(3157, "numeric_support", 1, true, fc_numeric_support),
     b(432, "hash_numeric", 1, true, fc_hash_numeric),
-    b(780, "hash_numeric_extended", 2, true, fc_hash_numeric_extended),
+    b(
+        780,
+        "hash_numeric_extended",
+        2,
+        true,
+        fc_hash_numeric_extended,
+    ),
     srf(3259, "generate_series", 3, fc_generate_series_numeric),
     srf(3260, "generate_series", 2, fc_generate_series_numeric),
-    b(4141, "in_range_numeric_numeric", 5, true, fc_in_range_numeric_numeric),
-    b(6357, "generate_series_numeric_support", 1, true, fc_generate_series_numeric_support),
+    b(
+        4141,
+        "in_range_numeric_numeric",
+        5,
+        true,
+        fc_in_range_numeric_numeric,
+    ),
+    b(
+        6357,
+        "generate_series_numeric_support",
+        1,
+        true,
+        fc_generate_series_numeric_support,
+    ),
 ];

@@ -2,7 +2,9 @@
 use std::cell::RefCell;
 
 use mcx::{Mcx, MemoryContext};
-use types_core::{InvalidSubTransactionId, Oid, SubTransactionId, XACT_FLAGS_ACCESSEDTEMPNAMESPACE};
+use types_core::{
+    InvalidSubTransactionId, Oid, SubTransactionId, XACT_FLAGS_ACCESSEDTEMPNAMESPACE,
+};
 use types_error::PgResult;
 use types_nodes::rawnodes::OnCommitAction;
 
@@ -18,7 +20,10 @@ thread_local! {
 }
 
 pub fn register_on_commit_action(relid: Oid, action: OnCommitAction) {
-    if matches!(action, OnCommitAction::ONCOMMIT_NOOP | OnCommitAction::ONCOMMIT_PRESERVE_ROWS) {
+    if matches!(
+        action,
+        OnCommitAction::ONCOMMIT_NOOP | OnCommitAction::ONCOMMIT_PRESERVE_ROWS
+    ) {
         return;
     }
     ON_COMMITS.with_borrow_mut(|l| {
@@ -132,8 +137,11 @@ pub fn AtEOSubXact_on_commit_actions(
                     oc.creating_subid = parent_subid;
                 }
                 if oc.deleting_subid == my_subid {
-                    oc.deleting_subid =
-                        if is_commit { parent_subid } else { InvalidSubTransactionId };
+                    oc.deleting_subid = if is_commit {
+                        parent_subid
+                    } else {
+                        InvalidSubTransactionId
+                    };
                 }
                 true
             }

@@ -70,8 +70,7 @@ pub fn StorePartitionKey<'mcx>(
         Some(node)
     };
 
-    let mut tuple =
-        heaptuple::heap_form_tuple(mcx, pg_partitioned_table.descr(), &values, &nulls)?;
+    let mut tuple = heaptuple::heap_form_tuple(mcx, pg_partitioned_table.descr(), &values, &nulls)?;
     catalog_indexing::CatalogTupleInsert(mcx, &pg_partitioned_table, &mut tuple)?;
     pg_partitioned_table.close(RowExclusiveLock)?;
 
@@ -82,10 +81,16 @@ pub fn StorePartitionKey<'mcx>(
     let myself = ObjectAddress::set(RELATION_RELATION_ID, rel.rd_id);
     let mut addrs: mcx::PgVec<'_, ObjectAddress> = mcx::vec_with_capacity_in(mcx, 2 * n)?;
     for i in 0..n {
-        addrs.push(ObjectAddress::set(catalog::OperatorClassRelationId, partopclass[i]));
+        addrs.push(ObjectAddress::set(
+            catalog::OperatorClassRelationId,
+            partopclass[i],
+        ));
         // The default collation is pinned, so don't bother recording it.
         if partcollation[i] != InvalidOid && partcollation[i] != DEFAULT_COLLATION_OID {
-            addrs.push(ObjectAddress::set(catalog::CollationRelationId, partcollation[i]));
+            addrs.push(ObjectAddress::set(
+                catalog::CollationRelationId,
+                partcollation[i],
+            ));
         }
     }
     pg_depend::record_object_address_dependencies(
@@ -139,14 +144,8 @@ pub fn StorePartitionBound<'mcx>(
 ) -> PgResult<()> {
     let class_rel = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
     let keys = [crate::drop::oid_scankey(1, rel.rd_id)];
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &class_rel,
-        catalog::ClassOidIndexId,
-        true,
-        None,
-        &keys,
-    )?;
+    let mut scan =
+        genam::systable_beginscan(mcx, &class_rel, catalog::ClassOidIndexId, true, None, &keys)?;
     let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
         return Err(crate::relation_lookup_failed(rel.rd_id));
     };
@@ -221,14 +220,8 @@ pub fn update_default_partition_oid<'mcx>(
 ) -> PgResult<()> {
     let part_table = table::table_open(mcx, PartitionedRelationId, RowExclusiveLock)?;
     let keys = [crate::drop::oid_scankey(1, parent_id)];
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &part_table,
-        PartitionedRelidIndexId,
-        true,
-        None,
-        &keys,
-    )?;
+    let mut scan =
+        genam::systable_beginscan(mcx, &part_table, PartitionedRelidIndexId, true, None, &keys)?;
     let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
         return Err(crate::partition_key_lookup_failed(parent_id));
     };

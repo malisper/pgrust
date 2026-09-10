@@ -3,9 +3,7 @@
 // do not exist); subscription states go through pg_subscription.
 use datum::Datum;
 use mcx::Mcx;
-use types_core::{
-    AttrNumber, Oid, ATTRIBUTE_RELATION_ID, RELATION_RELATION_ID,
-};
+use types_core::{AttrNumber, Oid, ATTRIBUTE_RELATION_ID, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_OBJECT_IN_USE, ERROR};
 use types_rel::{AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, RELKIND_HAS_STORAGE};
 use types_scan::scankey::{BTEqualStrategyNumber, BTLessEqualStrategyNumber, ScanKeyData};
@@ -139,9 +137,12 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
     predicate_seams::check_table_for_serializable_conflict_in::call(&rel)?;
 
     match rel.rd_rel.relkind {
-        types_rel::RELKIND_RELATION | types_rel::RELKIND_TOASTVALUE
-        | types_rel::RELKIND_SEQUENCE | types_rel::RELKIND_VIEW
-        | types_rel::RELKIND_MATVIEW | types_rel::RELKIND_PARTITIONED_TABLE
+        types_rel::RELKIND_RELATION
+        | types_rel::RELKIND_TOASTVALUE
+        | types_rel::RELKIND_SEQUENCE
+        | types_rel::RELKIND_VIEW
+        | types_rel::RELKIND_MATVIEW
+        | types_rel::RELKIND_PARTITIONED_TABLE
         | types_rel::RELKIND_COMPOSITE_TYPE => {}
         types_rel::RELKIND_FOREIGN_TABLE => delete_foreign_table_tuple(mcx, relid)?,
         other => unported(&format!(
@@ -214,7 +215,10 @@ fn RelationRemoveInheritance<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
 
 pub fn RemoveStatistics<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber) -> PgResult<()> {
     let rel = table::table_open(mcx, StatisticRelationId, RowExclusiveLock)?;
-    let mut keys = [oid_scankey(Anum_pg_statistic_starelid, relid), ScanKeyData::empty()];
+    let mut keys = [
+        oid_scankey(Anum_pg_statistic_starelid, relid),
+        ScanKeyData::empty(),
+    ];
     let nkeys = if attnum == 0 {
         1
     } else {
@@ -358,8 +362,14 @@ pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber)
         values[anum - 1] = v;
         replace[anum - 1] = true;
     };
-    set(Anum_pg_attribute_attname, Datum::from_usize(newname.data.as_ptr() as usize));
-    set(Anum_pg_attribute_atttypid, Datum::from_oid(types_core::InvalidOid));
+    set(
+        Anum_pg_attribute_attname,
+        Datum::from_usize(newname.data.as_ptr() as usize),
+    );
+    set(
+        Anum_pg_attribute_atttypid,
+        Datum::from_oid(types_core::InvalidOid),
+    );
     set(Anum_pg_attribute_attnotnull, Datum::from_bool(false));
     set(Anum_pg_attribute_attgenerated, Datum::from_char(0));
     set(Anum_pg_attribute_attisdropped, Datum::from_bool(true));
@@ -405,8 +415,7 @@ pub fn DeleteRelationTuple<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
 
 // heap.c:1846: the pg_foreign_table tuple goes first on DROP FOREIGN TABLE.
 fn delete_foreign_table_tuple<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
-    let ftrel =
-        table::table_open(mcx, types_core::FOREIGN_TABLE_RELATION_ID, RowExclusiveLock)?;
+    let ftrel = table::table_open(mcx, types_core::FOREIGN_TABLE_RELATION_ID, RowExclusiveLock)?;
     let key = oid_scankey(1, relid);
     let mut scan = genam::systable_beginscan(
         mcx,

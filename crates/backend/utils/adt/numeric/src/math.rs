@@ -13,8 +13,8 @@ use crate::arith::{add_var, cmp_abs, cmp_var, div_var, div_var_int, mul_var, sub
 use crate::io::get_str_from_var;
 use crate::ops::{cmp_numerics, numeric_sign_internal};
 use crate::var::{
-    int128_to_var, int64_to_var, make_result, var_to_int32, var_to_int64, NumericImage,
-    NumericVar, VarView, CONST_MINUS_ONE, CONST_ONE, CONST_ONE_POINT_ONE, CONST_TWO, CONST_ZERO,
+    int128_to_var, int64_to_var, make_result, var_to_int32, var_to_int64, NumericImage, NumericVar,
+    VarView, CONST_MINUS_ONE, CONST_ONE, CONST_ONE_POINT_ONE, CONST_TWO, CONST_ZERO,
     CONST_ZERO_POINT_NINE,
 };
 use crate::{
@@ -681,7 +681,14 @@ pub fn ln_var(arg: VarView<'_>, result: &mut NumericVar, rscale: i32) -> PgResul
 
     sub_var(x.view(), CONST_ONE, result);
     add_var(x.view(), CONST_ONE, &mut elem);
-    div_var(result.view(), elem.view(), &mut tmp, local_rscale, true, false)?;
+    div_var(
+        result.view(),
+        elem.view(),
+        &mut tmp,
+        local_rscale,
+        true,
+        false,
+    )?;
     swap(result, &mut tmp);
     xx.set_from_view(result.view());
     mul_var(result.view(), result.view(), &mut x, local_rscale);

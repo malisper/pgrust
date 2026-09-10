@@ -55,7 +55,10 @@ fn in_error_surface_matches_c() {
     );
     let err = int4in("xyz", None).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
-    assert_eq!(err.message(), "invalid input syntax for type integer: \"xyz\"");
+    assert_eq!(
+        err.message(),
+        "invalid input syntax for type integer: \"xyz\""
+    );
     let err = int4in("", None).err().unwrap();
     assert_eq!(err.message(), "invalid input syntax for type integer: \"\"");
     let err = int2in("32768", None).err().unwrap();
@@ -82,13 +85,19 @@ fn arithmetic_overflow_boundaries() {
     assert_eq!(int4mi(i32::MIN + 1, 1).unwrap(), i32::MIN);
 
     assert!(int2pl(i16::MAX, 1).is_err());
-    assert_eq!(int2pl(i16::MAX, 1).err().unwrap().message(), "smallint out of range");
+    assert_eq!(
+        int2pl(i16::MAX, 1).err().unwrap().message(),
+        "smallint out of range"
+    );
     assert!(int2mi(i16::MIN, 1).is_err());
     assert!(int2mul(i16::MAX, 2).is_err());
 
     assert!(int24pl(i16::MAX, i32::MAX).is_err());
     assert_eq!(int24pl(i16::MAX, 1).unwrap(), 32768);
-    assert_eq!(int42pl(i32::MAX - 40000, i16::MAX).unwrap(), i32::MAX - 40000 + 32767);
+    assert_eq!(
+        int42pl(i32::MAX - 40000, i16::MAX).unwrap(),
+        i32::MAX - 40000 + 32767
+    );
 }
 
 #[test]
@@ -103,9 +112,18 @@ fn division_semantics() {
     assert!(int2mod(1, 0).is_err());
 
     // MIN / -1 is the overflow error; MIN % -1 is zero.
-    assert_eq!(int4div(i32::MIN, -1).err().unwrap().message(), "integer out of range");
-    assert_eq!(int2div(i16::MIN, -1).err().unwrap().message(), "smallint out of range");
-    assert_eq!(int42div(i32::MIN, -1).err().unwrap().message(), "integer out of range");
+    assert_eq!(
+        int4div(i32::MIN, -1).err().unwrap().message(),
+        "integer out of range"
+    );
+    assert_eq!(
+        int2div(i16::MIN, -1).err().unwrap().message(),
+        "smallint out of range"
+    );
+    assert_eq!(
+        int42div(i32::MIN, -1).err().unwrap().message(),
+        "integer out of range"
+    );
     assert_eq!(int4mod(i32::MIN, -1).unwrap(), 0);
     assert_eq!(int2mod(i16::MIN, -1).unwrap(), 0);
     assert_eq!(int4div(7, -2).unwrap(), -3);
@@ -248,7 +266,10 @@ fn int2vector_image_and_io() {
         "value \"99999\" is out of range for type smallint"
     );
     let err = int2vectorin(mcx, "1x", None).err().unwrap();
-    assert_eq!(err.message(), "invalid input syntax for type smallint: \"1x\"");
+    assert_eq!(
+        err.message(),
+        "invalid input syntax for type smallint: \"1x\""
+    );
     let err = int2vectorout(mcx, 2, 0, INT2OID, &[]).err().unwrap();
     assert_eq!(err.sqlstate(), ERRCODE_DATATYPE_MISMATCH);
     assert_eq!(err.message(), "array is not a valid int2vector");
@@ -384,7 +405,10 @@ fn generate_series_srf_value_per_call() {
         out.push(d.as_i32());
     }
     assert_eq!(out, [1, 2, 3]);
-    assert!(!flinfo.has_fn_extra(), "SRF_RETURN_DONE tears down the multi-call frame");
+    assert!(
+        !flinfo.has_fn_extra(),
+        "SRF_RETURN_DONE tears down the multi-call frame"
+    );
 
     // Zero step errors before the frame is created.
     let mut fci3 = LocalFcinfo::<3>::new(0);
@@ -428,7 +452,13 @@ fn generate_series_support_rows_estimate() {
     }
     let fe = Node::mk(
         mcx,
-        ::types_nodes::FuncExpr { funcid: 1067, funcresulttype: 23, funcretset: true, args, ..Default::default() },
+        ::types_nodes::FuncExpr {
+            funcid: 1067,
+            funcresulttype: 23,
+            funcretset: true,
+            args,
+            ..Default::default()
+        },
     )
     .unwrap();
 

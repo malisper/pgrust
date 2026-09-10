@@ -172,7 +172,6 @@ pub fn errstart(elevel: ErrorLevel, domain: Option<&str>) -> bool {
         return false;
     }
 
-
     let overflow = STACK.with(|s| {
         let mut st = s.borrow_mut();
 
@@ -224,7 +223,24 @@ pub fn errstart_cold(elevel: ErrorLevel, domain: Option<&str>) -> bool {
     errstart(elevel, domain)
 }
 
-fn normalize_filename(filename: &str) -> &str {
+fn normalize_filename(filename: &str) -> std::borrow::Cow<'_, str> {
+    // A Rust `file!()` path reports as the C basename of the crate it ports
+    // (line 0), never as a `crates/...` path; see types_error::source_map.
+    if let Some(c) = ::types_error::c_basename_for_rust_path(filename) {
+        return std::borrow::Cow::Owned(c);
+    }
+    std::borrow::Cow::Borrowed(basename(filename))
+}
+
+/// A Rust line has no C counterpart: mapped sites carry 0 (unknown).
+fn normalize_lineno(filename: Option<&str>, lineno: i32) -> i32 {
+    match filename {
+        Some(f) if ::types_error::source_map::is_rust_source_path(f) => 0,
+        _ => lineno,
+    }
+}
+
+fn basename(filename: &str) -> &str {
     let filename = match filename.rfind('/') {
         Some(pos) => &filename[pos + 1..],
         None => filename,
@@ -246,8 +262,8 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
         st.recursion_depth += 1;
         let top = st.frames.last_mut().expect("frame checked above");
         top.error.location = Some(ErrorLocation {
-            filename: filename.map(|f| normalize_filename(f).to_owned()),
-            lineno,
+            filename: filename.map(|f| normalize_filename(f).into_owned()),
+            lineno: normalize_lineno(filename, lineno),
             funcname: funcname.map(str::to_owned),
         });
         Some((top.error.level, top.error.backtrace.is_none()))
@@ -335,7 +351,11 @@ fn emit_top_frame() {
     let (error, mut output_to_server, output_to_client) = STACK.with(|s| {
         let st = s.borrow();
         let top = st.frames.last().expect("emit_top_frame on empty stack");
-        (top.error.clone(), top.output_to_server, top.output_to_client)
+        (
+            top.error.clone(),
+            top.output_to_server,
+            top.output_to_client,
+        )
     });
 
     report::reset_formatted_log_time();
@@ -514,7 +534,10 @@ pub fn errmsg_plural(fmt_singular: &str, fmt_plural: &str, n: u64) -> PgResult<(
 #[inline(never)]
 pub fn errdetail(detail: &str) -> PgResult<()> {
     with_current_mut(|error| {
-        error.detail = Some(errno::replace_percent_m(detail, error.saved_errno.unwrap_or(0)));
+        error.detail = Some(errno::replace_percent_m(
+            detail,
+            error.saved_errno.unwrap_or(0),
+        ));
     })
 }
 
@@ -565,7 +588,10 @@ pub fn errdetail_plural(fmt_singular: &str, fmt_plural: &str, n: u64) -> PgResul
 #[inline(never)]
 pub fn errhint(hint: &str) -> PgResult<()> {
     with_current_mut(|error| {
-        error.hint = Some(errno::replace_percent_m(hint, error.saved_errno.unwrap_or(0)));
+        error.hint = Some(errno::replace_percent_m(
+            hint,
+            error.saved_errno.unwrap_or(0),
+        ));
     })
 }
 
@@ -858,8 +884,8 @@ pub fn errsave_finish(
         frame.error
     });
     error.location = Some(ErrorLocation {
-        filename: filename.map(|f| normalize_filename(f).to_owned()),
-        lineno,
+        filename: filename.map(|f| normalize_filename(f).into_owned()),
+        lineno: normalize_lineno(filename, lineno),
         funcname: funcname.map(str::to_owned),
     });
     // Replace the LOG value that errsave_start inserted.

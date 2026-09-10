@@ -351,14 +351,12 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
             'p' => {
                 append_padded(buf, &my_pid.to_string(), padding);
             }
-            'P' => {
-                match context.and_then(|c| c.lock_group_leader_pid()) {
-                    Some(leader_pid) if leader_pid != my_pid => {
-                        append_padded(buf, &leader_pid.to_string(), padding);
-                    }
-                    _ => append_spaces(buf, padding),
+            'P' => match context.and_then(|c| c.lock_group_leader_pid()) {
+                Some(leader_pid) if leader_pid != my_pid => {
+                    append_padded(buf, &leader_pid.to_string(), padding);
                 }
-            }
+                _ => append_spaces(buf, padding),
+            },
             'l' => {
                 let n = with_log_state(|state| state.log_line_number);
                 append_padded(buf, &n.to_string(), padding);
@@ -405,7 +403,10 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
                 append_padded(buf, local_host, padding);
             }
             'r' => {
-                match context.filter(|c| c.has_client_port()).and_then(|c| c.remote_host()) {
+                match context
+                    .filter(|c| c.has_client_port())
+                    .and_then(|c| c.remote_host())
+                {
                     Some(remote_host) => {
                         let remote_port = context.and_then(|c| c.remote_port()).unwrap_or("");
                         if !remote_port.is_empty() {
@@ -423,7 +424,10 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
                 }
             }
             'h' => {
-                match context.filter(|c| c.has_client_port()).and_then(|c| c.remote_host()) {
+                match context
+                    .filter(|c| c.has_client_port())
+                    .and_then(|c| c.remote_host())
+                {
                     Some(remote_host) => append_padded(buf, remote_host, padding),
                     None => {
                         if padding != 0 {
@@ -495,7 +499,10 @@ pub fn send_message_to_server_log(edata: &PgError) {
     if edata.cursor_position.unwrap_or(0) > 0 {
         buf.push_str(&format!(" at character {}", edata.cursor_position.unwrap()));
     } else if edata.internal_position.unwrap_or(0) > 0 {
-        buf.push_str(&format!(" at character {}", edata.internal_position.unwrap()));
+        buf.push_str(&format!(
+            " at character {}",
+            edata.internal_position.unwrap()
+        ));
     }
 
     buf.push('\n');
@@ -539,7 +546,10 @@ pub fn send_message_to_server_log(edata: &PgError) {
             let lineno = location.map_or(0, |l| l.lineno);
             if let (Some(funcname), Some(filename)) = (funcname, filename) {
                 log_line_prefix(&mut buf, edata);
-                buf.push_str(&format!("LOCATION:  {}, {}:{}\n", funcname, filename, lineno));
+                buf.push_str(&format!(
+                    "LOCATION:  {}, {}:{}\n",
+                    funcname, filename, lineno
+                ));
             } else if let Some(filename) = filename {
                 log_line_prefix(&mut buf, edata);
                 buf.push_str(&format!("LOCATION:  {}:{}\n", filename, lineno));
@@ -801,7 +811,11 @@ pub fn send_message_to_frontend(edata: &PgError) {
 
         send_field(&mut body, PG_DIAG_SEVERITY, sev);
         send_field(&mut body, PG_DIAG_SEVERITY_NONLOCALIZED, sev);
-        send_field(&mut body, PG_DIAG_SQLSTATE, &unpack_sql_state(edata.sqlstate));
+        send_field(
+            &mut body,
+            PG_DIAG_SQLSTATE,
+            &unpack_sql_state(edata.sqlstate),
+        );
 
         if let Some(raw) = &edata.message_raw {
             // C messages are byte strings; this carries C's exact bytes when
@@ -940,7 +954,11 @@ pub fn DebugFileOpen() -> PgResult<()> {
         if fd < 0 {
             let errnum = errno::current_errno();
             return fatal_file_error(
-                &format!("could not open file \"{}\": {}", name, errno::strerror(errnum)),
+                &format!(
+                    "could not open file \"{}\": {}",
+                    name,
+                    errno::strerror(errnum)
+                ),
                 errnum,
             );
         }

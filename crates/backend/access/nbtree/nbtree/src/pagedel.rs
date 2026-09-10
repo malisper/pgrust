@@ -68,7 +68,13 @@ pub(crate) fn bt_delitems_vacuum<'s>(
     let mut updatedoffsets = [0 as OffsetNumber; MaxIndexTuplesPerPage];
     let mut updatedbuf: PgVec<'s, u8> = PgVec::new_in(scx);
     if !updatable.is_empty() {
-        bt_delitems_update(scx, updatable, &mut updatedoffsets, needswal, &mut updatedbuf)?;
+        bt_delitems_update(
+            scx,
+            updatable,
+            &mut updatedoffsets,
+            needswal,
+            &mut updatedbuf,
+        )?;
     }
 
     StartCriticalSection();
@@ -372,7 +378,8 @@ pub(crate) fn bt_pagedel<'s>(
                 let mut itup_key = bt_mkscankey(rel, Some(targetkey.as_ptr()))?;
                 itup_key.nextkey = false;
                 itup_key.backward = true;
-                if let Some(sleafbuf) = bt_search_stacked(rel, &mut itup_key, &mut frame, &mut stack)?
+                if let Some(sleafbuf) =
+                    bt_search_stacked(rel, &mut itup_key, &mut frame, &mut stack)?
                 {
                     bt_relbuf(rel, sleafbuf)?;
                 }
@@ -630,9 +637,8 @@ fn bt_unlink_halfdead_page(
             if !P_ISDELETED(&opaque) && opaque.btpo_next == target {
                 break;
             }
-            let leftsibvalid = !(P_RIGHTMOST(&opaque)
-                || P_ISDELETED(&opaque)
-                || leftsib == opaque.btpo_next);
+            let leftsibvalid =
+                !(P_RIGHTMOST(&opaque) || P_ISDELETED(&opaque) || leftsib == opaque.btpo_next);
             leftsib = opaque.btpo_next;
             bt_relbuf(rel, pin)?;
 

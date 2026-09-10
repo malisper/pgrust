@@ -4,7 +4,9 @@
 // rebuilds on rewrite.
 use datum::Datum;
 use mcx::{Mcx, PgVec};
-use types_core::{AttrNumber, InvalidOid, Oid, DEFAULT_COLLATION_OID, RELATION_RELATION_ID, TYPE_RELATION_ID};
+use types_core::{
+    AttrNumber, InvalidOid, Oid, DEFAULT_COLLATION_OID, RELATION_RELATION_ID, TYPE_RELATION_ID,
+};
 use types_error::{
     PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
@@ -12,9 +14,12 @@ use types_error::{
     ERRCODE_UNDEFINED_COLUMN, ERROR, NOTICE,
 };
 use types_nodes::parsenodes::{AlterTableCmd, AlterTableStmt, AlterTableType, ObjectType};
-use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, TypeName};
+use types_nodes::rawnodes::{ColumnDef, ConstrType, Constraint, TypeName};
 use types_nodes::{Node, NodeList};
-use types_rel::{AccessExclusiveLock, InplaceUpdateTupleLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE, RELKIND_RELATION};
+use types_rel::{
+    AccessExclusiveLock, InplaceUpdateTupleLock, NoLock, Relation, RowExclusiveLock,
+    ShareRowExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE, RELKIND_RELATION,
+};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{MaxHeapAttributeNumber, TupleDescData, ATTNULLABLE_VALID};
 
@@ -140,7 +145,11 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
                     .and_then(|d| d.as_variant::<types_nodes::rawnodes::PartitionCmd>())
                     .map(|p| p.concurrent)
                     .unwrap_or(false);
-                if concurrent { types_rel::ShareUpdateExclusiveLock } else { AccessExclusiveLock }
+                if concurrent {
+                    types_rel::ShareUpdateExclusiveLock
+                } else {
+                    AccessExclusiveLock
+                }
             }
             AlterTableType::AT_DetachPartitionFinalize => types_rel::ShareUpdateExclusiveLock,
             AlterTableType::AT_SetRelOptions | AlterTableType::AT_ResetRelOptions => {
@@ -149,9 +158,7 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
                     None => AccessExclusiveLock,
                 }
             }
-            AlterTableType::AT_AddInherit | AlterTableType::AT_DropInherit => {
-                AccessExclusiveLock
-            }
+            AlterTableType::AT_AddInherit | AlterTableType::AT_DropInherit => AccessExclusiveLock,
             AlterTableType::AT_EnableTrig
             | AlterTableType::AT_EnableAlwaysTrig
             | AlterTableType::AT_EnableReplicaTrig
@@ -218,7 +225,11 @@ pub(crate) fn AlterTableLookupRangeVar<'mcx>(
     let mut callback = |rv: &rel_vocab::RangeVar<'_>, relOid: Oid, _old: Oid| {
         RangeVarCallbackForAlterRelation(mcx, rv, relOid, objtype, stmt_kind)
     };
-    let flags = if missing_ok { catalog_namespace::RVR_MISSING_OK } else { 0 };
+    let flags = if missing_ok {
+        catalog_namespace::RVR_MISSING_OK
+    } else {
+        0
+    };
     catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, flags, Some(&mut callback))
 }
 
@@ -246,8 +257,7 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
     // SAFETY: fixed NOT NULL pg_class columns under pg_class's descriptor.
     let relnamespace = unsafe { types_tuple::heap_getattr(tup, 3, desc, &mut isnull) }.as_oid();
     // SAFETY: as above.
-    let relkind =
-        unsafe { types_tuple::heap_getattr(tup, 18, desc, &mut isnull) }.as_i8() as u8;
+    let relkind = unsafe { types_tuple::heap_getattr(tup, 18, desc, &mut isnull) }.as_i8() as u8;
     genam::systable_endscan(mcx, scan)?;
     pg_class.close(types_rel::AccessShareLock)?;
 
@@ -278,8 +288,8 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
             adt_acl::ACL_CREATE,
         )?;
         if aclresult != aclchk::ACLCHECK_OK {
-            let nspname = lsyscache::get_namespace_name(mcx, relnamespace)?
-                .expect("namespace has a name");
+            let nspname =
+                lsyscache::get_namespace_name(mcx, relnamespace)?.expect("namespace has a name");
             aclchk::aclcheck_error(aclresult, ObjectType::OBJECT_SCHEMA, &nspname)?;
         }
     }
@@ -332,8 +342,7 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
         ));
     }
     if stmt_kind == AlterRelationStmtKind::AlterObjectSchema {
-        if relkind == types_rel::RELKIND_INDEX || relkind == types_rel::RELKIND_PARTITIONED_INDEX
-        {
+        if relkind == types_rel::RELKIND_INDEX || relkind == types_rel::RELKIND_PARTITIONED_INDEX {
             return Err(Box::new(
                 PgError::new(
                     ERROR,
@@ -478,7 +487,15 @@ pub fn AlterTable<'mcx>(
     let rel = relation_seams::relation_open::call(mcx, relid, NoLock)?;
     CheckAlterTableIsSafe(&rel)?;
     let recurse = stmt.relation.expect("AlterTableStmt.relation").inh;
-    ATController(mcx, rel, &stmt.cmds, recurse, lockmode, query_string, Some(tag))
+    ATController(
+        mcx,
+        rel,
+        &stmt.cmds,
+        recurse,
+        lockmode,
+        query_string,
+        Some(tag),
+    )
 }
 
 // transformPartitionCmd (parse_utilcmd.c:4225), reached from the exec arm
@@ -503,10 +520,16 @@ fn transform_partition_cmd<'mcx>(
             let mut pstate = parser_small1::make_parsestate(mcx, None);
             // ParseState wants 'mcx source text for error cursors; the
             // statement string outlives the command but not provably.
-            pstate.p_sourcetext =
-                Some(mcx::PgString::from_str_in(query_string, mcx)?.into_bytes().leak());
+            pstate.p_sourcetext = Some(
+                mcx::PgString::from_str_in(query_string, mcx)?
+                    .into_bytes()
+                    .leak(),
+            );
             return Ok(Some(crate::partition::transformPartitionBound(
-                mcx, &mut pstate, rel, bound,
+                mcx,
+                &mut pstate,
+                rel,
+                bound,
             )?));
         }
     }
@@ -536,9 +559,9 @@ fn partition_cmd_relkind_error(
             )));
         }
     };
-    Some(Box::new(
-        PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
-    ))
+    Some(Box::new(PgError::new(ERROR, msg).with_sqlstate(
+        types_error::ERRCODE_INVALID_OBJECT_DEFINITION,
+    )))
 }
 
 // AlterTableInternal (tablecmds.c:4563).
@@ -565,7 +588,16 @@ fn ATController<'mcx>(
 ) -> PgResult<()> {
     let mut wqueue: Wqueue<'mcx> = PgVec::new_in(mcx);
     for cnode in cmds.iter() {
-        ATPrepCmd(mcx, &mut wqueue, &rel, cnode, recurse, false, lockmode, query_string)?;
+        ATPrepCmd(
+            mcx,
+            &mut wqueue,
+            &rel,
+            cnode,
+            recurse,
+            false,
+            lockmode,
+            query_string,
+        )?;
     }
     rel.close(NoLock)?;
 
@@ -594,7 +626,16 @@ fn ATSimpleRecursion<'mcx>(
         }
         let childrel = table::table_open(mcx, childrelid, NoLock)?;
         catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
-        ATPrepCmd(mcx, wqueue, &childrel, cnode, false, true, lockmode, query_string)?;
+        ATPrepCmd(
+            mcx,
+            wqueue,
+            &childrel,
+            cnode,
+            false,
+            true,
+            lockmode,
+            query_string,
+        )?;
         childrel.close(NoLock)?;
     }
     Ok(())
@@ -681,13 +722,24 @@ fn at_allowed_targets(subtype: AlterTableType) -> Option<i32> {
         AT_SetRelOptions | AT_ResetRelOptions | AT_ReplaceRelOptions => {
             ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_VIEW | ATT_MATVIEW | ATT_INDEX
         }
-        AT_EnableRule | AT_EnableAlwaysRule | AT_EnableReplicaRule | AT_DisableRule | AT_AddOf
-        | AT_DropOf | AT_EnableRowSecurity | AT_DisableRowSecurity | AT_ForceRowSecurity
+        AT_EnableRule
+        | AT_EnableAlwaysRule
+        | AT_EnableReplicaRule
+        | AT_DisableRule
+        | AT_AddOf
+        | AT_DropOf
+        | AT_EnableRowSecurity
+        | AT_DisableRowSecurity
+        | AT_ForceRowSecurity
         | AT_NoForceRowSecurity => ATT_TABLE | ATT_PARTITIONED_TABLE,
         AT_AttachPartition => ATT_PARTITIONED_TABLE | ATT_PARTITIONED_INDEX,
         AT_DetachPartition | AT_DetachPartitionFinalize => ATT_PARTITIONED_TABLE,
-        AT_ChangeOwner | AT_ReAddIndex | AT_ReAddConstraint | AT_ReAddDomainConstraint
-        | AT_ReAddComment | AT_ReAddStatistics => return None,
+        AT_ChangeOwner
+        | AT_ReAddIndex
+        | AT_ReAddConstraint
+        | AT_ReAddDomainConstraint
+        | AT_ReAddComment
+        | AT_ReAddStatistics => return None,
     })
 }
 
@@ -706,7 +758,9 @@ fn alter_table_type_to_string(cmdtype: AlterTableType) -> Option<&'static str> {
         AT_SetStorage => "ALTER COLUMN ... SET STORAGE",
         AT_SetCompression => "ALTER COLUMN ... SET COMPRESSION",
         AT_DropColumn => "DROP COLUMN",
-        AT_AddConstraint | AT_ReAddConstraint | AT_ReAddDomainConstraint
+        AT_AddConstraint
+        | AT_ReAddConstraint
+        | AT_ReAddDomainConstraint
         | AT_AddIndexConstraint => "ADD CONSTRAINT",
         AT_AlterConstraint => "ALTER CONSTRAINT",
         AT_ValidateConstraint => "VALIDATE CONSTRAINT",
@@ -837,7 +891,10 @@ fn ATPrepCmd<'mcx>(
         return Err(Box::new(
             PgError::new(
                 ERROR,
-                format!("cannot alter partition \"{}\" with an incomplete detach", rel.name()),
+                format!(
+                    "cannot alter partition \"{}\" with an incomplete detach",
+                    rel.name()
+                ),
             )
             .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .with_hint(
@@ -865,7 +922,9 @@ fn ATPrepCmd<'mcx>(
         if recurse {
             // SAFETY: parse tree is statement-owned; no derived refs live.
             unsafe {
-                cnode.with_mut::<AlterTableCmd, _>(|c| c.recurse = true).expect("AlterTableCmd");
+                cnode
+                    .with_mut::<AlterTableCmd, _>(|c| c.recurse = true)
+                    .expect("AlterTableCmd");
             }
         }
     };
@@ -875,7 +934,15 @@ fn ATPrepCmd<'mcx>(
                 return Err(typed_table_err("cannot add column to typed table"));
             }
             if rel.rd_rel.relkind == types_rel::RELKIND_COMPOSITE_TYPE {
-                ATTypedTableRecursion(mcx, wqueue, rel, cnode, cmd.behavior, lockmode, query_string)?;
+                ATTypedTableRecursion(
+                    mcx,
+                    wqueue,
+                    rel,
+                    cnode,
+                    cmd.behavior,
+                    lockmode,
+                    query_string,
+                )?;
             }
             set_recurse();
             AT_PASS_ADD_COL
@@ -885,14 +952,26 @@ fn ATPrepCmd<'mcx>(
                 return Err(typed_table_err("cannot drop column from typed table"));
             }
             if rel.rd_rel.relkind == types_rel::RELKIND_COMPOSITE_TYPE {
-                ATTypedTableRecursion(mcx, wqueue, rel, cnode, cmd.behavior, lockmode, query_string)?;
+                ATTypedTableRecursion(
+                    mcx,
+                    wqueue,
+                    rel,
+                    cnode,
+                    cmd.behavior,
+                    lockmode,
+                    query_string,
+                )?;
             }
             set_recurse();
             AT_PASS_DROP
         }
         AlterTableType::AT_ColumnDefault => {
             ATSimpleRecursion(mcx, wqueue, rel, cnode, recurse, lockmode, query_string)?;
-            if cmd.def.is_some() { AT_PASS_ADD_OTHERCONSTR } else { AT_PASS_DROP }
+            if cmd.def.is_some() {
+                AT_PASS_ADD_OTHERCONSTR
+            } else {
+                AT_PASS_DROP
+            }
         }
         AlterTableType::AT_DropNotNull => {
             set_recurse();
@@ -978,7 +1057,8 @@ fn ATPrepCmd<'mcx>(
             // ATParseTransformCmd: the identity ALTER SEQUENCE ... AS retype
             // runs before prep (C executes beforeStmts here).
             let relname = rel.name().to_string();
-            let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode, query_string)?;
+            let cxt =
+                parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode, query_string)?;
             run_seq_stmts(mcx, &cxt.blist)?;
             debug_assert!(cxt.alist.is_nil());
             debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
@@ -1087,7 +1167,11 @@ fn ATPrepCmd<'mcx>(
         | AlterTableType::AT_DropOf => AT_PASS_MISC,
         AlterTableType::AT_AddIndexConstraint => AT_PASS_ADD_INDEXCONSTR,
         AlterTableType::AT_SetTableSpace => {
-            ATPrepSetTableSpace(mcx, &mut wqueue[tabidx], cmd.name.expect("SET TABLESPACE name"))?;
+            ATPrepSetTableSpace(
+                mcx,
+                &mut wqueue[tabidx],
+                cmd.name.expect("SET TABLESPACE name"),
+            )?;
             AT_PASS_MISC
         }
         AlterTableType::AT_SetAccessMethod => {
@@ -1110,8 +1194,11 @@ fn ATPrepCmd<'mcx>(
         // unported: remaining ATPrepCmd subcommand arms
         _ => {
             return Err(Box::new(
-                PgError::new(ERROR, "this form of ALTER TABLE is not supported yet".to_string())
-                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                PgError::new(
+                    ERROR,
+                    "this form of ALTER TABLE is not supported yet".to_string(),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
             ))
         }
     };
@@ -1126,8 +1213,11 @@ fn ATPrepAddInherit(rel: &Relation<'_>) -> PgResult<()> {
     }
     if rel.rd_rel.relispartition {
         return Err(Box::new(
-            PgError::new(ERROR, "cannot change inheritance of a partition".to_string())
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+            PgError::new(
+                ERROR,
+                "cannot change inheritance of a partition".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
         ));
     }
     if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
@@ -1153,8 +1243,7 @@ pub(crate) fn rel_reloftype(relid: Oid) -> PgResult<Oid> {
 #[inline(never)]
 pub(crate) fn typed_table_err(msg: &str) -> Box<PgError> {
     Box::new(
-        PgError::new(ERROR, msg.to_string())
-            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        PgError::new(ERROR, msg.to_string()).with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
     )
 }
 
@@ -1167,622 +1256,689 @@ fn ATRewriteCatalogs<'mcx>(
     for pass in 0..AT_NUM_PASSES {
         let mut tabidx = 0;
         while tabidx < wqueue.len() {
-        if wqueue[tabidx].subcmds[pass].is_nil() {
-            tabidx += 1;
-            continue;
-        }
-        let mut nodes: mcx::PgVec<'_, Node<'mcx>> = mcx::PgVec::new_in(mcx);
-        for c in wqueue[tabidx].subcmds[pass].iter() {
-            nodes.push(c);
-        }
-        for &cnode in nodes.iter() {
-            let mut rel = relation_seams::relation_open::call(mcx, wqueue[tabidx].relid, NoLock)?;
-            let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
-            match cmd.subtype {
-                AlterTableType::AT_AddColumn | AlterTableType::AT_AddColumnToView => {
-                    ATExecAddColumn(
-                        mcx,
-                        wqueue,
-                        tabidx,
-                        &rel,
-                        cnode,
-                        cmd.recurse,
-                        false,
-                        lockmode,
-                        query_string,
-                    )?;
-                }
-                AlterTableType::AT_DropColumn => {
-                    ATExecDropColumn(
-                        mcx,
-                        &rel,
-                        cmd.name.expect("AT_DropColumn name"),
-                        cmd.behavior,
-                        cmd.recurse,
-                        false,
-                        cmd.missing_ok,
-                        lockmode,
-                        None,
-                    )?;
-                }
-                AlterTableType::AT_ColumnDefault => {
-                    ATExecColumnDefault(mcx, &rel, cmd)?;
-                }
-                AlterTableType::AT_DropNotNull => {
-                    ATExecDropNotNull(mcx, &rel, cmd, lockmode)?;
-                }
-                AlterTableType::AT_SetNotNull => {
-                    let col_name = cmd.name.expect("AT_SetNotNull name");
-                    ATExecSetNotNull(
-                        mcx, wqueue, &rel, None, col_name, cmd.recurse, false, lockmode,
-                    )?;
-                }
-                AlterTableType::AT_CookedColumnDefault => {
-                    let defnode = cmd.def.expect("AT_CookedColumnDefault expr");
-                    // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
-                    // ATExecCookedColumnDefault: a cooked default copied by
-                    // CREATE TABLE ... LIKE adds new type dependencies and
-                    // bypasses AddRelationNewConstraints(); StoreAttrDefault()
-                    // leaves the privilege checks to its caller.
-                    pg_depend::CheckUsageOnTypesInSingleRelExpr(
-                        mcx,
-                        defnode,
-                        rel.rd_id,
-                        miscinit::GetUserId(),
-                    )?;
-                    // tablecmds.c:8236: remove any old default for the column
-                    // first (possible when combining LIKE with inheritance).
-                    RemoveAttrDefault(mcx, rel.rd_id, cmd.num, false, true)?;
-                    pg_attrdef::StoreAttrDefault(mcx, &rel, cmd.num, defnode, true)?;
-                }
-                AlterTableType::AT_AddConstraint => {
-                    // ATParseTransformCmd at the initial examination only
-                    // (tablecmds.c:5096-5100, cur_pass == AT_PASS_ADD_CONSTR):
-                    // transformAlterTableStmt's transformTableConstraint
-                    // guards (cxt.isforeign / cxt.ispartitioned from the
-                    // relkind, parse_utilcmd.c:3577-3600) run before any
-                    // constraint work is scheduled.
-                    if pass == AT_PASS_ADD_CONSTR {
+            if wqueue[tabidx].subcmds[pass].is_nil() {
+                tabidx += 1;
+                continue;
+            }
+            let mut nodes: mcx::PgVec<'_, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+            for c in wqueue[tabidx].subcmds[pass].iter() {
+                nodes.push(c);
+            }
+            for &cnode in nodes.iter() {
+                let mut rel =
+                    relation_seams::relation_open::call(mcx, wqueue[tabidx].relid, NoLock)?;
+                let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+                match cmd.subtype {
+                    AlterTableType::AT_AddColumn | AlterTableType::AT_AddColumnToView => {
+                        ATExecAddColumn(
+                            mcx,
+                            wqueue,
+                            tabidx,
+                            &rel,
+                            cnode,
+                            cmd.recurse,
+                            false,
+                            lockmode,
+                            query_string,
+                        )?;
+                    }
+                    AlterTableType::AT_DropColumn => {
+                        ATExecDropColumn(
+                            mcx,
+                            &rel,
+                            cmd.name.expect("AT_DropColumn name"),
+                            cmd.behavior,
+                            cmd.recurse,
+                            false,
+                            cmd.missing_ok,
+                            lockmode,
+                            None,
+                        )?;
+                    }
+                    AlterTableType::AT_ColumnDefault => {
+                        ATExecColumnDefault(mcx, &rel, cmd)?;
+                    }
+                    AlterTableType::AT_DropNotNull => {
+                        ATExecDropNotNull(mcx, &rel, cmd, lockmode)?;
+                    }
+                    AlterTableType::AT_SetNotNull => {
+                        let col_name = cmd.name.expect("AT_SetNotNull name");
+                        ATExecSetNotNull(
+                            mcx,
+                            wqueue,
+                            &rel,
+                            None,
+                            col_name,
+                            cmd.recurse,
+                            false,
+                            lockmode,
+                        )?;
+                    }
+                    AlterTableType::AT_CookedColumnDefault => {
+                        let defnode = cmd.def.expect("AT_CookedColumnDefault expr");
+                        // upstream 2780538433fc (18.5): Check for USAGE privilege on types used by stored expressions.
+                        // ATExecCookedColumnDefault: a cooked default copied by
+                        // CREATE TABLE ... LIKE adds new type dependencies and
+                        // bypasses AddRelationNewConstraints(); StoreAttrDefault()
+                        // leaves the privilege checks to its caller.
+                        pg_depend::CheckUsageOnTypesInSingleRelExpr(
+                            mcx,
+                            defnode,
+                            rel.rd_id,
+                            miscinit::GetUserId(),
+                        )?;
+                        // tablecmds.c:8236: remove any old default for the column
+                        // first (possible when combining LIKE with inheritance).
+                        RemoveAttrDefault(mcx, rel.rd_id, cmd.num, false, true)?;
+                        pg_attrdef::StoreAttrDefault(mcx, &rel, cmd.num, defnode, true)?;
+                    }
+                    AlterTableType::AT_AddConstraint => {
+                        // ATParseTransformCmd at the initial examination only
+                        // (tablecmds.c:5096-5100, cur_pass == AT_PASS_ADD_CONSTR):
+                        // transformAlterTableStmt's transformTableConstraint
+                        // guards (cxt.isforeign / cxt.ispartitioned from the
+                        // relkind, parse_utilcmd.c:3577-3600) run before any
+                        // constraint work is scheduled.
+                        if pass == AT_PASS_ADD_CONSTR {
+                            let relname = rel.name().to_string();
+                            parse_utilcmd::transformAlterTableCmd(
+                                mcx,
+                                &rel,
+                                &relname,
+                                cnode,
+                                query_string,
+                            )?;
+                        }
+                        // ATParseTransformCmd: PK/UNIQUE constraints become an
+                        // AT_AddIndex IndexStmt scheduled for AT_PASS_ADD_INDEX.
+                        let defnode = cmd.def.expect("AT_AddConstraint Constraint");
+                        let constr = defnode.as_variant::<Constraint>().expect("Constraint");
+                        match constr.contype {
+                            ConstrType::CONSTR_PRIMARY
+                            | ConstrType::CONSTR_UNIQUE
+                            | ConstrType::CONSTR_EXCLUSION => {
+                                let (istmt, nnconstraints) =
+                                    parse_utilcmd::transformIndexConstraintForAlter(
+                                        mcx,
+                                        &rel,
+                                        defnode,
+                                        query_string,
+                                    )?;
+                                // ATParseTransformCmd fabricates the stmt's
+                                // relation with inh = recurse (tablecmds.c:5827);
+                                // DefineIndex's partitioned ONLY arm reads it.
+                                {
+                                    let nsp = lsyscache::get_namespace_name(
+                                        mcx,
+                                        rel.rd_rel.relnamespace,
+                                    )?
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "cache lookup failed for namespace {}",
+                                            rel.rd_rel.relnamespace
+                                        )
+                                    });
+                                    let rv = types_nodes::RangeVar {
+                                        catalogname: None,
+                                        schemaname: Some(str_in_mcx(mcx, nsp.as_str())?),
+                                        relname: Some(str_in_mcx(mcx, rel.name())?),
+                                        inh: cmd.recurse,
+                                        relpersistence: rel.rd_rel.relpersistence,
+                                        alias: None,
+                                        location: -1,
+                                    };
+                                    let rv: &'mcx types_nodes::RangeVar<'mcx> =
+                                        types_nodes::Node::mk_mut(mcx, rv)?.seal_ref();
+                                    // SAFETY: statement-owned parse tree; no
+                                    // derived refs live yet.
+                                    unsafe {
+                                        istmt
+                                            .with_mut::<types_nodes::rawnodes::IndexStmt, _>(|s| {
+                                                s.relation = Some(rv)
+                                            })
+                                            .expect("IndexStmt");
+                                    }
+                                }
+                                let is_existing = istmt
+                                    .as_variant::<types_nodes::rawnodes::IndexStmt>()
+                                    .expect("IndexStmt")
+                                    .indexOid
+                                    != InvalidOid;
+                                if !is_existing {
+                                    parse_clause::transformIndexStmt(
+                                        mcx,
+                                        wqueue[tabidx].relid,
+                                        istmt,
+                                        query_string,
+                                    )?;
+                                }
+                                // C's transformAlterTableStmt: PK USING INDEX
+                                // not-null constraints run in COL_ATTRS, before
+                                // the ADD_INDEXCONSTR pass checks them.
+                                for nn in nnconstraints.iter() {
+                                    let mut nncmd = Node::build::<AlterTableCmd>(mcx)?;
+                                    nncmd.subtype = AlterTableType::AT_AddConstraint;
+                                    nncmd.recurse = true;
+                                    nncmd.def = Some(nn);
+                                    wqueue[tabidx].subcmds[AT_PASS_COL_ATTRS]
+                                        .lappend(mcx, nncmd.seal())?;
+                                }
+                                let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
+                                newcmd.subtype = if is_existing {
+                                    AlterTableType::AT_AddIndexConstraint
+                                } else {
+                                    AlterTableType::AT_AddIndex
+                                };
+                                newcmd.def = Some(istmt);
+                                let target_pass = if is_existing {
+                                    AT_PASS_ADD_INDEXCONSTR
+                                } else {
+                                    AT_PASS_ADD_INDEX
+                                };
+                                wqueue[tabidx].subcmds[target_pass].lappend(mcx, newcmd.seal())?;
+                            }
+                            ConstrType::CONSTR_NOTNULL if pass == AT_PASS_ADD_CONSTR => {
+                                wqueue[tabidx].subcmds[AT_PASS_COL_ATTRS].lappend(mcx, cnode)?;
+                            }
+                            // ATParseTransformCmd (tablecmds.c): at ADD_CONSTR,
+                            // non-index constraints are requeued for the
+                            // ADD_OTHERCONSTR pass, after ADD_INDEX.
+                            _ if pass == AT_PASS_ADD_CONSTR => {
+                                wqueue[tabidx].subcmds[AT_PASS_ADD_OTHERCONSTR]
+                                    .lappend(mcx, cnode)?;
+                            }
+                            ConstrType::CONSTR_NOTNULL | ConstrType::CONSTR_CHECK => {
+                                ATAddCheckNNConstraint(
+                                    mcx,
+                                    wqueue,
+                                    tabidx,
+                                    &rel,
+                                    defnode,
+                                    cmd.recurse,
+                                    false,
+                                    false,
+                                    lockmode,
+                                    query_string,
+                                )?;
+                            }
+                            _ => ATExecAddConstraint(
+                                mcx,
+                                wqueue,
+                                tabidx,
+                                &rel,
+                                cmd,
+                                cmd.recurse,
+                                query_string,
+                                lockmode,
+                            )?,
+                        }
+                    }
+                    AlterTableType::AT_DropConstraint => {
+                        ATExecDropConstraint(mcx, &rel, cmd, lockmode)?;
+                    }
+                    AlterTableType::AT_AlterConstraint => {
+                        let cmdcon = cmd
+                            .def
+                            .expect("AT_AlterConstraint def")
+                            .as_variant::<types_nodes::parsenodes::ATAlterConstraint>()
+                            .expect("ATAlterConstraint");
+                        crate::fk::ATExecAlterConstraint(
+                            mcx,
+                            wqueue,
+                            &rel,
+                            cmdcon,
+                            cmd.recurse,
+                            lockmode,
+                        )?;
+                    }
+                    AlterTableType::AT_ValidateConstraint => {
+                        let name = cmd.name.expect("AT_ValidateConstraint name");
+                        ATExecValidateConstraint(
+                            mcx,
+                            wqueue,
+                            &rel,
+                            name,
+                            cmd.recurse,
+                            false,
+                            lockmode,
+                        )?;
+                    }
+                    AlterTableType::AT_AddIndex => {
+                        ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd, false)?;
+                    }
+                    AlterTableType::AT_ReAddIndex => {
+                        ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd, true)?;
+                    }
+                    AlterTableType::AT_ReAddStatistics => {
+                        // ATExecAddStatistics (tablecmds.c:9683); the stmt has
+                        // been through transformStatsStmt. check_rights=false:
+                        // C's rebuild arm (tablecmds.c:9693, !is_rebuild).
+                        let stmt = cmd
+                            .def
+                            .expect("AT_ReAddStatistics CreateStatsStmt")
+                            .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
+                            .expect("CreateStatsStmt");
+                        // upstream a1fa24127d6a (18.6): the owner must be set to
+                        // the original statistics owner (tablecmds.c:9701).
+                        debug_assert!(stmt.owner != InvalidOid, "AT_ReAddStatistics without owner");
+                        statscmds::CreateStatistics(mcx, rel.rd_id, stmt, false)?;
+                    }
+                    AlterTableType::AT_ReAddConstraint => {
+                        let defnode = cmd.def.expect("AT_ReAddConstraint Constraint");
+                        let constr = defnode.as_variant::<Constraint>().expect("Constraint");
+                        match constr.contype {
+                            ConstrType::CONSTR_NOTNULL | ConstrType::CONSTR_CHECK => {
+                                ATAddCheckNNConstraint(
+                                    mcx,
+                                    wqueue,
+                                    tabidx,
+                                    &rel,
+                                    defnode,
+                                    true,
+                                    false,
+                                    true,
+                                    lockmode,
+                                    query_string,
+                                )?;
+                            }
+                            _ => ATExecAddConstraint(
+                                mcx,
+                                wqueue,
+                                tabidx,
+                                &rel,
+                                cmd,
+                                true,
+                                query_string,
+                                lockmode,
+                            )?,
+                        }
+                    }
+                    AlterTableType::AT_ReAddDomainConstraint => {
+                        let stmt = cmd
+                            .def
+                            .expect("AT_ReAddDomainConstraint AlterDomainStmt")
+                            .as_variant::<types_nodes::parsenodes::AlterDomainStmt>()
+                            .expect("AlterDomainStmt");
+                        typecmds_seams::alter_domain_add_constraint::call(
+                            mcx,
+                            &stmt.typeName,
+                            stmt.def.expect("ALTER DOMAIN ADD CONSTRAINT def"),
+                            // upstream 2780538433fc (18.5): is_readd
+                            true,
+                        )?;
+                    }
+                    AlterTableType::AT_ReAddComment => {
+                        let stmt = cmd
+                            .def
+                            .expect("AT_ReAddComment CommentStmt")
+                            .as_variant::<types_nodes::parsenodes::CommentStmt>()
+                            .expect("CommentStmt");
+                        commands_comment::CommentObject(mcx, stmt)?;
+                    }
+                    AlterTableType::AT_AlterColumnType => {
+                        ATExecAlterColumnType(mcx, &mut wqueue[tabidx], &rel, cmd)?;
+                    }
+                    AlterTableType::AT_SetExpression => {
+                        ATExecSetExpression(mcx, &mut wqueue[tabidx], &rel, cmd)?;
+                    }
+                    AlterTableType::AT_DropExpression => {
+                        ATExecDropExpression(mcx, &rel, cmd)?;
+                    }
+                    AlterTableType::AT_EnableTrig
+                    | AlterTableType::AT_EnableAlwaysTrig
+                    | AlterTableType::AT_EnableReplicaTrig
+                    | AlterTableType::AT_EnableTrigAll
+                    | AlterTableType::AT_EnableTrigUser
+                    | AlterTableType::AT_DisableTrig
+                    | AlterTableType::AT_DisableTrigAll
+                    | AlterTableType::AT_DisableTrigUser => {
+                        use types_trigger::{
+                            TRIGGER_DISABLED, TRIGGER_FIRES_ALWAYS, TRIGGER_FIRES_ON_ORIGIN,
+                            TRIGGER_FIRES_ON_REPLICA,
+                        };
+                        let (fires_when, skip_system, named) = match cmd.subtype {
+                            AlterTableType::AT_EnableTrig => (TRIGGER_FIRES_ON_ORIGIN, false, true),
+                            AlterTableType::AT_EnableAlwaysTrig => {
+                                (TRIGGER_FIRES_ALWAYS, false, true)
+                            }
+                            AlterTableType::AT_EnableReplicaTrig => {
+                                (TRIGGER_FIRES_ON_REPLICA, false, true)
+                            }
+                            AlterTableType::AT_DisableTrig => (TRIGGER_DISABLED, false, true),
+                            AlterTableType::AT_EnableTrigAll => {
+                                (TRIGGER_FIRES_ON_ORIGIN, false, false)
+                            }
+                            AlterTableType::AT_DisableTrigAll => (TRIGGER_DISABLED, false, false),
+                            AlterTableType::AT_EnableTrigUser => {
+                                (TRIGGER_FIRES_ON_ORIGIN, true, false)
+                            }
+                            _ => (TRIGGER_DISABLED, true, false),
+                        };
+                        let name = if named {
+                            Some(cmd.name.expect("ENABLE/DISABLE TRIGGER has a name"))
+                        } else {
+                            None
+                        };
+                        trigger::EnableDisableTrigger(
+                            mcx,
+                            &rel,
+                            name,
+                            types_core::InvalidOid,
+                            fires_when,
+                            skip_system,
+                            cmd.recurse,
+                            types_rel::ShareRowExclusiveLock,
+                        )?;
+                        // tablecmds.c:17254 ATExecEnableDisableTrigger
+                        objectaccess::InvokeObjectPostAlterHook(
+                            RELATION_RELATION_ID,
+                            rel.rd_id,
+                            0,
+                        )?;
+                    }
+                    AlterTableType::AT_EnableRule => {
+                        rewrite_define::EnableDisableRule(
+                            mcx,
+                            &rel,
+                            cmd.name.expect("ENABLE RULE has a name"),
+                            b'O',
+                        )?;
+                        // tablecmds.c:17269 ATExecEnableDisableRule
+                        objectaccess::InvokeObjectPostAlterHook(
+                            RELATION_RELATION_ID,
+                            rel.rd_id,
+                            0,
+                        )?;
+                    }
+                    AlterTableType::AT_EnableAlwaysRule => {
+                        rewrite_define::EnableDisableRule(
+                            mcx,
+                            &rel,
+                            cmd.name.expect("ENABLE ALWAYS RULE has a name"),
+                            b'A',
+                        )?;
+                        // tablecmds.c:17269 ATExecEnableDisableRule
+                        objectaccess::InvokeObjectPostAlterHook(
+                            RELATION_RELATION_ID,
+                            rel.rd_id,
+                            0,
+                        )?;
+                    }
+                    AlterTableType::AT_EnableReplicaRule => {
+                        rewrite_define::EnableDisableRule(
+                            mcx,
+                            &rel,
+                            cmd.name.expect("ENABLE REPLICA RULE has a name"),
+                            b'R',
+                        )?;
+                        // tablecmds.c:17269 ATExecEnableDisableRule
+                        objectaccess::InvokeObjectPostAlterHook(
+                            RELATION_RELATION_ID,
+                            rel.rd_id,
+                            0,
+                        )?;
+                    }
+                    AlterTableType::AT_DisableRule => {
+                        rewrite_define::EnableDisableRule(
+                            mcx,
+                            &rel,
+                            cmd.name.expect("DISABLE RULE has a name"),
+                            b'D',
+                        )?;
+                        // tablecmds.c:17269 ATExecEnableDisableRule
+                        objectaccess::InvokeObjectPostAlterHook(
+                            RELATION_RELATION_ID,
+                            rel.rd_id,
+                            0,
+                        )?;
+                    }
+                    AlterTableType::AT_EnableRowSecurity => {
+                        ATExecSetRowSecurity(mcx, &rel, true)?;
+                    }
+                    AlterTableType::AT_DisableRowSecurity => {
+                        ATExecSetRowSecurity(mcx, &rel, false)?;
+                    }
+                    AlterTableType::AT_ForceRowSecurity => {
+                        ATExecForceNoForceRowSecurity(mcx, &rel, true)?;
+                    }
+                    AlterTableType::AT_NoForceRowSecurity => {
+                        ATExecForceNoForceRowSecurity(mcx, &rel, false)?;
+                    }
+                    AlterTableType::AT_SetStatistics => {
+                        ATExecSetStatistics(mcx, &rel, cmd)?;
+                    }
+                    AlterTableType::AT_SetStorage => {
+                        ATExecSetStorage(mcx, &rel, cmd)?;
+                    }
+                    AlterTableType::AT_SetCompression => {
+                        ATExecSetCompression(mcx, &rel, cmd)?;
+                    }
+                    AlterTableType::AT_SetOptions => {
+                        ATExecSetOptions(mcx, &rel, cmd, false)?;
+                    }
+                    AlterTableType::AT_ResetOptions => {
+                        ATExecSetOptions(mcx, &rel, cmd, true)?;
+                    }
+                    AlterTableType::AT_SetRelOptions
+                    | AlterTableType::AT_ResetRelOptions
+                    | AlterTableType::AT_ReplaceRelOptions => {
+                        let empty = types_nodes::NodeList::nil();
+                        let defs = cmd.def.and_then(|d| d.as_list()).unwrap_or(&empty);
+                        crate::setrelopts::ATExecSetRelOptions(
+                            mcx,
+                            &rel,
+                            defs,
+                            cmd.subtype,
+                            lockmode,
+                        )?;
+                    }
+                    AlterTableType::AT_AttachPartition => {
+                        let pcmd = cmd
+                            .def
+                            .expect("AT_AttachPartition PartitionCmd")
+                            .as_variant::<types_nodes::rawnodes::PartitionCmd>()
+                            .expect("PartitionCmd");
+                        // C: ATParseTransformCmd -> transformPartitionCmd, before
+                        // ATExecAttachPartition opens the child.
+                        let bound = transform_partition_cmd(mcx, &rel, pcmd, query_string)?;
+                        if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+                            crate::attach::ATExecAttachPartition(
+                                mcx,
+                                wqueue,
+                                &rel,
+                                pcmd,
+                                bound.expect("transformed ATTACH PARTITION bound"),
+                                query_string,
+                            )?;
+                        } else {
+                            crate::attach::ATExecAttachPartitionIdx(
+                                mcx,
+                                &rel,
+                                pcmd.name.expect("PartitionCmd.name"),
+                            )?;
+                        }
+                    }
+                    AlterTableType::AT_DetachPartition => {
+                        let pcmd = cmd
+                            .def
+                            .expect("AT_DetachPartition PartitionCmd")
+                            .as_variant::<types_nodes::rawnodes::PartitionCmd>()
+                            .expect("PartitionCmd");
+                        // C: ATParseTransformCmd -> transformPartitionCmd (relkind
+                        // checks; DETACH carries no bound).
+                        transform_partition_cmd(mcx, &rel, pcmd, query_string)?;
+                        // Concurrent detach commits mid-command and reopens the
+                        // parent; the returned handle carries the reopened rel.
+                        rel = crate::attach::ATExecDetachPartition(
+                            mcx,
+                            wqueue,
+                            rel,
+                            pcmd,
+                            query_string,
+                        )?;
+                    }
+                    AlterTableType::AT_DetachPartitionFinalize => {
+                        let pcmd = cmd
+                            .def
+                            .expect("AT_DetachPartitionFinalize PartitionCmd")
+                            .as_variant::<types_nodes::rawnodes::PartitionCmd>()
+                            .expect("PartitionCmd");
+                        crate::attach::ATExecDetachPartitionFinalize(
+                            mcx,
+                            &rel,
+                            pcmd.name.expect("PartitionCmd.name"),
+                        )?;
+                    }
+                    AlterTableType::AT_AddInherit => {
+                        ATExecAddInherit(mcx, &rel, cmd)?;
+                    }
+                    AlterTableType::AT_DropInherit => {
+                        ATExecDropInherit(mcx, &rel, cmd)?;
+                    }
+                    AlterTableType::AT_AddIdentity => {
                         let relname = rel.name().to_string();
-                        parse_utilcmd::transformAlterTableCmd(
+                        let cxt = parse_utilcmd::transformAlterTableCmd(
                             mcx,
                             &rel,
                             &relname,
                             cnode,
                             query_string,
                         )?;
+                        run_seq_stmts(mcx, &cxt.blist)?;
+                        debug_assert!(cxt.alist.is_nil());
+                        debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
+                        debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
+                        let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+                        ATExecAddIdentity(mcx, &rel, cmd, lockmode)?;
                     }
-                    // ATParseTransformCmd: PK/UNIQUE constraints become an
-                    // AT_AddIndex IndexStmt scheduled for AT_PASS_ADD_INDEX.
-                    let defnode = cmd.def.expect("AT_AddConstraint Constraint");
-                    let constr = defnode.as_variant::<Constraint>().expect("Constraint");
-                    match constr.contype {
-                        ConstrType::CONSTR_PRIMARY
-                        | ConstrType::CONSTR_UNIQUE
-                        | ConstrType::CONSTR_EXCLUSION => {
-                            let (istmt, nnconstraints) =
-                                parse_utilcmd::transformIndexConstraintForAlter(
-                                    mcx, &rel, defnode, query_string,
-                                )?;
-                            // ATParseTransformCmd fabricates the stmt's
-                            // relation with inh = recurse (tablecmds.c:5827);
-                            // DefineIndex's partitioned ONLY arm reads it.
-                            {
-                                let nsp = lsyscache::get_namespace_name(
-                                    mcx,
-                                    rel.rd_rel.relnamespace,
-                                )?
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "cache lookup failed for namespace {}",
-                                        rel.rd_rel.relnamespace
-                                    )
-                                });
-                                let rv = types_nodes::RangeVar {
-                                    catalogname: None,
-                                    schemaname: Some(str_in_mcx(mcx, nsp.as_str())?),
-                                    relname: Some(str_in_mcx(mcx, rel.name())?),
-                                    inh: cmd.recurse,
-                                    relpersistence: rel.rd_rel.relpersistence,
-                                    alias: None,
-                                    location: -1,
-                                };
-                                let rv: &'mcx types_nodes::RangeVar<'mcx> =
-                                    types_nodes::Node::mk_mut(mcx, rv)?.seal_ref();
-                                // SAFETY: statement-owned parse tree; no
-                                // derived refs live yet.
-                                unsafe {
-                                    istmt
-                                        .with_mut::<types_nodes::rawnodes::IndexStmt, _>(
-                                            |s| s.relation = Some(rv),
-                                        )
-                                        .expect("IndexStmt");
-                                }
-                            }
-                            let is_existing = istmt
-                                .as_variant::<types_nodes::rawnodes::IndexStmt>()
-                                .expect("IndexStmt")
-                                .indexOid
-                                != InvalidOid;
-                            if !is_existing {
-                                parse_clause::transformIndexStmt(
-                                    mcx,
-                                    wqueue[tabidx].relid,
-                                    istmt,
-                                    query_string,
-                                )?;
-                            }
-                            // C's transformAlterTableStmt: PK USING INDEX
-                            // not-null constraints run in COL_ATTRS, before
-                            // the ADD_INDEXCONSTR pass checks them.
-                            for nn in nnconstraints.iter() {
-                                let mut nncmd = Node::build::<AlterTableCmd>(mcx)?;
-                                nncmd.subtype = AlterTableType::AT_AddConstraint;
-                                nncmd.recurse = true;
-                                nncmd.def = Some(nn);
-                                wqueue[tabidx].subcmds[AT_PASS_COL_ATTRS]
-                                    .lappend(mcx, nncmd.seal())?;
-                            }
-                            let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
-                            newcmd.subtype = if is_existing {
-                                AlterTableType::AT_AddIndexConstraint
-                            } else {
-                                AlterTableType::AT_AddIndex
-                            };
-                            newcmd.def = Some(istmt);
-                            let target_pass = if is_existing {
-                                AT_PASS_ADD_INDEXCONSTR
-                            } else {
-                                AT_PASS_ADD_INDEX
-                            };
-                            wqueue[tabidx].subcmds[target_pass].lappend(mcx, newcmd.seal())?;
-                        }
-                        ConstrType::CONSTR_NOTNULL if pass == AT_PASS_ADD_CONSTR => {
-                            wqueue[tabidx].subcmds[AT_PASS_COL_ATTRS].lappend(mcx, cnode)?;
-                        }
-                        // ATParseTransformCmd (tablecmds.c): at ADD_CONSTR,
-                        // non-index constraints are requeued for the
-                        // ADD_OTHERCONSTR pass, after ADD_INDEX.
-                        _ if pass == AT_PASS_ADD_CONSTR => {
-                            wqueue[tabidx].subcmds[AT_PASS_ADD_OTHERCONSTR]
-                                .lappend(mcx, cnode)?;
-                        }
-                        ConstrType::CONSTR_NOTNULL | ConstrType::CONSTR_CHECK => {
-                            ATAddCheckNNConstraint(
-                                mcx,
-                                wqueue,
-                                tabidx,
-                                &rel,
-                                defnode,
-                                cmd.recurse,
-                                false,
-                                false,
-                                lockmode,
-                                query_string,
-                            )?;
-                        }
-                        _ => ATExecAddConstraint(
+                    AlterTableType::AT_SetIdentity => {
+                        let relname = rel.name().to_string();
+                        let cxt = parse_utilcmd::transformAlterTableCmd(
                             mcx,
-                            wqueue,
-                            tabidx,
                             &rel,
-                            cmd,
+                            &relname,
+                            cnode,
+                            query_string,
+                        )?;
+                        run_seq_stmts(mcx, &cxt.blist)?;
+                        debug_assert!(cxt.alist.is_nil());
+                        debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
+                        debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
+                        let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+                        ATExecSetIdentity(mcx, &rel, cmd, lockmode)?;
+                    }
+                    AlterTableType::AT_DropIdentity => {
+                        ATExecDropIdentity(
+                            mcx,
+                            &rel,
+                            cmd.name.expect("AT_DropIdentity name"),
+                            cmd.missing_ok,
+                            lockmode,
                             cmd.recurse,
-                            query_string,
-                            lockmode,
-                        )?,
+                            false,
+                        )?;
                     }
-                }
-                AlterTableType::AT_DropConstraint => {
-                    ATExecDropConstraint(mcx, &rel, cmd, lockmode)?;
-                }
-                AlterTableType::AT_AlterConstraint => {
-                    let cmdcon = cmd
-                        .def
-                        .expect("AT_AlterConstraint def")
-                        .as_variant::<types_nodes::parsenodes::ATAlterConstraint>()
-                        .expect("ATAlterConstraint");
-                    crate::fk::ATExecAlterConstraint(
-                        mcx, wqueue, &rel, cmdcon, cmd.recurse, lockmode,
-                    )?;
-                }
-                AlterTableType::AT_ValidateConstraint => {
-                    let name = cmd.name.expect("AT_ValidateConstraint name");
-                    ATExecValidateConstraint(
-                        mcx, wqueue, &rel, name, cmd.recurse, false, lockmode,
-                    )?;
-                }
-                AlterTableType::AT_AddIndex => {
-                    ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd, false)?;
-                }
-                AlterTableType::AT_ReAddIndex => {
-                    ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd, true)?;
-                }
-                AlterTableType::AT_ReAddStatistics => {
-                    // ATExecAddStatistics (tablecmds.c:9683); the stmt has
-                    // been through transformStatsStmt. check_rights=false:
-                    // C's rebuild arm (tablecmds.c:9693, !is_rebuild).
-                    let stmt = cmd
-                        .def
-                        .expect("AT_ReAddStatistics CreateStatsStmt")
-                        .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
-                        .expect("CreateStatsStmt");
-                    // upstream a1fa24127d6a (18.6): the owner must be set to
-                    // the original statistics owner (tablecmds.c:9701).
-                    debug_assert!(stmt.owner != InvalidOid, "AT_ReAddStatistics without owner");
-                    statscmds::CreateStatistics(mcx, rel.rd_id, stmt, false)?;
-                }
-                AlterTableType::AT_ReAddConstraint => {
-                    let defnode = cmd.def.expect("AT_ReAddConstraint Constraint");
-                    let constr = defnode.as_variant::<Constraint>().expect("Constraint");
-                    match constr.contype {
-                        ConstrType::CONSTR_NOTNULL | ConstrType::CONSTR_CHECK => {
-                            ATAddCheckNNConstraint(
+                    AlterTableType::AT_ClusterOn => {
+                        ATExecClusterOn(mcx, &rel, cmd, lockmode)?;
+                    }
+                    AlterTableType::AT_DropCluster => {
+                        commands_cluster::mark_index_clustered(mcx, &rel, InvalidOid, false)?;
+                    }
+                    AlterTableType::AT_SetLogged | AlterTableType::AT_SetUnLogged => {}
+                    // Nothing to do here; oid columns don't exist anymore.
+                    AlterTableType::AT_DropOids => {}
+                    AlterTableType::AT_AddIndexConstraint => {
+                        let stmt = cmd
+                            .def
+                            .expect("AT_AddIndexConstraint IndexStmt")
+                            .as_variant::<types_nodes::rawnodes::IndexStmt>()
+                            .expect("IndexStmt");
+                        ATExecAddIndexConstraint(mcx, &rel, stmt)?;
+                    }
+                    AlterTableType::AT_ReplicaIdentity => {
+                        let stmt = cmd
+                            .def
+                            .expect("AT_ReplicaIdentity ReplicaIdentityStmt")
+                            .as_variant::<types_nodes::parsenodes::ReplicaIdentityStmt>()
+                            .expect("ReplicaIdentityStmt");
+                        ATExecReplicaIdentity(mcx, &rel, stmt)?;
+                    }
+                    AlterTableType::AT_AddOf => {
+                        let tn = cmd
+                            .def
+                            .expect("AT_AddOf TypeName")
+                            .as_variant::<TypeName>()
+                            .expect("TypeName");
+                        ATExecAddOf(mcx, &rel, tn)?;
+                    }
+                    AlterTableType::AT_DropOf => {
+                        ATExecDropOf(mcx, &rel)?;
+                    }
+                    AlterTableType::AT_ChangeOwner => {
+                        let newowner = cmd
+                            .newowner
+                            .expect("AT_ChangeOwner RoleSpec")
+                            .as_role_spec()
+                            .expect("RoleSpec");
+                        crate::owner::ATExecChangeOwner(
+                            mcx,
+                            rel.rd_id,
+                            aclchk::get_rolespec_oid(newowner, false)?,
+                            false,
+                            lockmode,
+                        )?;
+                    }
+                    AlterTableType::AT_GenericOptions => {
+                        if let Some(options) = cmd.def.and_then(|d| d.as_list()) {
+                            ATExecGenericOptions(mcx, &rel, &options)?;
+                            // Cached plans may depend on the old options.
+                            inval::invalidate::CacheInvalidateRelcache(&rel)?;
+                        }
+                    }
+                    AlterTableType::AT_AlterColumnGenericOptions => {
+                        if let Some(options) = cmd.def.and_then(|d| d.as_list()) {
+                            ATExecAlterColumnGenericOptions(
                                 mcx,
-                                wqueue,
-                                tabidx,
                                 &rel,
-                                defnode,
-                                true,
-                                false,
-                                true,
-                                lockmode,
-                                query_string,
+                                cmd.name.expect("AT_AlterColumnGenericOptions column name"),
+                                &options,
                             )?;
                         }
-                        _ => ATExecAddConstraint(
-                            mcx,
-                            wqueue,
-                            tabidx,
-                            &rel,
-                            cmd,
-                            true,
-                            query_string,
-                            lockmode,
-                        )?,
                     }
-                }
-                AlterTableType::AT_ReAddDomainConstraint => {
-                    let stmt = cmd
-                        .def
-                        .expect("AT_ReAddDomainConstraint AlterDomainStmt")
-                        .as_variant::<types_nodes::parsenodes::AlterDomainStmt>()
-                        .expect("AlterDomainStmt");
-                    typecmds_seams::alter_domain_add_constraint::call(
-                        mcx,
-                        &stmt.typeName,
-                        stmt.def.expect("ALTER DOMAIN ADD CONSTRAINT def"),
-                        // upstream 2780538433fc (18.5): is_readd
-                        true,
-                    )?;
-                }
-                AlterTableType::AT_ReAddComment => {
-                    let stmt = cmd
-                        .def
-                        .expect("AT_ReAddComment CommentStmt")
-                        .as_variant::<types_nodes::parsenodes::CommentStmt>()
-                        .expect("CommentStmt");
-                    commands_comment::CommentObject(mcx, stmt)?;
-                }
-                AlterTableType::AT_AlterColumnType => {
-                    ATExecAlterColumnType(mcx, &mut wqueue[tabidx], &rel, cmd)?;
-                }
-                AlterTableType::AT_SetExpression => {
-                    ATExecSetExpression(mcx, &mut wqueue[tabidx], &rel, cmd)?;
-                }
-                AlterTableType::AT_DropExpression => {
-                    ATExecDropExpression(mcx, &rel, cmd)?;
-                }
-                AlterTableType::AT_EnableTrig
-                | AlterTableType::AT_EnableAlwaysTrig
-                | AlterTableType::AT_EnableReplicaTrig
-                | AlterTableType::AT_EnableTrigAll
-                | AlterTableType::AT_EnableTrigUser
-                | AlterTableType::AT_DisableTrig
-                | AlterTableType::AT_DisableTrigAll
-                | AlterTableType::AT_DisableTrigUser => {
-                    use types_trigger::{
-                        TRIGGER_DISABLED, TRIGGER_FIRES_ALWAYS, TRIGGER_FIRES_ON_ORIGIN,
-                        TRIGGER_FIRES_ON_REPLICA,
-                    };
-                    let (fires_when, skip_system, named) = match cmd.subtype {
-                        AlterTableType::AT_EnableTrig => (TRIGGER_FIRES_ON_ORIGIN, false, true),
-                        AlterTableType::AT_EnableAlwaysTrig => (TRIGGER_FIRES_ALWAYS, false, true),
-                        AlterTableType::AT_EnableReplicaTrig => {
-                            (TRIGGER_FIRES_ON_REPLICA, false, true)
+                    // Phase-2 arm only fires for partitioned relkinds (no
+                    // storage); phase 3 does the work otherwise.
+                    AlterTableType::AT_SetTableSpace => {
+                        if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+                            || rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX
+                        {
+                            ATExecSetTableSpaceNoStorage(mcx, &rel, wqueue[tabidx].new_tablespace)?;
                         }
-                        AlterTableType::AT_DisableTrig => (TRIGGER_DISABLED, false, true),
-                        AlterTableType::AT_EnableTrigAll => (TRIGGER_FIRES_ON_ORIGIN, false, false),
-                        AlterTableType::AT_DisableTrigAll => (TRIGGER_DISABLED, false, false),
-                        AlterTableType::AT_EnableTrigUser => (TRIGGER_FIRES_ON_ORIGIN, true, false),
-                        _ => (TRIGGER_DISABLED, true, false),
-                    };
-                    let name = if named {
-                        Some(cmd.name.expect("ENABLE/DISABLE TRIGGER has a name"))
-                    } else {
-                        None
-                    };
-                    trigger::EnableDisableTrigger(
-                        mcx,
-                        &rel,
-                        name,
-                        types_core::InvalidOid,
-                        fires_when,
-                        skip_system,
-                        cmd.recurse,
-                        types_rel::ShareRowExclusiveLock,
-                    )?;
-                    // tablecmds.c:17254 ATExecEnableDisableTrigger
-                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
-                }
-                AlterTableType::AT_EnableRule => {
-                    rewrite_define::EnableDisableRule(
-                        mcx,
-                        &rel,
-                        cmd.name.expect("ENABLE RULE has a name"),
-                        b'O',
-                    )?;
-                    // tablecmds.c:17269 ATExecEnableDisableRule
-                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
-                }
-                AlterTableType::AT_EnableAlwaysRule => {
-                    rewrite_define::EnableDisableRule(
-                        mcx,
-                        &rel,
-                        cmd.name.expect("ENABLE ALWAYS RULE has a name"),
-                        b'A',
-                    )?;
-                    // tablecmds.c:17269 ATExecEnableDisableRule
-                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
-                }
-                AlterTableType::AT_EnableReplicaRule => {
-                    rewrite_define::EnableDisableRule(
-                        mcx,
-                        &rel,
-                        cmd.name.expect("ENABLE REPLICA RULE has a name"),
-                        b'R',
-                    )?;
-                    // tablecmds.c:17269 ATExecEnableDisableRule
-                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
-                }
-                AlterTableType::AT_DisableRule => {
-                    rewrite_define::EnableDisableRule(
-                        mcx,
-                        &rel,
-                        cmd.name.expect("DISABLE RULE has a name"),
-                        b'D',
-                    )?;
-                    // tablecmds.c:17269 ATExecEnableDisableRule
-                    objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, 0)?;
-                }
-                AlterTableType::AT_EnableRowSecurity => {
-                    ATExecSetRowSecurity(mcx, &rel, true)?;
-                }
-                AlterTableType::AT_DisableRowSecurity => {
-                    ATExecSetRowSecurity(mcx, &rel, false)?;
-                }
-                AlterTableType::AT_ForceRowSecurity => {
-                    ATExecForceNoForceRowSecurity(mcx, &rel, true)?;
-                }
-                AlterTableType::AT_NoForceRowSecurity => {
-                    ATExecForceNoForceRowSecurity(mcx, &rel, false)?;
-                }
-                AlterTableType::AT_SetStatistics => {
-                    ATExecSetStatistics(mcx, &rel, cmd)?;
-                }
-                AlterTableType::AT_SetStorage => {
-                    ATExecSetStorage(mcx, &rel, cmd)?;
-                }
-                AlterTableType::AT_SetCompression => {
-                    ATExecSetCompression(mcx, &rel, cmd)?;
-                }
-                AlterTableType::AT_SetOptions => {
-                    ATExecSetOptions(mcx, &rel, cmd, false)?;
-                }
-                AlterTableType::AT_ResetOptions => {
-                    ATExecSetOptions(mcx, &rel, cmd, true)?;
-                }
-                AlterTableType::AT_SetRelOptions
-                | AlterTableType::AT_ResetRelOptions
-                | AlterTableType::AT_ReplaceRelOptions => {
-                    let empty = types_nodes::NodeList::nil();
-                    let defs = cmd.def.and_then(|d| d.as_list()).unwrap_or(&empty);
-                    crate::setrelopts::ATExecSetRelOptions(mcx, &rel, defs, cmd.subtype, lockmode)?;
-                }
-                AlterTableType::AT_AttachPartition => {
-                    let pcmd = cmd
-                        .def
-                        .expect("AT_AttachPartition PartitionCmd")
-                        .as_variant::<types_nodes::rawnodes::PartitionCmd>()
-                        .expect("PartitionCmd");
-                    // C: ATParseTransformCmd -> transformPartitionCmd, before
-                    // ATExecAttachPartition opens the child.
-                    let bound = transform_partition_cmd(mcx, &rel, pcmd, query_string)?;
-                    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-                        crate::attach::ATExecAttachPartition(
-                            mcx,
-                            wqueue,
-                            &rel,
-                            pcmd,
-                            bound.expect("transformed ATTACH PARTITION bound"),
-                            query_string,
-                        )?;
-                    } else {
-                        crate::attach::ATExecAttachPartitionIdx(
-                            mcx,
-                            &rel,
-                            pcmd.name.expect("PartitionCmd.name"),
-                        )?;
+                    }
+                    AlterTableType::AT_SetAccessMethod => {
+                        if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+                            && wqueue[tabidx].chg_access_method
+                        {
+                            ATExecSetAccessMethodNoStorage(
+                                mcx,
+                                &rel,
+                                wqueue[tabidx].new_access_method,
+                            )?;
+                        }
                     }
                 }
-                AlterTableType::AT_DetachPartition => {
-                    let pcmd = cmd
-                        .def
-                        .expect("AT_DetachPartition PartitionCmd")
-                        .as_variant::<types_nodes::rawnodes::PartitionCmd>()
-                        .expect("PartitionCmd");
-                    // C: ATParseTransformCmd -> transformPartitionCmd (relkind
-                    // checks; DETACH carries no bound).
-                    transform_partition_cmd(mcx, &rel, pcmd, query_string)?;
-                    // Concurrent detach commits mid-command and reopens the
-                    // parent; the returned handle carries the reopened rel.
-                    rel = crate::attach::ATExecDetachPartition(
-                        mcx, wqueue, rel, pcmd, query_string,
-                    )?;
-                }
-                AlterTableType::AT_DetachPartitionFinalize => {
-                    let pcmd = cmd
-                        .def
-                        .expect("AT_DetachPartitionFinalize PartitionCmd")
-                        .as_variant::<types_nodes::rawnodes::PartitionCmd>()
-                        .expect("PartitionCmd");
-                    crate::attach::ATExecDetachPartitionFinalize(
-                        mcx,
-                        &rel,
-                        pcmd.name.expect("PartitionCmd.name"),
-                    )?;
-                }
-                AlterTableType::AT_AddInherit => {
-                    ATExecAddInherit(mcx, &rel, cmd)?;
-                }
-                AlterTableType::AT_DropInherit => {
-                    ATExecDropInherit(mcx, &rel, cmd)?;
-                }
-                AlterTableType::AT_AddIdentity => {
-                    let relname = rel.name().to_string();
-                    let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode, query_string)?;
-                    run_seq_stmts(mcx, &cxt.blist)?;
-                    debug_assert!(cxt.alist.is_nil());
-                    debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
-                    debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
-                    let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
-                    ATExecAddIdentity(mcx, &rel, cmd, lockmode)?;
-                }
-                AlterTableType::AT_SetIdentity => {
-                    let relname = rel.name().to_string();
-                    let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode, query_string)?;
-                    run_seq_stmts(mcx, &cxt.blist)?;
-                    debug_assert!(cxt.alist.is_nil());
-                    debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
-                    debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
-                    let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
-                    ATExecSetIdentity(mcx, &rel, cmd, lockmode)?;
-                }
-                AlterTableType::AT_DropIdentity => {
-                    ATExecDropIdentity(
-                        mcx,
-                        &rel,
-                        cmd.name.expect("AT_DropIdentity name"),
-                        cmd.missing_ok,
-                        lockmode,
-                        cmd.recurse,
-                        false,
-                    )?;
-                }
-                AlterTableType::AT_ClusterOn => {
-                    ATExecClusterOn(mcx, &rel, cmd, lockmode)?;
-                }
-                AlterTableType::AT_DropCluster => {
-                    commands_cluster::mark_index_clustered(mcx, &rel, InvalidOid, false)?;
-                }
-                AlterTableType::AT_SetLogged | AlterTableType::AT_SetUnLogged => {}
-                // Nothing to do here; oid columns don't exist anymore.
-                AlterTableType::AT_DropOids => {}
-                AlterTableType::AT_AddIndexConstraint => {
-                    let stmt = cmd
-                        .def
-                        .expect("AT_AddIndexConstraint IndexStmt")
-                        .as_variant::<types_nodes::rawnodes::IndexStmt>()
-                        .expect("IndexStmt");
-                    ATExecAddIndexConstraint(mcx, &rel, stmt)?;
-                }
-                AlterTableType::AT_ReplicaIdentity => {
-                    let stmt = cmd
-                        .def
-                        .expect("AT_ReplicaIdentity ReplicaIdentityStmt")
-                        .as_variant::<types_nodes::parsenodes::ReplicaIdentityStmt>()
-                        .expect("ReplicaIdentityStmt");
-                    ATExecReplicaIdentity(mcx, &rel, stmt)?;
-                }
-                AlterTableType::AT_AddOf => {
-                    let tn = cmd
-                        .def
-                        .expect("AT_AddOf TypeName")
-                        .as_variant::<TypeName>()
-                        .expect("TypeName");
-                    ATExecAddOf(mcx, &rel, tn)?;
-                }
-                AlterTableType::AT_DropOf => {
-                    ATExecDropOf(mcx, &rel)?;
-                }
-                AlterTableType::AT_ChangeOwner => {
-                    let newowner = cmd
-                        .newowner
-                        .expect("AT_ChangeOwner RoleSpec")
-                        .as_role_spec()
-                        .expect("RoleSpec");
-                    crate::owner::ATExecChangeOwner(
-                        mcx,
-                        rel.rd_id,
-                        aclchk::get_rolespec_oid(newowner, false)?,
-                        false,
-                        lockmode,
-                    )?;
-                }
-                AlterTableType::AT_GenericOptions => {
-                    if let Some(options) = cmd.def.and_then(|d| d.as_list()) {
-                        ATExecGenericOptions(mcx, &rel, &options)?;
-                        // Cached plans may depend on the old options.
-                        inval::invalidate::CacheInvalidateRelcache(&rel)?;
-                    }
-                }
-                AlterTableType::AT_AlterColumnGenericOptions => {
-                    if let Some(options) = cmd.def.and_then(|d| d.as_list()) {
-                        ATExecAlterColumnGenericOptions(
-                            mcx,
-                            &rel,
-                            cmd.name.expect("AT_AlterColumnGenericOptions column name"),
-                            &options,
-                        )?;
-                    }
-                }
-                // Phase-2 arm only fires for partitioned relkinds (no
-                // storage); phase 3 does the work otherwise.
-                AlterTableType::AT_SetTableSpace => {
-                    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
-                        || rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX
-                    {
-                        ATExecSetTableSpaceNoStorage(
-                            mcx,
-                            &rel,
-                            wqueue[tabidx].new_tablespace,
-                        )?;
-                    }
-                }
-                AlterTableType::AT_SetAccessMethod => {
-                    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
-                        && wqueue[tabidx].chg_access_method
-                    {
-                        ATExecSetAccessMethodNoStorage(
-                            mcx,
-                            &rel,
-                            wqueue[tabidx].new_access_method,
-                        )?;
-                    }
-                }
+                // C threads each ATExec* return address; only the subcmd count is
+                // observable through the ported SRF surface.
+                event_trigger::EventTriggerCollectAlterTableSubcmd(pg_depend::ObjectAddress::set(
+                    RELATION_RELATION_ID,
+                    wqueue[tabidx].relid,
+                ));
+                rel.close(NoLock)?;
+                xact::CommandCounterIncrement()?;
             }
-            // C threads each ATExec* return address; only the subcmd count is
-            // observable through the ported SRF surface.
-            event_trigger::EventTriggerCollectAlterTableSubcmd(
-                pg_depend::ObjectAddress::set(RELATION_RELATION_ID, wqueue[tabidx].relid),
-            );
-            rel.close(NoLock)?;
-            xact::CommandCounterIncrement()?;
-        }
-        if pass == AT_PASS_ALTER_TYPE || pass == AT_PASS_SET_EXPRESSION {
-            ATPostAlterTypeCleanup(mcx, wqueue, tabidx)?;
-        }
-        tabidx += 1;
+            if pass == AT_PASS_ALTER_TYPE || pass == AT_PASS_SET_EXPRESSION {
+                ATPostAlterTypeCleanup(mcx, wqueue, tabidx)?;
+            }
+            tabidx += 1;
         }
     }
     // AlterTableCreateToastTable: a no-op when a toast table already exists
@@ -1868,7 +2024,11 @@ fn ATRewriteTableOne<'mcx>(
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
         }
-        if old_heap.rd_options.as_ref().and_then(|o| o.std()).is_some_and(|o| o.user_catalog_table)
+        if old_heap
+            .rd_options
+            .as_ref()
+            .and_then(|o| o.std())
+            .is_some_and(|o| o.user_catalog_table)
         {
             return Err(Box::new(
                 PgError::new(
@@ -2002,7 +2162,11 @@ fn ATRewriteTable<'mcx>(
     }
     let mut newval_states: PgVec<
         'mcx,
-        (AttrNumber, bool, mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>),
+        (
+            AttrNumber,
+            bool,
+            mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>,
+        ),
     > = PgVec::new_in(mcx);
     for nv in tab.newvals.iter() {
         let mut state = execexpr::exec_init_expr(mcx, Some(nv.expr), execexpr::ParamBind::NONE)?
@@ -2035,8 +2199,7 @@ fn ATRewriteTable<'mcx>(
         // constraints are not verified.
         for i in 0..new_tupdesc.natts as usize {
             let att = new_tupdesc.attr(i);
-            if new_tupdesc.compact_attr(i).attnullability == ATTNULLABLE_VALID
-                && !att.attisdropped
+            if new_tupdesc.compact_attr(i).attnullability == ATTNULLABLE_VALID && !att.attisdropped
             {
                 if att.attgenerated == b'v' as i8 {
                     notnull_virtual_attrs.push(att.attnum);
@@ -2113,7 +2276,10 @@ fn ATRewriteTable<'mcx>(
             }
         }
         let (mycid, ti_options) = if newrel.is_some() {
-            (xact::GetCurrentCommandId(true)?, tableam_vocab::TABLE_INSERT_SKIP_FSM)
+            (
+                xact::GetCurrentCommandId(true)?,
+                tableam_vocab::TABLE_INSERT_SKIP_FSM,
+            )
         } else {
             (0, 0)
         };
@@ -2356,9 +2522,7 @@ fn ATExecAddColumn<'mcx>(
     }
 
     if col_def.inhcount > 0 {
-        if let Some((childattnum, childinhcount)) =
-            attname_lookup(mcx, myrelid, colname, false)?
-        {
+        if let Some((childattnum, childinhcount)) = attname_lookup(mcx, myrelid, colname, false)? {
             let childatt = *rel.rd_att.attr(childattnum as usize - 1);
             let tn = col_def
                 .typeName
@@ -2413,13 +2577,14 @@ fn ATExecAddColumn<'mcx>(
                 mcx,
                 myrelid,
                 childattnum,
-                &[(Anum_pg_attribute_attinhcount, Datum::from_i16(childinhcount + 1))],
+                &[(
+                    Anum_pg_attribute_attinhcount,
+                    Datum::from_i16(childinhcount + 1),
+                )],
             )?;
             elog_seams::ereport_msg::call(
                 NOTICE,
-                format!(
-                    "merging definition of column \"{colname}\" for child \"{relname}\""
-                ),
+                format!("merging definition of column \"{colname}\" for child \"{relname}\""),
                 None,
             )?;
             xact::CommandCounterIncrement()?;
@@ -2500,8 +2665,7 @@ fn ATExecAddColumn<'mcx>(
         return Err(Box::new(
             PgError::new(
                 ERROR,
-                "cannot recursively add identity column to table that has child tables"
-                    .to_string(),
+                "cannot recursively add identity column to table that has child tables".to_string(),
             )
             .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
         ));
@@ -2536,8 +2700,8 @@ fn ATExecAddColumn<'mcx>(
     tupdesc.attr_mut(0).attnum = newattnum as AttrNumber;
     let attribute = tupdesc.attrs[0];
     {
-        let attname = core::str::from_utf8(attribute.attname.name_str())
-            .expect("non-UTF-8 attname");
+        let attname =
+            core::str::from_utf8(attribute.attname.name_str()).expect("non-UTF-8 attname");
         let mut rowtypes: mcx::PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
         rowtypes.push(rel.rd_rel.reltype);
         catalog_heap::CheckAttributeType(
@@ -2546,7 +2710,11 @@ fn ATExecAddColumn<'mcx>(
             attribute.atttypid,
             attribute.attcollation,
             &mut rowtypes,
-            if attribute.attgenerated == b'v' as i8 { catalog_heap::CHKATYPE_IS_VIRTUAL } else { 0 },
+            if attribute.attgenerated == b'v' as i8 {
+                catalog_heap::CHKATYPE_IS_VIRTUAL
+            } else {
+                0
+            },
         )?;
     }
 
@@ -2611,8 +2779,7 @@ fn ATExecAddColumn<'mcx>(
         )?;
     }
 
-    let myself =
-        pg_depend::ObjectAddress::sub_set(RELATION_RELATION_ID, myrelid, newattnum);
+    let myself = pg_depend::ObjectAddress::sub_set(RELATION_RELATION_ID, myrelid, newattnum);
     let referenced = pg_depend::ObjectAddress::set(TYPE_RELATION_ID, attribute.atttypid);
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, pg_depend::DependencyType::Normal)?;
     if attribute.attcollation != InvalidOid && attribute.attcollation != DEFAULT_COLLATION_OID {
@@ -2629,8 +2796,11 @@ fn ATExecAddColumn<'mcx>(
     let children = pg_inherits::find_inheritance_children(mcx, myrelid, lockmode)?;
     if !children.is_empty() && !recurse {
         return Err(Box::new(
-            PgError::new(ERROR, "column must be added to child tables too".to_string())
-                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            PgError::new(
+                ERROR,
+                "column must be added to child tables too".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
         ));
     }
     // Children see the column as singly inherited; the clone mirrors C's
@@ -2702,7 +2872,10 @@ fn add_column_phase3_fill<'mcx>(
         let seqid = catalog_namespace::RangeVarGetRelid(&rv, NoLock, false)?;
         Some(Node::mk(
             mcx,
-            types_nodes::primnodes::NextValueExpr { seqid, typeId: attribute.atttypid },
+            types_nodes::primnodes::NextValueExpr {
+                seqid,
+                typeId: attribute.atttypid,
+            },
         )?)
     } else {
         // build_column_default falls back to the column type's own default
@@ -2713,8 +2886,7 @@ fn add_column_phase3_fill<'mcx>(
         // NULL::basetype through CoerceToDomain so phase 3 evaluates the
         // domain constraints (C keeps the historical only-if-rows failure).
         let mut base_type_mod = attribute.atttypmod;
-        let base_type_id =
-            lsyscache::getBaseTypeAndTypmod(attribute.atttypid, &mut base_type_mod)?;
+        let base_type_id = lsyscache::getBaseTypeAndTypmod(attribute.atttypid, &mut base_type_mod)?;
         let base_type_coll = lsyscache::get_typcollation(base_type_id)?;
         let (typlen, typbyval) = lsyscache::get_typlenbyval(base_type_id)?;
         let nullconst = Node::mk(
@@ -2760,11 +2932,14 @@ fn add_column_phase3_fill<'mcx>(
             && !has_domain_constraints
             && !clauses::contain_volatile_functions(defval)?
         {
-            let mut state =
-                execexpr::exec_init_expr(mcx, Some(defval), execexpr::ParamBind::NONE)?
-                    .expect("non-nil default expression");
+            let mut state = execexpr::exec_init_expr(mcx, Some(defval), execexpr::ParamBind::NONE)?
+                .expect("non-nil default expression");
             state.arm_result_mcx(mcx);
-            let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
+            let mut slots = execexpr::EvalSlots {
+                scan: None,
+                inner: None,
+                outer: None,
+            };
             let r = execexpr::exec_eval_expr(&mut state, &mut slots)?;
             if !r.isnull {
                 catalog_heap::StoreAttrMissingVal(mcx, rel, attnum, r.value)?;
@@ -2829,7 +3004,11 @@ pub(crate) fn attname_lookup<'mcx>(
     colname: &str,
     include_dropped: bool,
 ) -> PgResult<Option<(i16, i16)>> {
-    let attrel = table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, types_rel::AccessShareLock)?;
+    let attrel = table::table_open(
+        mcx,
+        types_core::ATTRIBUTE_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
     let key = oid_scankey(1, relid);
     let mut scan =
         genam::systable_beginscan(mcx, &attrel, AttributeRelidNumIndexId, true, None, &[key])?;
@@ -2839,21 +3018,17 @@ pub(crate) fn attname_lookup<'mcx>(
         let mut isnull = false;
         // SAFETY (each): fixed NOT NULL pg_attribute columns under its descriptor.
         let name = unsafe { types_tuple::heap_getattr(tup, 2, desc, &mut isnull) };
-        let name = unsafe {
-            core::slice::from_raw_parts(name.as_usize() as *const u8, 64)
-        };
+        let name = unsafe { core::slice::from_raw_parts(name.as_usize() as *const u8, 64) };
         let len = name.iter().position(|&b| b == 0).unwrap_or(64);
         if &name[..len] != colname.as_bytes() {
             continue;
         }
-        let dropped =
-            unsafe { types_tuple::heap_getattr(tup, 17, desc, &mut isnull) }.as_bool();
+        let dropped = unsafe { types_tuple::heap_getattr(tup, 17, desc, &mut isnull) }.as_bool();
         if dropped && !include_dropped {
             continue;
         }
         let attnum = unsafe { types_tuple::heap_getattr(tup, 5, desc, &mut isnull) }.as_i16();
-        let inhcount =
-            unsafe { types_tuple::heap_getattr(tup, 19, desc, &mut isnull) }.as_i16();
+        let inhcount = unsafe { types_tuple::heap_getattr(tup, 19, desc, &mut isnull) }.as_i16();
         found = Some((attnum, inhcount));
         break;
     }
@@ -2899,9 +3074,7 @@ fn ATExecDropColumn<'mcx>(
             return Err(Box::new(
                 PgError::new(
                     ERROR,
-                    format!(
-                        "column \"{col_name}\" of relation \"{relname}\" does not exist"
-                    ),
+                    format!("column \"{col_name}\" of relation \"{relname}\" does not exist"),
                 )
                 .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
             ));
@@ -2922,8 +3095,11 @@ fn ATExecDropColumn<'mcx>(
     }
     if attinhcount > 0 && !recursing {
         return Err(Box::new(
-            PgError::new(ERROR, format!("cannot drop inherited column \"{col_name}\""))
-                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            PgError::new(
+                ERROR,
+                format!("cannot drop inherited column \"{col_name}\""),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
         ));
     }
     let mut is_expr = false;
@@ -2994,7 +3170,10 @@ fn ATExecDropColumn<'mcx>(
                         mcx,
                         childrelid,
                         childattnum,
-                        &[(Anum_pg_attribute_attinhcount, Datum::from_i16(childinhcount - 1))],
+                        &[(
+                            Anum_pg_attribute_attinhcount,
+                            Datum::from_i16(childinhcount - 1),
+                        )],
                     )?;
                     xact::CommandCounterIncrement()?;
                 }
@@ -3004,7 +3183,10 @@ fn ATExecDropColumn<'mcx>(
                     childrelid,
                     childattnum,
                     &[
-                        (Anum_pg_attribute_attinhcount, Datum::from_i16(childinhcount - 1)),
+                        (
+                            Anum_pg_attribute_attinhcount,
+                            Datum::from_i16(childinhcount - 1),
+                        ),
                         (Anum_pg_attribute_attislocal, Datum::from_bool(true)),
                     ],
                 )?;
@@ -3127,7 +3309,11 @@ fn RemoveAttrDefault<'mcx>(
         mcx,
         &object,
         types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
-        if internal { catalog_dependency::PERFORM_DELETION_INTERNAL } else { 0 },
+        if internal {
+            catalog_dependency::PERFORM_DELETION_INTERNAL
+        } else {
+            0
+        },
     )
 }
 
@@ -3160,7 +3346,13 @@ fn ATExecSetExpression<'mcx>(
         ));
     }
     if attgenerated == b'v' as i8
-        && rel.rd_att.constr.as_deref().map(|c| c.num_check).unwrap_or(0) > 0
+        && rel
+            .rd_att
+            .constr
+            .as_deref()
+            .map(|c| c.num_check)
+            .unwrap_or(0)
+            > 0
     {
         return Err(Box::new(
             PgError::new(
@@ -3236,7 +3428,11 @@ fn ATExecSetExpression<'mcx>(
             .expect("generated column has a generation expression");
         let defval = clauses::eval_const_expressions(mcx, defval)?;
         rel2.close(NoLock)?;
-        tab.newvals.push(NewColumnValue { attnum, expr: defval, is_generated: true });
+        tab.newvals.push(NewColumnValue {
+            attnum,
+            expr: defval,
+            is_generated: true,
+        });
         tab.rewrite |= AT_REWRITE_DEFAULT_VAL;
     }
 
@@ -3446,7 +3642,15 @@ fn ATExecAddIdentity<'mcx>(
         .expect("AT_AddIdentity ColumnDef")
         .as_variant::<ColumnDef>()
         .expect("ColumnDef");
-    add_identity_internal(mcx, rel, col_name, cdef.identity as i8, lockmode, cmd.recurse, false)
+    add_identity_internal(
+        mcx,
+        rel,
+        col_name,
+        cdef.identity as i8,
+        lockmode,
+        cmd.recurse,
+        false,
+    )
 }
 
 fn add_identity_internal<'mcx>(
@@ -3605,17 +3809,15 @@ fn set_identity_internal<'mcx>(
     let mut generated_el: Option<&types_nodes::parsenodes::DefElem<'_>> = None;
     if let Some(defnode) = cmd.def {
         for opt in defnode.as_list().expect("DefElem list").iter() {
-            let defel =
-                opt.as_variant::<types_nodes::parsenodes::DefElem>().expect("DefElem");
+            let defel = opt
+                .as_variant::<types_nodes::parsenodes::DefElem>()
+                .expect("DefElem");
             match defel.defname.expect("defname") {
                 "generated" => {
                     if generated_el.is_some() {
                         return Err(Box::new(
-                            PgError::new(
-                                ERROR,
-                                "conflicting or redundant options".to_string(),
-                            )
-                            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+                            PgError::new(ERROR, "conflicting or redundant options".to_string())
+                                .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
                         ));
                     }
                     generated_el = Some(defel);
@@ -3634,7 +3836,12 @@ fn set_identity_internal<'mcx>(
         return Err(not_an_identity_column(col_name, &relname));
     }
     if let Some(g) = generated_el {
-        let v = g.arg.expect("generated arg").as_integer().expect("Integer").ival;
+        let v = g
+            .arg
+            .expect("generated arg")
+            .as_integer()
+            .expect("Integer")
+            .ival;
         update_pg_attribute(
             mcx,
             rel.rd_id,
@@ -3833,8 +4040,11 @@ fn ATPrepChangePersistence<'mcx>(
         return Err(cannot_unlog_published_table(rel.name()));
     }
 
-    let pg_con =
-        table::table_open(mcx, types_core::CONSTRAINT_RELATION_ID, types_rel::AccessShareLock)?;
+    let pg_con = table::table_open(
+        mcx,
+        types_core::CONSTRAINT_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
     let keyattno = if to_logged {
         pg_constraint::Anum_pg_constraint_conrelid
     } else {
@@ -3892,8 +4102,8 @@ fn ATPrepChangePersistence<'mcx>(
         }
         let foreignrel =
             relation_seams::relation_open::call(mcx, foreignrelid, types_rel::AccessShareLock)?;
-        let foreign_permanent = foreignrel.rd_rel.relpersistence
-            == types_core::catalog::RELPERSISTENCE_PERMANENT;
+        let foreign_permanent =
+            foreignrel.rd_rel.relpersistence == types_core::catalog::RELPERSISTENCE_PERMANENT;
         let fname = foreignrel.name().to_string();
         if to_logged && !foreign_permanent {
             return Err(Box::new(
@@ -4042,8 +4252,7 @@ fn check_notnull_droppable<'mcx>(
     // guards see only what RelationGetIndexList validated (indisvalid etc.).
     // Resolved through the CURRENT cache entry — `rel` may hold a
     // rebuilt-away predecessor whose rd_indexlist stays None.
-    let (pkindex, replidindex) =
-        relcache::indexlist::RelationGetPkReplidIndexes(mcx, rel.rd_id)?;
+    let (pkindex, replidindex) = relcache::indexlist::RelationGetPkReplidIndexes(mcx, rel.rd_id)?;
     if pkindex != InvalidOid {
         let (_, _, keys) = pg_index_shape(mcx, pkindex)?;
         if keys.contains(&attnum) {
@@ -4059,9 +4268,7 @@ fn check_notnull_droppable<'mcx>(
             return Err(Box::new(
                 PgError::new(
                     ERROR,
-                    format!(
-                        "column \"{col_name}\" is in index used as replica identity"
-                    ),
+                    format!("column \"{col_name}\" is in index used as replica identity"),
                 )
                 .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
             ));
@@ -4090,7 +4297,11 @@ fn pg_index_shape_full<'mcx>(
     mcx: Mcx<'mcx>,
     indexoid: Oid,
 ) -> PgResult<(bool, bool, PgVec<'mcx, AttrNumber>, usize)> {
-    let pg_index = table::table_open(mcx, types_core::INDEX_RELATION_ID, types_rel::AccessShareLock)?;
+    let pg_index = table::table_open(
+        mcx,
+        types_core::INDEX_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
     let key = oid_scankey(1, indexoid);
     let mut scan =
         genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
@@ -4101,7 +4312,10 @@ fn pg_index_shape_full<'mcx>(
     let mut get = |attnum: usize| {
         // SAFETY: fixed NOT NULL pg_index columns under its descriptor.
         let d = unsafe { types_tuple::heap_getattr(tup, attnum as i32, desc, &mut isnull) };
-        assert!(!isnull, "unexpected null pg_index attnum {attnum} for index {indexoid}");
+        assert!(
+            !isnull,
+            "unexpected null pg_index attnum {attnum} for index {indexoid}"
+        );
         d
     };
     let nkeyatts = get(Anum_pg_index_indnkeyatts).as_i16();
@@ -4181,7 +4395,10 @@ pub(crate) fn ATExecSetNotNull<'mcx>(
             pg_constraint::update_constraint_fields(
                 mcx,
                 con.oid,
-                &[(pg_constraint::Anum_pg_constraint_conislocal, Datum::from_bool(true))],
+                &[(
+                    pg_constraint::Anum_pg_constraint_conislocal,
+                    Datum::from_bool(true),
+                )],
             )?;
         } else if !con.convalidated {
             return ATExecValidateConstraint(
@@ -4200,9 +4417,12 @@ pub(crate) fn ATExecSetNotNull<'mcx>(
     if !recurse && find_inheritance_children_exist(mcx, rel.rd_id)? {
         if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
             return Err(Box::new(
-                PgError::new(ERROR, "constraint must be added to child tables too".to_string())
-                    .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION)
-                    .with_hint("Do not specify the ONLY keyword.".to_string()),
+                PgError::new(
+                    ERROR,
+                    "constraint must be added to child tables too".to_string(),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION)
+                .with_hint("Do not specify the ONLY keyword.".to_string()),
             ));
         }
         is_no_inherit = true;
@@ -4222,7 +4442,16 @@ pub(crate) fn ATExecSetNotNull<'mcx>(
             name_storage.as_str()
         }
     };
-    create_notnull_constraint(mcx, wqueue, rel, attnum, con_name, !recursing, is_no_inherit, true)?;
+    create_notnull_constraint(
+        mcx,
+        wqueue,
+        rel,
+        attnum,
+        con_name,
+        !recursing,
+        is_no_inherit,
+        true,
+    )?;
     if recurse {
         let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
         for &childoid in children.iter() {
@@ -4276,7 +4505,11 @@ fn create_notnull_constraint<'mcx>(
     crate::constraints::set_relation_num_checks(
         mcx,
         rel,
-        rel.rd_att.constr.as_deref().map(|c| c.num_check as i16).unwrap_or(0),
+        rel.rd_att
+            .constr
+            .as_deref()
+            .map(|c| c.num_check as i16)
+            .unwrap_or(0),
     )?;
     // An invalid constraint sets attnotnull without queueing verification.
     set_attnotnull(mcx, wqueue, rel, attnum, initially_valid)?;
@@ -4300,19 +4533,23 @@ fn ATPrepAddPrimaryKey<'mcx>(
     recurse: bool,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
-    let Some(defnode) = cmd.def else { return Ok(()) };
-    let Some(constr) = defnode.as_variant::<Constraint>() else { return Ok(()) };
+    let Some(defnode) = cmd.def else {
+        return Ok(());
+    };
+    let Some(constr) = defnode.as_variant::<Constraint>() else {
+        return Ok(());
+    };
     if constr.contype != ConstrType::CONSTR_PRIMARY {
         return Ok(());
     }
     let mut children: Option<PgVec<'mcx, Oid>> = None;
     for keynode in constr.keys.iter() {
         let key = keynode.as_string().expect("constraint keys").sval;
-        let attnum = attname_lookup(mcx, rel.rd_id, key, false)?.map(|(a, _)| a).unwrap_or(0);
+        let attnum = attname_lookup(mcx, rel.rd_id, key, false)?
+            .map(|(a, _)| a)
+            .unwrap_or(0);
         if attnum > 0 {
-            if let Some(con) =
-                pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?
-            {
+            if let Some(con) = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)? {
                 verify_notnull_pk_compatible(&con, key, rel.name())?;
                 continue;
             }
@@ -4321,15 +4558,15 @@ fn ATPrepAddPrimaryKey<'mcx>(
             // ONLY: verify every direct child already carries a compatible
             // not-null constraint (children searched once).
             if children.is_none() {
-                children =
-                    Some(pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?);
+                children = Some(pg_inherits::find_inheritance_children(
+                    mcx, rel.rd_id, lockmode,
+                )?);
             }
             for &childrelid in children.as_ref().expect("children fetched").iter() {
                 let child_name = lsyscache::relation::get_rel_name(mcx, childrelid)?
                     .map(|s| s.as_str().to_string())
                     .unwrap_or_default();
-                let Some(con) = find_notnull_constraint_by_colname(mcx, childrelid, key)?
-                else {
+                let Some(con) = find_notnull_constraint_by_colname(mcx, childrelid, key)? else {
                     return Err(Box::new(PgError::new(
                         ERROR,
                         format!(
@@ -4365,7 +4602,10 @@ fn verify_notnull_pk_compatible(
     let characteristic = if con.connoinherit {
         Some(("NO INHERIT", "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT."))
     } else if !con.convalidated {
-        Some(("NOT VALID", "You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT."))
+        Some((
+            "NOT VALID",
+            "You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.",
+        ))
     } else {
         None
     };
@@ -4429,9 +4669,10 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
     debug_assert!(cooked.len() <= 1);
     for c in cooked.iter() {
         if !c.skip_validation && c.contype != ConstrType::CONSTR_NOTNULL {
-            wqueue[tabidx]
-                .constraints
-                .push(NewConstraint { name: c.name, qual: c.expr.expect("CHECK expr") });
+            wqueue[tabidx].constraints.push(NewConstraint {
+                name: c.name,
+                qual: c.expr.expect("CHECK expr"),
+            });
         }
         if conname_was_none {
             let assigned = c.name;
@@ -4455,14 +4696,21 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
     if cooked.is_empty() {
         return Ok(());
     }
-    if defnode.as_variant::<Constraint>().expect("Constraint").is_no_inherit {
+    if defnode
+        .as_variant::<Constraint>()
+        .expect("Constraint")
+        .is_no_inherit
+    {
         return Ok(());
     }
     let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
     if !recurse && !children.is_empty() {
         return Err(Box::new(
-            PgError::new(ERROR, "constraint must be added to child tables too".to_string())
-                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            PgError::new(
+                ERROR,
+                "constraint must be added to child tables too".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
         ));
     }
     for &childrelid in children.iter() {
@@ -4495,12 +4743,8 @@ fn NotNullImpliedByRelConstraints<'mcx>(
 ) -> PgResult<bool> {
     let att = rel.rd_att.attr(attnum as usize - 1);
     let nnulltest = crate::attach::make_notnull_test(mcx, att)?;
-    if crate::attach::ConstraintImpliedByRelConstraint(
-        mcx,
-        rel,
-        &[nnulltest],
-        PgVec::new_in(mcx),
-    )? {
+    if crate::attach::ConstraintImpliedByRelConstraint(mcx, rel, &[nnulltest], PgVec::new_in(mcx))?
+    {
         elog_seams::ereport::call(PgError::new(
             types_error::DEBUG1,
             format!(
@@ -4622,8 +4866,9 @@ fn dropconstraint_internal<'mcx>(
     if con.contype == pg_constraint::CONSTRAINT_NOTNULL {
         let attnum = con.notnull_attnum;
         let att = rel.rd_att.attr(attnum as usize - 1);
-        let col_name =
-            core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8").to_string();
+        let col_name = core::str::from_utf8(att.attname.name_str())
+            .expect("attname UTF-8")
+            .to_string();
         colname = Some(col_name.clone());
         check_notnull_droppable(mcx, rel, attnum, &col_name)?;
         if att.attidentity != 0 {
@@ -4673,7 +4918,9 @@ fn dropconstraint_internal<'mcx>(
         let childrel = table::table_open(mcx, childrelid, NoLock)?;
         catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
         let childcon = if con.contype == pg_constraint::CONSTRAINT_NOTNULL {
-            let col = colname.as_deref().expect("colname saved for NOT NULL constraint");
+            let col = colname
+                .as_deref()
+                .expect("colname saved for NOT NULL constraint");
             match find_notnull_constraint_by_colname(mcx, childrelid, col)? {
                 Some(nn) => nn_con_shape(&nn),
                 None => panic!(
@@ -4729,9 +4976,15 @@ fn dropconstraint_internal<'mcx>(
         } else {
             let newcount = childcon.coninhcount - 1;
             let mut fields: PgVec<'_, (AttrNumber, Datum)> = PgVec::new_in(mcx);
-            fields.push((pg_constraint::Anum_pg_constraint_coninhcount, Datum::from_i16(newcount)));
+            fields.push((
+                pg_constraint::Anum_pg_constraint_coninhcount,
+                Datum::from_i16(newcount),
+            ));
             if newcount == 0 {
-                fields.push((pg_constraint::Anum_pg_constraint_conislocal, Datum::from_bool(true)));
+                fields.push((
+                    pg_constraint::Anum_pg_constraint_conislocal,
+                    Datum::from_bool(true),
+                ));
             }
             pg_constraint::update_constraint_fields(mcx, childcon.oid, &fields)?;
             xact::CommandCounterIncrement()?;
@@ -4763,7 +5016,9 @@ fn ATExecAddIndex<'mcx>(
         .expect("IndexStmt")
         .oldNumber;
     let skip_build = tab.rewrite > 0 || old_number != 0;
-    indexcmds_seams::define_index_for_alter::call(mcx, rel.rd_id, stmt_node, is_rebuild, skip_build)?;
+    indexcmds_seams::define_index_for_alter::call(
+        mcx, rel.rd_id, stmt_node, is_rebuild, skip_build,
+    )?;
     Ok(())
 }
 
@@ -4779,8 +5034,11 @@ fn ATExecSetStatistics<'mcx>(
         || rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX;
     if !is_index && cmd.name.is_none() {
         return Err(Box::new(
-            PgError::new(ERROR, "cannot refer to non-index column by number".to_string())
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            PgError::new(
+                ERROR,
+                "cannot refer to non-index column by number".to_string(),
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }
     let relname = rel.name().to_string();
@@ -4914,14 +5172,20 @@ fn ATExecSetStorage<'mcx>(
         mcx,
         rel.rd_id,
         attnum,
-        &[(Anum_pg_attribute_attstorage, Datum::from_i8(newstorage as i8))],
+        &[(
+            Anum_pg_attribute_attstorage,
+            Datum::from_i8(newstorage as i8),
+        )],
     )?;
     objectaccess::InvokeObjectPostAlterHook(RELATION_RELATION_ID, rel.rd_id, attnum as i32)?;
     set_index_storage_properties(
         mcx,
         rel,
         attnum,
-        &[(Anum_pg_attribute_attstorage, Datum::from_i8(newstorage as i8))],
+        &[(
+            Anum_pg_attribute_attstorage,
+            Datum::from_i8(newstorage as i8),
+        )],
     )
 }
 
@@ -5002,9 +5266,7 @@ fn ATExecSetOptions<'mcx>(
     } else {
         let p = old.as_usize() as *const u8;
         // SAFETY: non-null text[] varlena; live through the scan.
-        Some(unsafe {
-            core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p))
-        })
+        Some(unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) })
     };
     let new_options =
         reloptions::transformRelOptions(mcx, old_options, options, None, &[], false, is_reset)?;
@@ -5019,8 +5281,7 @@ fn ATExecSetOptions<'mcx>(
     repl.resize(natts, false);
     match &new_options {
         Some(img) => {
-            repl_values[Anum_pg_attribute_attoptions - 1] =
-                Datum::from_usize(img.as_ptr() as usize)
+            repl_values[Anum_pg_attribute_attoptions - 1] = Datum::from_usize(img.as_ptr() as usize)
         }
         None => repl_isnull[Anum_pg_attribute_attoptions - 1] = true,
     }
@@ -5128,7 +5389,10 @@ fn ATExecAddConstraint<'mcx>(
 #[inline(never)]
 pub(crate) fn unrecognized_constraint_type(contype: ConstrType) -> Box<PgError> {
     // elog(ERROR, "unrecognized constraint type: %d"): catchable XX000.
-    Box::new(PgError::error(format!("unrecognized constraint type: {}", contype as i32)))
+    Box::new(PgError::error(format!(
+        "unrecognized constraint type: {}",
+        contype as i32
+    )))
 }
 
 // elog(ERROR, "invalid ALTER action attempted on relation \"%s\"")
@@ -5186,9 +5450,7 @@ fn ATExecValidateConstraint<'mcx>(
         return Err(Box::new(
             PgError::new(
                 ERROR,
-                format!(
-                    "constraint \"{constr_name}\" of relation \"{relname}\" does not exist"
-                ),
+                format!("constraint \"{constr_name}\" of relation \"{relname}\" does not exist"),
             )
             .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
         ));
@@ -5235,19 +5497,30 @@ fn ATExecValidateConstraint<'mcx>(
             let qual = readfuncs::stringToNode(mcx, conbin.as_str())?;
             let qual = planner::prepjointree::expand_generated_columns_in_expr(mcx, qual, rel, 1)?;
             let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
-            wqueue[tabidx]
-                .constraints
-                .push(NewConstraint { name: str_arena(mcx, con.name_str())?, qual });
+            wqueue[tabidx].constraints.push(NewConstraint {
+                name: str_arena(mcx, con.name_str())?,
+                qual,
+            });
             inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
         }
         _ => {
             let colname = core::str::from_utf8(
-                rel.rd_att.attr(con.notnull_attnum as usize - 1).attname.name_str(),
+                rel.rd_att
+                    .attr(con.notnull_attnum as usize - 1)
+                    .attname
+                    .name_str(),
             )
             .expect("attname UTF-8")
             .to_string();
             validate_constraint_children(
-                mcx, wqueue, rel, &con, Some(&colname), recurse, recursing, lockmode,
+                mcx,
+                wqueue,
+                rel,
+                &con,
+                Some(&colname),
+                recurse,
+                recursing,
+                lockmode,
             )?;
             // QueueNNConstraintValidation: attnotnull was set by the invalid
             // ADD, so set_attnotnull reduces to its relcache-inval arm.
@@ -5318,9 +5591,7 @@ fn validate_constraint_children<'mcx>(
                 }
                 let childrel = table::table_open(mcx, childoid, NoLock)?;
                 let conname = childcon.name_str().to_string();
-                ATExecValidateConstraint(
-                    mcx, wqueue, &childrel, &conname, false, true, lockmode,
-                )?;
+                ATExecValidateConstraint(mcx, wqueue, &childrel, &conname, false, true, lockmode)?;
                 childrel.close(NoLock)?;
             }
         }
@@ -5345,7 +5616,11 @@ fn ATPrepAlterColumnType<'mcx>(
     let relname = rel.name().to_string();
     let defnode = cmd.def.expect("AT_AlterColumnType ColumnDef");
     let def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
-    let tn = def.typeName.expect("ColumnDef.typeName").as_variant::<TypeName>().expect("TypeName");
+    let tn = def
+        .typeName
+        .expect("ColumnDef.typeName")
+        .as_variant::<TypeName>()
+        .expect("TypeName");
 
     let with_pos = |e: PgError, location: i32| -> Box<PgError> {
         let pos = parser_small1::parser_errposition_source(
@@ -5353,18 +5628,31 @@ fn ATPrepAlterColumnType<'mcx>(
             location,
             mbutils::GetDatabaseEncoding(),
         );
-        Box::new(if pos > 0 { e.with_cursor_position(pos) } else { e })
+        Box::new(if pos > 0 {
+            e.with_cursor_position(pos)
+        } else {
+            e
+        })
     };
 
     if rel_reloftype(rel.rd_id)? != InvalidOid && !recursing {
-        return Err(with_pos(*typed_table_err("cannot alter column type of typed table"), def.location));
+        return Err(with_pos(
+            *typed_table_err("cannot alter column type of typed table"),
+            def.location,
+        ));
     }
 
     let Some((attnum, attinhcount)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
-        return Err(with_pos(*undefined_column(col_name, &relname), def.location));
+        return Err(with_pos(
+            *undefined_column(col_name, &relname),
+            def.location,
+        ));
     };
     if attnum <= 0 {
-        return Err(with_pos(*cannot_alter_system_column(col_name), def.location));
+        return Err(with_pos(
+            *cannot_alter_system_column(col_name),
+            def.location,
+        ));
     }
     let att = *rel.rd_att.attr(attnum as usize - 1);
     if att.attgenerated != 0 && (def.raw_default.is_some() || def.cooked_default.is_some()) {
@@ -5380,8 +5668,11 @@ fn ATPrepAlterColumnType<'mcx>(
     }
     if attinhcount > 0 && !recursing {
         return Err(with_pos(
-            PgError::new(ERROR, format!("cannot alter inherited column \"{col_name}\""))
-                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            PgError::new(
+                ERROR,
+                format!("cannot alter inherited column \"{col_name}\""),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
             def.location,
         ));
     }
@@ -5435,7 +5726,11 @@ fn ATPrepAlterColumnType<'mcx>(
             targettype,
             targetcollid,
             &mut rowtypes,
-            if att.attgenerated == b'v' as i8 { catalog_heap::CHKATYPE_IS_VIRTUAL } else { 0 },
+            if att.attgenerated == b'v' as i8 {
+                catalog_heap::CHKATYPE_IS_VIRTUAL
+            } else {
+                0
+            },
         )?;
     }
 
@@ -5443,118 +5738,125 @@ fn ATPrepAlterColumnType<'mcx>(
     // rewrite of the column itself.
     let tab_relkind = wqueue[tabidx].relkind;
     if att.attgenerated != b'v' as i8
-        && (tab_relkind == RELKIND_RELATION
-            || tab_relkind == types_rel::RELKIND_PARTITIONED_TABLE)
+        && (tab_relkind == RELKIND_RELATION || tab_relkind == types_rel::RELKIND_PARTITIONED_TABLE)
     {
-    let using = match (def.raw_default, def.cooked_default) {
-        (Some(raw), _) => {
-            let nsitem = parse_relation::addRangeTableEntryForRelation(
-                mcx,
-                &mut pstate,
-                rel,
-                types_rel::AccessShareLock,
-                None,
-                false,
-                true,
-            )?;
-            parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
-            let transformed = parse_expr::transformExpr(
-                mcx,
-                &mut pstate,
-                raw,
-                parser_small1::ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM,
-            )?;
-            // C transforms USING once against the altered table and stores
-            // it in cooked_default (parse_utilcmd.c:3643-3648); recursion
-            // maps the transformed tree per child (tablecmds.c:14626-14646,
-            // incl. the whole-row reject) — never re-parses raw against a
-            // child whose column set differs.
-            // SAFETY: defnode is this command's own tree; the `def` shared
-            // ref is not used after this point in this scope's reads of
-            // raw/cooked_default.
-            unsafe {
-                defnode
-                    .with_mut::<ColumnDef, _>(|d| d.cooked_default = Some(transformed))
-                    .expect("ColumnDef");
-            }
-            Some(transformed)
-        }
-        (None, Some(cooked)) => Some(cooked),
-        (None, None) => None,
-    };
-    let pre_transform = match using {
-        Some(t) => t,
-        None => Node::mk(
-            mcx,
-            types_nodes::primnodes::Var {
-                varno: 1,
-                varattno: attnum,
-                vartype: att.atttypid,
-                vartypmod: att.atttypmod,
-                varcollid: att.attcollation,
-                varnosyn: 1,
-                varattnosyn: attnum,
-                location: -1,
-                ..Default::default()
-            },
-        )?,
-    };
-    let transform = match coerce::coerce_to_target_type(
-        mcx,
-        &mut pstate,
-        pre_transform,
-        parse_expr::expr_type(pre_transform),
-        targettype,
-        targettypmod,
-        coerce::CoercionContext::COERCION_ASSIGNMENT,
-        types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
-        -1,
-    )? {
-        Some(t) => t,
-        None => {
-            let want = format_type::format_type_be(targettype).unwrap_or_else(|_| "???".into());
-            let e = if using.is_some() {
-                PgError::new(
-                    ERROR,
-                    format!(
-                        "result of USING clause for column \"{col_name}\" cannot be cast \
-                         automatically to type {want}"
-                    ),
-                )
-                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
-                .with_hint("You might need to add an explicit cast.".to_string())
-            } else {
-                let e = PgError::new(
-                    ERROR,
-                    format!("column \"{col_name}\" cannot be cast automatically to type {want}"),
-                )
-                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH);
-                if att.attgenerated == 0 {
-                    let withmod = format_type::format_type_with_typemod(targettype, targettypmod)
-                        .unwrap_or_else(|_| "???".into());
-                    let qcol = format_type::quote_identifier(col_name);
-                    e.with_hint(format!(
-                        "You might need to specify \"USING {qcol}::{withmod}\"."
-                    ))
-                } else {
-                    e
+        let using = match (def.raw_default, def.cooked_default) {
+            (Some(raw), _) => {
+                let nsitem = parse_relation::addRangeTableEntryForRelation(
+                    mcx,
+                    &mut pstate,
+                    rel,
+                    types_rel::AccessShareLock,
+                    None,
+                    false,
+                    true,
+                )?;
+                parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+                let transformed = parse_expr::transformExpr(
+                    mcx,
+                    &mut pstate,
+                    raw,
+                    parser_small1::ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM,
+                )?;
+                // C transforms USING once against the altered table and stores
+                // it in cooked_default (parse_utilcmd.c:3643-3648); recursion
+                // maps the transformed tree per child (tablecmds.c:14626-14646,
+                // incl. the whole-row reject) — never re-parses raw against a
+                // child whose column set differs.
+                // SAFETY: defnode is this command's own tree; the `def` shared
+                // ref is not used after this point in this scope's reads of
+                // raw/cooked_default.
+                unsafe {
+                    defnode
+                        .with_mut::<ColumnDef, _>(|d| d.cooked_default = Some(transformed))
+                        .expect("ColumnDef");
                 }
-            };
-            return Err(Box::new(e));
+                Some(transformed)
+            }
+            (None, Some(cooked)) => Some(cooked),
+            (None, None) => None,
+        };
+        let pre_transform = match using {
+            Some(t) => t,
+            None => Node::mk(
+                mcx,
+                types_nodes::primnodes::Var {
+                    varno: 1,
+                    varattno: attnum,
+                    vartype: att.atttypid,
+                    vartypmod: att.atttypmod,
+                    varcollid: att.attcollation,
+                    varnosyn: 1,
+                    varattnosyn: attnum,
+                    location: -1,
+                    ..Default::default()
+                },
+            )?,
+        };
+        let transform = match coerce::coerce_to_target_type(
+            mcx,
+            &mut pstate,
+            pre_transform,
+            parse_expr::expr_type(pre_transform),
+            targettype,
+            targettypmod,
+            coerce::CoercionContext::COERCION_ASSIGNMENT,
+            types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )? {
+            Some(t) => t,
+            None => {
+                let want = format_type::format_type_be(targettype).unwrap_or_else(|_| "???".into());
+                let e = if using.is_some() {
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "result of USING clause for column \"{col_name}\" cannot be cast \
+                         automatically to type {want}"
+                        ),
+                    )
+                    .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+                    .with_hint("You might need to add an explicit cast.".to_string())
+                } else {
+                    let e = PgError::new(
+                        ERROR,
+                        format!(
+                            "column \"{col_name}\" cannot be cast automatically to type {want}"
+                        ),
+                    )
+                    .with_sqlstate(ERRCODE_DATATYPE_MISMATCH);
+                    if att.attgenerated == 0 {
+                        let withmod =
+                            format_type::format_type_with_typemod(targettype, targettypmod)
+                                .unwrap_or_else(|_| "???".into());
+                        let qcol = format_type::quote_identifier(col_name);
+                        e.with_hint(format!(
+                            "You might need to specify \"USING {qcol}::{withmod}\"."
+                        ))
+                    } else {
+                        e
+                    }
+                };
+                return Err(Box::new(e));
+            }
+        };
+        parse_collate::assign_expr_collations(mcx, &mut pstate, transform)?;
+        // tablecmds.c:14545: expand virtual generated columns in the expr --
+        // they have no storage, so a Var over one cannot be evaluated against
+        // the old tuple during the rewrite scan.
+        let transform =
+            planner::prepjointree::expand_generated_columns_in_expr(mcx, transform, rel, 1)?;
+        // expression_planner.
+        let transform = clauses::eval_const_expressions(mcx, transform)?;
+        wqueue[tabidx].newvals.push(NewColumnValue {
+            attnum,
+            expr: transform,
+            is_generated: false,
+        });
+        if at_column_change_requires_rewrite(transform, attnum)? {
+            wqueue[tabidx].rewrite |= AT_REWRITE_COLUMN_REWRITE;
         }
-    };
-    parse_collate::assign_expr_collations(mcx, &mut pstate, transform)?;
-    // tablecmds.c:14545: expand virtual generated columns in the expr --
-    // they have no storage, so a Var over one cannot be evaluated against
-    // the old tuple during the rewrite scan.
-    let transform = planner::prepjointree::expand_generated_columns_in_expr(mcx, transform, rel, 1)?;
-    // expression_planner.
-    let transform = clauses::eval_const_expressions(mcx, transform)?;
-    wqueue[tabidx].newvals.push(NewColumnValue { attnum, expr: transform, is_generated: false });
-    if at_column_change_requires_rewrite(transform, attnum)? {
-        wqueue[tabidx].rewrite |= AT_REWRITE_COLUMN_REWRITE;
-    }
-    parser_small1::free_parsestate(pstate)?;
+        parser_small1::free_parsestate(pstate)?;
     } else if att.attgenerated != b'v' as i8
         && (def.raw_default.is_some() || def.cooked_default.is_some())
     {
@@ -5582,9 +5884,7 @@ fn ATPrepAlterColumnType<'mcx>(
             let numparents = child_numparents[i];
             let childrel = relation_seams::relation_open::call(mcx, childrelid, NoLock)?;
             catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
-            let Some((_, childinhcount)) =
-                attname_lookup(mcx, childrelid, col_name, false)?
-            else {
+            let Some((_, childinhcount)) = attname_lookup(mcx, childrelid, col_name, false)? else {
                 return Err(undefined_column(col_name, &childrel.name().to_string()));
             };
             if childinhcount as i32 > numparents {
@@ -5618,7 +5918,12 @@ fn ATPrepAlterColumnType<'mcx>(
                     let attmap =
                         tupdesc::build_attrmap_by_name(mcx, childrel.descr(), rel.descr())?;
                     let (mapped, found_whole_row) = rewrite_manip::map_variable_attnos(
-                        mcx, copy_cooked, 1, 0, &attmap, InvalidOid,
+                        mcx,
+                        copy_cooked,
+                        1,
+                        0,
+                        &attmap,
+                        InvalidOid,
                     )?;
                     if found_whole_row {
                         return Err(Box::new(
@@ -5648,7 +5953,16 @@ fn ATPrepAlterColumnType<'mcx>(
                 }
                 None => cnode,
             };
-            ATPrepCmd(mcx, wqueue, &childrel, childcmd, false, true, lockmode, query_string)?;
+            ATPrepCmd(
+                mcx,
+                wqueue,
+                &childrel,
+                childcmd,
+                false,
+                true,
+                lockmode,
+                query_string,
+            )?;
             childrel.close(NoLock)?;
         }
     } else if !recursing && find_inheritance_children_exist(mcx, rel.rd_id)? {
@@ -5665,7 +5979,15 @@ fn ATPrepAlterColumnType<'mcx>(
     }
 
     if tab_relkind == types_rel::RELKIND_COMPOSITE_TYPE {
-        ATTypedTableRecursion(mcx, wqueue, rel, cnode, cmd.behavior, lockmode, query_string)?;
+        ATTypedTableRecursion(
+            mcx,
+            wqueue,
+            rel,
+            cnode,
+            cmd.behavior,
+            lockmode,
+            query_string,
+        )?;
     }
     Ok(())
 }
@@ -5693,7 +6015,16 @@ fn ATTypedTableRecursion<'mcx>(
         // tablecmds.c:6918: another session's typed temp table is refused
         // (0A000) before the in-use check.
         CheckAlterTableIsSafe(&childrel)?;
-        ATPrepCmd(mcx, wqueue, &childrel, cnode, true, true, lockmode, query_string)?;
+        ATPrepCmd(
+            mcx,
+            wqueue,
+            &childrel,
+            cnode,
+            true,
+            true,
+            lockmode,
+            query_string,
+        )?;
         childrel.close(NoLock)?;
     }
     Ok(())
@@ -5748,7 +6079,11 @@ fn ATExecAlterColumnType<'mcx>(
     let relname = rel.name().to_string();
     let defnode = cmd.def.expect("AT_AlterColumnType ColumnDef");
     let def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
-    let tn = def.typeName.expect("ColumnDef.typeName").as_variant::<TypeName>().expect("TypeName");
+    let tn = def
+        .typeName
+        .expect("ColumnDef.typeName")
+        .as_variant::<TypeName>()
+        .expect("TypeName");
 
     if tab.rewrite != 0 {
         catalog_heap::RelationClearMissing(mcx, rel.rd_id)?;
@@ -5770,8 +6105,8 @@ fn ATExecAlterColumnType<'mcx>(
         ));
     }
     let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
-    let shape = syscache_seams::lookup_pg_type_shape::call(targettype)?
-        .expect("pg_type row vanished");
+    let shape =
+        syscache_seams::lookup_pg_type_shape::call(targettype)?.expect("pg_type row vanished");
     let targetcollid = crate::GetColumnDefCollation(def, targettype)?;
 
     // Re-coerce any stored default before the column type flips.
@@ -5795,8 +6130,7 @@ fn ATExecAlterColumnType<'mcx>(
         match coerced {
             Some(e) => Some(e),
             None => {
-                let want =
-                    format_type::format_type_be(targettype).unwrap_or_else(|_| "???".into());
+                let want = format_type::format_type_be(targettype).unwrap_or_else(|_| "???".into());
                 let msg = if att.attgenerated != 0 {
                     format!(
                         "generation expression for column \"{col_name}\" cannot be cast \
@@ -5848,9 +6182,15 @@ fn ATExecAlterColumnType<'mcx>(
             (Anum_pg_attribute_attndims, Datum::from_i16(attndims)),
             (Anum_pg_attribute_attbyval, Datum::from_bool(shape.typbyval)),
             (Anum_pg_attribute_attalign, Datum::from_i8(shape.typalign)),
-            (Anum_pg_attribute_attstorage, Datum::from_i8(shape.typstorage)),
+            (
+                Anum_pg_attribute_attstorage,
+                Datum::from_i8(shape.typstorage),
+            ),
             (Anum_pg_attribute_attcompression, Datum::from_i8(0)),
-            (Anum_pg_attribute_attcollation, Datum::from_oid(targetcollid)),
+            (
+                Anum_pg_attribute_attcollation,
+                Datum::from_oid(targetcollid),
+            ),
         ],
     )?;
 
@@ -5953,13 +6293,11 @@ fn RememberAllDependentForRebuilding<'mcx>(
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let mut isnull = false;
         // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
-        let classid =
-            unsafe { types_tuple::heap_getattr(tup, 1, desc, &mut isnull) }.as_oid();
+        let classid = unsafe { types_tuple::heap_getattr(tup, 1, desc, &mut isnull) }.as_oid();
         // SAFETY: as above.
         let objid = unsafe { types_tuple::heap_getattr(tup, 2, desc, &mut isnull) }.as_oid();
         // SAFETY: as above.
-        let objsubid =
-            unsafe { types_tuple::heap_getattr(tup, 3, desc, &mut isnull) }.as_i32();
+        let objsubid = unsafe { types_tuple::heap_getattr(tup, 3, desc, &mut isnull) }.as_i32();
         found.push((classid, objid, objsubid));
     }
     genam::systable_endscan(mcx, scan)?;
@@ -6032,7 +6370,10 @@ fn RememberAllDependentForRebuilding<'mcx>(
                     continue;
                 }
                 // Only a same-table generated column can reference this column.
-                assert!(adrelid == rel.rd_id, "attrdef dependency from another relation");
+                assert!(
+                    adrelid == rel.rd_id,
+                    "attrdef dependency from another relation"
+                );
                 let gen_att = rel.rd_att.attr(adnum as usize - 1);
                 let genname =
                     core::str::from_utf8(gen_att.attname.name_str()).expect("attname UTF-8");
@@ -6148,7 +6489,10 @@ fn RememberReplicaIdentityForRebuilding<'mcx>(
         return Ok(());
     }
     if tab.replica_identity_index.is_some() {
-        panic!("relation {} has multiple indexes marked as replica identity", tab.relid);
+        panic!(
+            "relation {} has multiple indexes marked as replica identity",
+            tab.relid
+        );
     }
     let name = lsyscache::get_rel_name(mcx, indoid)?.expect("index has a name");
     tab.replica_identity_index = Some(name.to_string());
@@ -6211,14 +6555,32 @@ fn ATPostAlterTypeCleanup<'mcx>(
         if relid != tab_relid {
             lmgr::LockRelationOid(relid, AccessExclusiveLock)?;
         }
-        ATPostAlterTypeParse(mcx, wqueue, *conoid, relid, confrelid, InvalidOid, def, tab_rewrite)?;
+        ATPostAlterTypeParse(
+            mcx,
+            wqueue,
+            *conoid,
+            relid,
+            confrelid,
+            InvalidOid,
+            def,
+            tab_rewrite,
+        )?;
     }
     for (indoid, def) in &changed_indexes {
         let relid = catalog_index::IndexGetRelation(mcx, *indoid, false)?;
         if relid != tab_relid {
             lmgr::LockRelationOid(relid, AccessExclusiveLock)?;
         }
-        ATPostAlterTypeParse(mcx, wqueue, *indoid, relid, InvalidOid, InvalidOid, def, tab_rewrite)?;
+        ATPostAlterTypeParse(
+            mcx,
+            wqueue,
+            *indoid,
+            relid,
+            InvalidOid,
+            InvalidOid,
+            def,
+            tab_rewrite,
+        )?;
         objects
             .add_exact_object_address(pg_depend::ObjectAddress::set(RELATION_RELATION_ID, *indoid));
     }
@@ -6230,7 +6592,16 @@ fn ATPostAlterTypeCleanup<'mcx>(
             lmgr::LockRelationOid(relid, ShareUpdateExclusiveLock)?;
         }
         // upstream a1fa24127d6a (18.6): re-create with the remembered owner.
-        ATPostAlterTypeParse(mcx, wqueue, *stxoid, relid, InvalidOid, *owner, def, tab_rewrite)?;
+        ATPostAlterTypeParse(
+            mcx,
+            wqueue,
+            *stxoid,
+            relid,
+            InvalidOid,
+            *owner,
+            def,
+            tab_rewrite,
+        )?;
         objects.add_exact_object_address(pg_depend::ObjectAddress::set(
             StatisticExtRelationId,
             *stxoid,
@@ -6295,11 +6666,8 @@ fn ATPostAlterTypeParse<'mcx>(
     rewrite: i32,
 ) -> PgResult<()> {
     let def = str_arena(mcx, def)?;
-    let raw_list = parser_seams::raw_parser::call(
-        mcx,
-        def,
-        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-    )?;
+    let raw_list =
+        parser_seams::raw_parser::call(mcx, def, parser_seams::RawParseMode::RAW_PARSE_DEFAULT)?;
     // C relation_open (tablecmds.c:15680): rel_id can be a composite type's
     // relation when a domain constraint depends on an altered attribute.
     let rel = relation_seams::relation_open::call(mcx, rel_id, NoLock)?;
@@ -6307,7 +6675,10 @@ fn ATPostAlterTypeParse<'mcx>(
     let tab = &mut wqueue[qidx];
     for rs in raw_list.iter() {
         let stmt = rs.stmt.expect("RawStmt.stmt");
-        if stmt.as_variant::<types_nodes::rawnodes::IndexStmt>().is_some() {
+        if stmt
+            .as_variant::<types_nodes::rawnodes::IndexStmt>()
+            .is_some()
+        {
             parse_clause::transformIndexStmt(mcx, rel_id, stmt, def)?;
             if rewrite == 0 {
                 TryReuseIndex(mcx, old_id, stmt)?;
@@ -6452,7 +6823,10 @@ fn ATPostAlterTypeParse<'mcx>(
                 Some(&adstmt.typeName),
                 con.conname.expect("deparsed domain constraint has a name"),
             )?;
-        } else if stmt.as_variant::<types_nodes::rawnodes::CreateStatsStmt>().is_some() {
+        } else if stmt
+            .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
+            .is_some()
+        {
             parse_clause::transformStatsStmt(mcx, rel_id, stmt, def)?;
             // keep the statistics object's comment
             let comment = commands_comment::GetComment(mcx, old_id, StatisticExtRelationId, 0)?;
@@ -6507,11 +6881,21 @@ fn RebuildConstraintComment<'mcx>(
                 .expect("relation namespace has a name");
             object.lappend(
                 mcx,
-                Node::mk(mcx, types_nodes::String { sval: str_arena(mcx, &nspname)? })?,
+                Node::mk(
+                    mcx,
+                    types_nodes::String {
+                        sval: str_arena(mcx, &nspname)?,
+                    },
+                )?,
             )?;
             object.lappend(
                 mcx,
-                Node::mk(mcx, types_nodes::String { sval: str_arena(mcx, rel.name())? })?,
+                Node::mk(
+                    mcx,
+                    types_nodes::String {
+                        sval: str_arena(mcx, rel.name())?,
+                    },
+                )?,
             )?;
         }
         None => {
@@ -6521,13 +6905,23 @@ fn RebuildConstraintComment<'mcx>(
             for n in domname.iter() {
                 names.lappend(mcx, n)?;
             }
-            let tn = TypeName { names, typemod: -1, location: -1, ..Default::default() };
+            let tn = TypeName {
+                names,
+                typemod: -1,
+                location: -1,
+                ..Default::default()
+            };
             object.lappend(mcx, Node::mk(mcx, tn)?)?;
         }
     }
     object.lappend(
         mcx,
-        Node::mk(mcx, types_nodes::String { sval: str_arena(mcx, conname)? })?,
+        Node::mk(
+            mcx,
+            types_nodes::String {
+                sval: str_arena(mcx, conname)?,
+            },
+        )?,
     )?;
     cmd.object = Some(Node::mk(mcx, object)?);
     cmd.comment = Some(str_arena(mcx, comment_str.as_str())?);
@@ -6539,11 +6933,7 @@ fn RebuildConstraintComment<'mcx>(
 }
 
 // TryReuseIndex (tablecmds.c:15886).
-fn TryReuseIndex<'mcx>(
-    mcx: Mcx<'mcx>,
-    old_id: Oid,
-    stmt_node: Node<'mcx>,
-) -> PgResult<()> {
+fn TryReuseIndex<'mcx>(mcx: Mcx<'mcx>, old_id: Oid, stmt_node: Node<'mcx>) -> PgResult<()> {
     let stmt = stmt_node
         .as_variant::<types_nodes::rawnodes::IndexStmt>()
         .expect("IndexStmt");
@@ -6587,8 +6977,7 @@ fn TryReuseForeignKey<'mcx>(
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .ok_or_else(|| crate::cache_lookup_failed("constraint", old_id))?;
     let arrays = pg_constraint::DeconstructFkConstraintRow(mcx, tup, con_rel.descr())?;
-    let list =
-        types_nodes::list::OidList::from_slice(mcx, &arrays.pf_eq_oprs[..arrays.numfks])?;
+    let list = types_nodes::list::OidList::from_slice(mcx, &arrays.pf_eq_oprs[..arrays.numfks])?;
     genam::systable_endscan(mcx, scan)?;
     con_rel.close(types_rel::AccessShareLock)?;
     Ok(list)
@@ -6638,8 +7027,7 @@ fn delete_column_type_dependencies<'mcx>(
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let mut isnull = false;
         // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
-        let refclassid =
-            unsafe { types_tuple::heap_getattr(tup, 4, desc, &mut isnull) }.as_oid();
+        let refclassid = unsafe { types_tuple::heap_getattr(tup, 4, desc, &mut isnull) }.as_oid();
         // SAFETY: as above.
         let refobjid = unsafe { types_tuple::heap_getattr(tup, 5, desc, &mut isnull) }.as_oid();
         let is_type = refclassid == TYPE_RELATION_ID && refobjid == att.atttypid;
@@ -6664,24 +7052,26 @@ fn fetch_missing_element<'mcx>(
     attnum: AttrNumber,
     att: &types_tuple::FormData_pg_attribute,
 ) -> PgResult<Option<Datum>> {
-    let attrrel =
-        table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, types_rel::AccessShareLock)?;
-    let keys = [oid_scankey(1, relid), int2_key(5, attnum)];
-    let mut scan = genam::systable_beginscan(
+    let attrrel = table::table_open(
         mcx,
-        &attrrel,
-        AttributeRelidNumIndexId,
-        true,
-        None,
-        &keys,
+        types_core::ATTRIBUTE_RELATION_ID,
+        types_rel::AccessShareLock,
     )?;
+    let keys = [oid_scankey(1, relid), int2_key(5, attnum)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &attrrel, AttributeRelidNumIndexId, true, None, &keys)?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .ok_or_else(|| crate::cache_lookup_failed_attribute(attnum, relid))?;
     let desc = attrrel.descr();
     let mut isnull = false;
     // SAFETY: attmissingval under pg_attribute's descriptor.
     let d = unsafe {
-        types_tuple::heap_getattr(tup, Anum_pg_attribute_attmissingval as i32, desc, &mut isnull)
+        types_tuple::heap_getattr(
+            tup,
+            Anum_pg_attribute_attmissingval as i32,
+            desc,
+            &mut isnull,
+        )
     };
     let result = if isnull {
         None
@@ -6702,7 +7092,11 @@ fn fetch_missing_element<'mcx>(
             att.attbyval,
             att.attalign as u8,
         )?;
-        assert!(elems.len() == 1, "attmissingval with {} entries", elems.len());
+        assert!(
+            elems.len() == 1,
+            "attmissingval with {} entries",
+            elems.len()
+        );
         let v = elems[0];
         if att.attbyval {
             Some(v)
@@ -6755,8 +7149,7 @@ fn update_pg_attribute_nullable<'mcx>(
     attnum: AttrNumber,
     fields: &[(usize, Datum, bool)],
 ) -> PgResult<()> {
-    let attrel =
-        table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    let attrel = table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
     let keys = [oid_scankey(1, relid), int2_key(5, attnum)];
     let mut scan =
         genam::systable_beginscan(mcx, &attrel, AttributeRelidNumIndexId, true, None, &keys)?;
@@ -6823,8 +7216,7 @@ fn cannot_alter_system_column(col_name: &str) -> Box<PgError> {
 pub(crate) fn find_inheritance_children_exist<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<bool> {
     let rel = table::table_open(mcx, InheritsRelationId, types_rel::AccessShareLock)?;
     let key = oid_scankey(Anum_pg_inherits_inhparent, relid);
-    let mut scan =
-        genam::systable_beginscan(mcx, &rel, InheritsParentIndexId, true, None, &[key])?;
+    let mut scan = genam::systable_beginscan(mcx, &rel, InheritsParentIndexId, true, None, &[key])?;
     let found = genam::systable_getnext(mcx, &mut scan)?.is_some();
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::AccessShareLock)?;
@@ -7094,8 +7486,7 @@ fn ATExecReplicaIdentity<'mcx>(
         }
         let attr = rel.rd_att.attr(attno as usize - 1);
         if !attr.attnotnull {
-            let attname =
-                core::str::from_utf8(attr.attname.name_str()).expect("attname UTF-8");
+            let attname = core::str::from_utf8(attr.attname.name_str()).expect("attname UTF-8");
             return Err(wrong_type(format!(
                 "index \"{index_relname}\" cannot be used as replica identity \
                  because column \"{attname}\" is nullable"
@@ -7194,7 +7585,9 @@ fn ATExecAddOf<'mcx>(
             core::str::from_utf8(type_attr.attname.name_str()).expect("attname UTF-8");
         let table_attr = loop {
             if table_attno >= table_natts {
-                return Err(mismatch(format!("table is missing column \"{type_attname}\"")));
+                return Err(mismatch(format!(
+                    "table is missing column \"{type_attname}\""
+                )));
             }
             let attr = table_tupdesc.attr(table_attno);
             table_attno += 1;
@@ -7264,7 +7657,12 @@ fn ATExecDropOf<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<()> {
         reloftype,
         pg_depend::DependencyType::Normal,
     )?;
-    set_pg_class_datum(mcx, relid, Anum_pg_class_reloftype, Datum::from_oid(InvalidOid))
+    set_pg_class_datum(
+        mcx,
+        relid,
+        Anum_pg_class_reloftype,
+        Datum::from_oid(InvalidOid),
+    )
 }
 
 // ATExecAddIndexConstraint (tablecmds.c:9704).
@@ -7350,9 +7748,7 @@ fn ATPrepSetTableSpace<'mcx>(
     tablespacename: &str,
 ) -> PgResult<()> {
     let tablespace_id = commands_tablespace::get_tablespace_oid(mcx, tablespacename, false)?;
-    if tablespace_id != InvalidOid
-        && tablespace_id != init_small::globals::MyDatabaseTableSpace()
-    {
+    if tablespace_id != InvalidOid && tablespace_id != init_small::globals::MyDatabaseTableSpace() {
         let aclresult = aclchk::object_aclcheck(
             TableSpaceRelationId,
             tablespace_id,
@@ -7390,9 +7786,7 @@ fn CheckRelationTableSpaceMove(rel: &Relation<'_>, new_tablespace_id: Oid) -> Pg
         return Ok(false);
     }
     // RelationIsMapped: storage-bearing relations with relfilenode 0.
-    if types_rel::RELKIND_HAS_STORAGE(rel.rd_rel.relkind)
-        && rel.rd_rel.relfilenode == InvalidOid
-    {
+    if types_rel::RELKIND_HAS_STORAGE(rel.rd_rel.relkind) && rel.rd_rel.relfilenode == InvalidOid {
         return Err(Box::new(
             PgError::new(
                 ERROR,
@@ -7445,12 +7839,8 @@ fn ATExecSetTableSpace<'mcx>(
         toast_rel.close(lockmode)?;
     }
     // Relfilenumbers are not unique across tablespaces within a database.
-    let newrelfilenumber = catalog::GetNewRelFileNumber(
-        mcx,
-        new_tablespace,
-        None,
-        rel.rd_rel.relpersistence,
-    )?;
+    let newrelfilenumber =
+        catalog::GetNewRelFileNumber(mcx, new_tablespace, None, rel.rd_rel.relpersistence)?;
     let mut newrlocator = rel.rd_locator.get();
     newrlocator.relNumber = newrelfilenumber;
     newrlocator.spcOid = new_tablespace;
@@ -7517,12 +7907,14 @@ pub fn AlterTableMoveAll<'mcx>(
 
     let mut orig_tablespaceoid = commands_tablespace::get_tablespace_oid(
         mcx,
-        stmt.orig_tablespacename.expect("AlterTableMoveAllStmt.orig_tablespacename"),
+        stmt.orig_tablespacename
+            .expect("AlterTableMoveAllStmt.orig_tablespacename"),
         false,
     )?;
     let mut new_tablespaceoid = commands_tablespace::get_tablespace_oid(
         mcx,
-        stmt.new_tablespacename.expect("AlterTableMoveAllStmt.new_tablespacename"),
+        stmt.new_tablespacename
+            .expect("AlterTableMoveAllStmt.new_tablespacename"),
         false,
     )?;
 
@@ -7599,7 +7991,12 @@ pub fn AlterTableMoveAll<'mcx>(
             }
             .as_char() as u8;
             let relowner = unsafe {
-                types_tuple::heap_getattr(tuple, Anum_pg_class_relowner_mv as i32, desc, &mut isnull)
+                types_tuple::heap_getattr(
+                    tuple,
+                    Anum_pg_class_relowner_mv as i32,
+                    desc,
+                    &mut isnull,
+                )
             }
             .as_oid();
 
@@ -7698,10 +8095,7 @@ pub fn AlterTableMoveAll<'mcx>(
 }
 
 // index_copy_data (tablecmds.c:17103).
-fn index_copy_data(
-    rel: &Relation<'_>,
-    newrlocator: types_storage::RelFileLocator,
-) -> PgResult<()> {
+fn index_copy_data(rel: &Relation<'_>, newrlocator: types_storage::RelFileLocator) -> PgResult<()> {
     let src = types_storage::RelFileLocatorBackend {
         locator: rel.rd_locator.get(),
         backend: rel.rd_backend,
@@ -7829,7 +8223,12 @@ fn ATExecSetAccessMethodNoStorage<'mcx>(
     if old_access_method == new_access_method {
         return Ok(());
     }
-    set_pg_class_datum(mcx, rel.rd_id, Anum_pg_class_relam, Datum::from_oid(new_access_method))?;
+    set_pg_class_datum(
+        mcx,
+        rel.rd_id,
+        Anum_pg_class_relam,
+        Datum::from_oid(new_access_method),
+    )?;
     if old_access_method == InvalidOid {
         pg_depend::recordDependencyOn(
             mcx,
@@ -7872,8 +8271,11 @@ fn drop_parent_dependency_on_class<'mcx>(
     refobjid: Oid,
     deptype: pg_depend::DependencyType,
 ) -> PgResult<()> {
-    let dep_rel =
-        table::table_open(mcx, pg_depend::DependRelationId, types_rel::RowExclusiveLock)?;
+    let dep_rel = table::table_open(
+        mcx,
+        pg_depend::DependRelationId,
+        types_rel::RowExclusiveLock,
+    )?;
     let keys = [
         oid_scankey(1, RELATION_RELATION_ID),
         oid_scankey(2, relid),
@@ -7892,17 +8294,13 @@ fn drop_parent_dependency_on_class<'mcx>(
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let mut isnull = false;
         // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
-        let refclassid =
-            unsafe { types_tuple::heap_getattr(tup, 4, desc, &mut isnull) }.as_oid();
+        let refclassid = unsafe { types_tuple::heap_getattr(tup, 4, desc, &mut isnull) }.as_oid();
         // SAFETY: as above.
-        let dep_refobjid =
-            unsafe { types_tuple::heap_getattr(tup, 5, desc, &mut isnull) }.as_oid();
+        let dep_refobjid = unsafe { types_tuple::heap_getattr(tup, 5, desc, &mut isnull) }.as_oid();
         // SAFETY: as above.
-        let refobjsubid =
-            unsafe { types_tuple::heap_getattr(tup, 6, desc, &mut isnull) }.as_i32();
+        let refobjsubid = unsafe { types_tuple::heap_getattr(tup, 6, desc, &mut isnull) }.as_i32();
         // SAFETY: as above.
-        let dtype =
-            unsafe { types_tuple::heap_getattr(tup, 7, desc, &mut isnull) }.as_i8();
+        let dtype = unsafe { types_tuple::heap_getattr(tup, 7, desc, &mut isnull) }.as_i8();
         if refclassid == target_refclassid
             && dep_refobjid == refobjid
             && refobjsubid == 0
@@ -7997,8 +8395,11 @@ fn find_composite_type_dependencies_impl<'mcx>(
         let mut attname: Option<String> = None;
         if objsubid > 0 && objsubid <= natts {
             let att = rel.rd_att.attr(objsubid as usize - 1);
-            attname =
-                Some(core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8").into());
+            attname = Some(
+                core::str::from_utf8(att.attname.name_str())
+                    .expect("attname UTF-8")
+                    .into(),
+            );
         } else {
             for attno in 1..=natts {
                 let att = rel.rd_att.attr(attno as usize - 1);
@@ -8026,7 +8427,10 @@ fn find_composite_type_dependencies_impl<'mcx>(
                     "cannot alter type \"{name}\" because column \
                      \"{relname}.{colname}\" uses it"
                 ),
-                CompositeDepOrigin::Relation { relname: origname, relkind } => match *relkind {
+                CompositeDepOrigin::Relation {
+                    relname: origname,
+                    relkind,
+                } => match *relkind {
                     types_rel::RELKIND_COMPOSITE_TYPE => format!(
                         "cannot alter type \"{origname}\" because column \
                          \"{relname}.{colname}\" uses it"
@@ -8061,15 +8465,14 @@ fn ATExecGenericOptions<'mcx>(
 ) -> PgResult<()> {
     use cache_syscache::cacheinfo::FOREIGNTABLEREL;
     use foreigncmds::foreign::{
-        Anum_pg_foreign_table_ftoptions, Anum_pg_foreign_table_ftserver, Natts_pg_foreign_table,
-        GetForeignDataWrapper, GetForeignServer,
+        Anum_pg_foreign_table_ftoptions, Anum_pg_foreign_table_ftserver, GetForeignDataWrapper,
+        GetForeignServer, Natts_pg_foreign_table,
     };
 
     if options.is_nil() {
         return Ok(());
     }
-    let ftrel =
-        table::table_open(mcx, types_core::FOREIGN_TABLE_RELATION_ID, RowExclusiveLock)?;
+    let ftrel = table::table_open(mcx, types_core::FOREIGN_TABLE_RELATION_ID, RowExclusiveLock)?;
     let Some(tp) = cache_syscache::SearchSysCacheCopy(
         mcx,
         FOREIGNTABLEREL,
@@ -8164,24 +8567,20 @@ fn ATExecAlterColumnGenericOptions<'mcx>(
             .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
         ));
     };
-    let ftserver =
-        cache_syscache::SysCacheGetAttrNotNull(FOREIGNTABLEREL, &fttp, Anum_pg_foreign_table_ftserver)?
-            .as_oid();
+    let ftserver = cache_syscache::SysCacheGetAttrNotNull(
+        FOREIGNTABLEREL,
+        &fttp,
+        Anum_pg_foreign_table_ftserver,
+    )?
+    .as_oid();
     cache_syscache::ReleaseSysCache(fttp);
     let server = GetForeignServer(mcx, ftserver)?;
     let fdw = GetForeignDataWrapper(mcx, server.fdwid)?;
 
-    let attrel =
-        table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    let attrel = table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
     let key1 = oid_scankey(1, rel.rd_id);
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &attrel,
-        AttributeRelidNumIndexId,
-        true,
-        None,
-        &[key1],
-    )?;
+    let mut scan =
+        genam::systable_beginscan(mcx, &attrel, AttributeRelidNumIndexId, true, None, &[key1])?;
     let desc = attrel.descr();
     let mut found = false;
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
@@ -8332,7 +8731,10 @@ mod tests {
             at_simple_actual_target(types_rel::RELKIND_FOREIGN_TABLE) & allowed,
             0
         );
-        assert_eq!(at_simple_actual_target(types_rel::RELKIND_SEQUENCE) & allowed, 0);
+        assert_eq!(
+            at_simple_actual_target(types_rel::RELKIND_SEQUENCE) & allowed,
+            0
+        );
         assert_eq!(
             alter_table_type_to_string(AlterTableType::AT_AddInherit),
             Some("INHERIT")
@@ -8348,7 +8750,10 @@ mod tests {
             e.message(),
             "cannot change table \"tpub\" to unlogged because it is part of a publication"
         );
-        assert_eq!(e.sqlstate(), types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+        assert_eq!(
+            e.sqlstate(),
+            types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+        );
         assert_eq!(e.detail(), Some("Unlogged relations cannot be replicated."));
     }
 
@@ -8391,7 +8796,10 @@ mod elog_hygiene_tests {
     #[test]
     fn attrdef_and_notnull_lookup_arms_are_catchable_xx000() {
         let e = super::attrdef_tuple_not_found(16384, 2);
-        assert_eq!(e.message(), "could not find attrdef tuple for relation 16384 attnum 2");
+        assert_eq!(
+            e.message(),
+            "could not find attrdef tuple for relation 16384 attnum 2"
+        );
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         let e = super::notnull_constraint_lookup_failed("id", "t");
         assert_eq!(
@@ -8407,7 +8815,9 @@ mod elog_hygiene_tests {
 #[cold]
 #[inline(never)]
 pub(crate) fn unexpected_identity_type(identity_type: u8) -> Box<PgError> {
-    Box::new(PgError::error(format!("unexpected identity type {identity_type}")))
+    Box::new(PgError::error(format!(
+        "unexpected identity type {identity_type}"
+    )))
 }
 
 #[cfg(test)]
@@ -8434,7 +8844,10 @@ mod elog_hygiene_tests_b088 {
     fn alter_action_and_constraint_type_arms_are_catchable_xx000() {
         let r = std::panic::catch_unwind(|| super::invalid_alter_action("t"));
         let e = r.expect("invalid_alter_action panicked");
-        assert_eq!(e.message(), "invalid ALTER action attempted on relation \"t\"");
+        assert_eq!(
+            e.message(),
+            "invalid ALTER action attempted on relation \"t\""
+        );
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         let e = super::unrecognized_constraint_type(ConstrType::CONSTR_DEFAULT);
         assert_eq!(e.message(), "unrecognized constraint type: 2");

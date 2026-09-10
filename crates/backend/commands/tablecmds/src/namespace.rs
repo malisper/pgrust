@@ -8,9 +8,13 @@ use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, NOTICE,
 };
 use types_nodes::parsenodes::AlterObjectSchemaStmt;
-use types_rel::{AccessExclusiveLock, InplaceUpdateTupleLock, NoLock, Relation, RowExclusiveLock, LOCKMODE};
+use types_rel::{
+    AccessExclusiveLock, InplaceUpdateTupleLock, NoLock, Relation, RowExclusiveLock, LOCKMODE,
+};
 
-use crate::alter::{oid_scankey, AlterRelationStmtKind, AlterTableLookupRangeVar, NamespaceRelationId};
+use crate::alter::{
+    oid_scankey, AlterRelationStmtKind, AlterTableLookupRangeVar, NamespaceRelationId,
+};
 
 const Anum_pg_class_relnamespace: usize = 3;
 const Anum_pg_depend_classid: usize = 1;
@@ -55,19 +59,23 @@ pub fn AlterTableNamespace<'mcx>(
     let old_nsp_oid = rel.rd_rel.relnamespace;
 
     if rel.rd_rel.relkind == types_rel::RELKIND_SEQUENCE {
-        let owned = pg_depend::sequenceIsOwned(mcx, relid, pg_depend::DependencyType::Auto)?
-            .or(pg_depend::sequenceIsOwned(mcx, relid, pg_depend::DependencyType::Internal)?);
+        let owned = pg_depend::sequenceIsOwned(mcx, relid, pg_depend::DependencyType::Auto)?.or(
+            pg_depend::sequenceIsOwned(mcx, relid, pg_depend::DependencyType::Internal)?,
+        );
         if let Some((table_id, _col_id)) = owned {
             let tabname = lsyscache::get_rel_name(mcx, table_id)?
                 .map(|s| s.as_str().to_string())
                 .unwrap_or_default();
             return Err(Box::new(
-                PgError::new(ERROR, "cannot move an owned sequence into another schema".to_string())
-                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
-                    .with_detail(format!(
-                        "Sequence \"{}\" is linked to table \"{tabname}\".",
-                        rel.name()
-                    )),
+                PgError::new(
+                    ERROR,
+                    "cannot move an owned sequence into another schema".to_string(),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_detail(format!(
+                    "Sequence \"{}\" is linked to table \"{tabname}\".",
+                    rel.name()
+                )),
             ));
         }
     }
@@ -82,7 +90,12 @@ pub fn AlterTableNamespace<'mcx>(
         location: -1,
     };
     let (nsp_oid, _existing_relid, _relpersistence) =
-        catalog_namespace::RangeVarGetAndCheckCreationNamespace(mcx, &newrv, types_rel::NoLock, false)?;
+        catalog_namespace::RangeVarGetAndCheckCreationNamespace(
+            mcx,
+            &newrv,
+            types_rel::NoLock,
+            false,
+        )?;
 
     catalog_namespace::CheckSetNamespace(old_nsp_oid, nsp_oid)?;
 
@@ -103,7 +116,13 @@ pub fn AlterTableNamespaceInternal<'mcx>(
     let class_rel = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
     AlterRelationNamespaceInternal(
-        mcx, &class_rel, rel.rd_id, old_nsp_oid, nsp_oid, true, objs_moved,
+        mcx,
+        &class_rel,
+        rel.rd_id,
+        old_nsp_oid,
+        nsp_oid,
+        true,
+        objs_moved,
     )?;
 
     if rel.rd_rel.reltype != InvalidOid {
@@ -120,10 +139,21 @@ pub fn AlterTableNamespaceInternal<'mcx>(
 
     AlterIndexNamespaces(mcx, &class_rel, rel, old_nsp_oid, nsp_oid, objs_moved)?;
     AlterSeqNamespaces(
-        mcx, &class_rel, rel, old_nsp_oid, nsp_oid, objs_moved, AccessExclusiveLock,
+        mcx,
+        &class_rel,
+        rel,
+        old_nsp_oid,
+        nsp_oid,
+        objs_moved,
+        AccessExclusiveLock,
     )?;
     pg_constraint::AlterConstraintNamespaces(
-        mcx, rel.rd_id, old_nsp_oid, nsp_oid, false, objs_moved,
+        mcx,
+        rel.rd_id,
+        old_nsp_oid,
+        nsp_oid,
+        false,
+        objs_moved,
     )?;
 
     class_rel.close(RowExclusiveLock)
@@ -225,7 +255,13 @@ fn AlterIndexNamespaces<'mcx>(
         // Indexes carry no namespace dependency and no pg_type row.
         if !object_present(objs_moved, &thisobj) {
             AlterRelationNamespaceInternal(
-                mcx, class_rel, index_oid, old_nsp_oid, new_nsp_oid, false, objs_moved,
+                mcx,
+                class_rel,
+                index_oid,
+                old_nsp_oid,
+                new_nsp_oid,
+                false,
+                objs_moved,
             )?;
         }
     }
@@ -284,7 +320,13 @@ fn AlterSeqNamespaces<'mcx>(
         }
 
         AlterRelationNamespaceInternal(
-            mcx, class_rel, objid, old_nsp_oid, new_nsp_oid, true, objs_moved,
+            mcx,
+            class_rel,
+            objid,
+            old_nsp_oid,
+            new_nsp_oid,
+            true,
+            objs_moved,
         )?;
 
         debug_assert!(seq_rel.rd_rel.reltype == InvalidOid);
@@ -312,7 +354,10 @@ mod elog_hygiene_tests_b208 {
     fn schema_dependency_arm_is_catchable_xx000() {
         let r = std::panic::catch_unwind(|| super::schema_dependency_change_failed("t"));
         let e = r.expect("schema_dependency_change_failed panicked");
-        assert_eq!(e.message(), "could not change schema dependency for relation \"t\"");
+        assert_eq!(
+            e.message(),
+            "could not change schema dependency for relation \"t\""
+        );
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     }
 }

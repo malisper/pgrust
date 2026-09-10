@@ -10,7 +10,7 @@
 //! `ereport()` macro's `if (errstart(...))` shape, which skips the whole
 //! argument-evaluation body.
 
-use ::types_error::{ErrorField, ErrorLocation, ErrorLevel, PgError, PgResult, SqlState, ERROR};
+use ::types_error::{ErrorField, ErrorLevel, ErrorLocation, PgError, PgResult, SqlState, ERROR};
 
 use crate::{errno, policy};
 
@@ -139,7 +139,11 @@ impl ErrorBuilder {
     ) -> Self {
         if let Some(error) = self.error.take() {
             let singular = singular.into();
-            let picked = if n == 1 { singular.clone() } else { plural.into() };
+            let picked = if n == 1 {
+                singular.clone()
+            } else {
+                plural.into()
+            };
             let message = format_message(&error, picked);
             self.error = Some(error.with_message(message).with_message_id(singular));
         }
@@ -351,9 +355,11 @@ pub fn elog(level: ErrorLevel, message: impl Into<String>) -> PgResult<()> {
     // The empty location merges away in with_error_location: the F/L capture
     // from this call site (via ereport's track_caller) stands, like C's
     // elog macro recording __FILE__/__LINE__.
-    ereport(level).errmsg_internal(message).finish(ErrorLocation {
-        filename: None,
-        lineno: 0,
-        funcname: None,
-    })
+    ereport(level)
+        .errmsg_internal(message)
+        .finish(ErrorLocation {
+            filename: None,
+            lineno: 0,
+            funcname: None,
+        })
 }

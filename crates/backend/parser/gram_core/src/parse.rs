@@ -130,12 +130,9 @@ impl<'mcx> Parser<'mcx> {
                         ));
                     }
                     let escstr = esc_val.str_val().as_bytes();
-                    if escstr.len() != 1
-                        || !parser_small1::udeescape::check_uescapechar(escstr[0])
+                    if escstr.len() != 1 || !parser_small1::udeescape::check_uescapechar(escstr[0])
                     {
-                        return Err(
-                            self.syntax_error("invalid Unicode escape character", esc_loc)
-                        );
+                        return Err(self.syntax_error("invalid Unicode escape character", esc_loc));
                     }
                     escstr[0]
                 } else {
@@ -151,11 +148,7 @@ impl<'mcx> Parser<'mcx> {
                 )
                 .map_err(|e| self.udeescape_failure(e))?;
                 let out_tok = if t == tokens::UIDENT {
-                    parser_small1::truncate_identifier(
-                        &mut decoded,
-                        true,
-                        self.settings.encoding,
-                    )?;
+                    parser_small1::truncate_identifier(&mut decoded, true, self.settings.encoding)?;
                     tokens::IDENT
                 } else {
                     tokens::SCONST
@@ -307,7 +300,11 @@ impl<'mcx> Parser<'mcx> {
                     if yychar == YYEMPTY {
                         yychar = self.base_yylex(&mut yylval, &mut yylloc)?;
                     }
-                    let yytoken = if yychar <= YYEOF { YYEOF } else { yytranslate(yychar) };
+                    let yytoken = if yychar <= YYEOF {
+                        YYEOF
+                    } else {
+                        yytranslate(yychar)
+                    };
                     let idx = pact + yytoken;
                     if idx < 0 || idx > YYLAST || YYCHECK[idx as usize] as i32 != yytoken {
                         break 'decide;
@@ -466,19 +463,23 @@ impl<'mcx> Parser<'mcx> {
         let end = hold.clamp(loc, self.scanbuf.len());
         let tail = &self.scanbuf[loc..end];
         let tail = &tail[..tail.iter().position(|&b| b == 0).unwrap_or(tail.len())];
-        let err = if tail.is_empty() {
-            PgError::error(format!("{message} at end of input"))
+        // C scan.l: parser_yyerror funnels into scanner_yyerror, whose two
+        // ereports (18.6: "at end of input" scan.l:1232, "at or near"
+        // scan.l:1240) are the wire F/L/R.
+        let (err, line) = if tail.is_empty() {
+            (PgError::error(format!("{message} at end of input")), 1232)
         } else {
-            PgError::error(format!(
-                "{message} at or near \"{}\"",
-                String::from_utf8_lossy(tail)
-            ))
+            (
+                PgError::error(format!(
+                    "{message} at or near \"{}\"",
+                    String::from_utf8_lossy(tail)
+                )),
+                1240,
+            )
         };
         Box::new(
             err.with_sqlstate(ERRCODE_SYNTAX_ERROR)
-                // C scan.l: parser_yyerror funnels into scanner_yyerror,
-                // whose __func__ is the wire R field
-                .with_funcname("scanner_yyerror")
+                .with_location("scan.l", line, "scanner_yyerror")
                 .with_cursor_position(parser_small1::parser_errposition_source(
                     Some(self.scanbuf),
                     yylloc,
@@ -486,7 +487,6 @@ impl<'mcx> Parser<'mcx> {
                 )),
         )
     }
-
 }
 
 // Bit-identical repack (tag values aligned across the two 16B carriers).

@@ -35,7 +35,8 @@ pub const ERRCODE_SUCCESSFUL_COMPLETION: SqlState = make_sqlstate(*b"00000");
 pub const ERRCODE_WARNING: SqlState = make_sqlstate(*b"01000");
 pub const ERRCODE_WARNING_DYNAMIC_RESULT_SETS_RETURNED: SqlState = make_sqlstate(*b"0100C");
 pub const ERRCODE_WARNING_IMPLICIT_ZERO_BIT_PADDING: SqlState = make_sqlstate(*b"01008");
-pub const ERRCODE_WARNING_NULL_VALUE_ELIMINATED_IN_SET_FUNCTION: SqlState = make_sqlstate(*b"01003");
+pub const ERRCODE_WARNING_NULL_VALUE_ELIMINATED_IN_SET_FUNCTION: SqlState =
+    make_sqlstate(*b"01003");
 pub const ERRCODE_WARNING_PRIVILEGE_NOT_GRANTED: SqlState = make_sqlstate(*b"01007");
 pub const ERRCODE_WARNING_PRIVILEGE_NOT_REVOKED: SqlState = make_sqlstate(*b"01006");
 pub const ERRCODE_WARNING_STRING_DATA_RIGHT_TRUNCATION: SqlState = make_sqlstate(*b"01004");
@@ -50,7 +51,8 @@ pub const ERRCODE_CONNECTION_EXCEPTION: SqlState = make_sqlstate(*b"08000");
 pub const ERRCODE_CONNECTION_DOES_NOT_EXIST: SqlState = make_sqlstate(*b"08003");
 pub const ERRCODE_CONNECTION_FAILURE: SqlState = make_sqlstate(*b"08006");
 pub const ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION: SqlState = make_sqlstate(*b"08001");
-pub const ERRCODE_SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION: SqlState = make_sqlstate(*b"08004");
+pub const ERRCODE_SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION: SqlState =
+    make_sqlstate(*b"08004");
 pub const ERRCODE_TRANSACTION_RESOLUTION_UNKNOWN: SqlState = make_sqlstate(*b"08007");
 pub const ERRCODE_PROTOCOL_VIOLATION: SqlState = make_sqlstate(*b"08P01");
 
@@ -69,7 +71,8 @@ pub const ERRCODE_INVALID_GRANT_OPERATION: SqlState = make_sqlstate(*b"0LP01");
 pub const ERRCODE_INVALID_ROLE_SPECIFICATION: SqlState = make_sqlstate(*b"0P000");
 
 pub const ERRCODE_DIAGNOSTICS_EXCEPTION: SqlState = make_sqlstate(*b"0Z000");
-pub const ERRCODE_STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER: SqlState = make_sqlstate(*b"0Z002");
+pub const ERRCODE_STACKED_DIAGNOSTICS_ACCESSED_WITHOUT_ACTIVE_HANDLER: SqlState =
+    make_sqlstate(*b"0Z002");
 
 pub const ERRCODE_INVALID_ARGUMENT_FOR_XQUERY: SqlState = make_sqlstate(*b"10608");
 
@@ -131,7 +134,8 @@ pub const ERRCODE_INVALID_XML_CONTENT: SqlState = make_sqlstate(*b"2200N");
 pub const ERRCODE_INVALID_XML_COMMENT: SqlState = make_sqlstate(*b"2200S");
 pub const ERRCODE_INVALID_XML_PROCESSING_INSTRUCTION: SqlState = make_sqlstate(*b"2200T");
 pub const ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE: SqlState = make_sqlstate(*b"22030");
-pub const ERRCODE_INVALID_ARGUMENT_FOR_SQL_JSON_DATETIME_FUNCTION: SqlState = make_sqlstate(*b"22031");
+pub const ERRCODE_INVALID_ARGUMENT_FOR_SQL_JSON_DATETIME_FUNCTION: SqlState =
+    make_sqlstate(*b"22031");
 pub const ERRCODE_INVALID_JSON_TEXT: SqlState = make_sqlstate(*b"22032");
 pub const ERRCODE_INVALID_SQL_JSON_SUBSCRIPT: SqlState = make_sqlstate(*b"22033");
 pub const ERRCODE_MORE_THAN_ONE_SQL_JSON_ITEM: SqlState = make_sqlstate(*b"22034");
@@ -162,11 +166,15 @@ pub const ERRCODE_INVALID_TRANSACTION_STATE: SqlState = make_sqlstate(*b"25000")
 pub const ERRCODE_ACTIVE_SQL_TRANSACTION: SqlState = make_sqlstate(*b"25001");
 pub const ERRCODE_BRANCH_TRANSACTION_ALREADY_ACTIVE: SqlState = make_sqlstate(*b"25002");
 pub const ERRCODE_HELD_CURSOR_REQUIRES_SAME_ISOLATION_LEVEL: SqlState = make_sqlstate(*b"25008");
-pub const ERRCODE_INAPPROPRIATE_ACCESS_MODE_FOR_BRANCH_TRANSACTION: SqlState = make_sqlstate(*b"25003");
-pub const ERRCODE_INAPPROPRIATE_ISOLATION_LEVEL_FOR_BRANCH_TRANSACTION: SqlState = make_sqlstate(*b"25004");
-pub const ERRCODE_NO_ACTIVE_SQL_TRANSACTION_FOR_BRANCH_TRANSACTION: SqlState = make_sqlstate(*b"25005");
+pub const ERRCODE_INAPPROPRIATE_ACCESS_MODE_FOR_BRANCH_TRANSACTION: SqlState =
+    make_sqlstate(*b"25003");
+pub const ERRCODE_INAPPROPRIATE_ISOLATION_LEVEL_FOR_BRANCH_TRANSACTION: SqlState =
+    make_sqlstate(*b"25004");
+pub const ERRCODE_NO_ACTIVE_SQL_TRANSACTION_FOR_BRANCH_TRANSACTION: SqlState =
+    make_sqlstate(*b"25005");
 pub const ERRCODE_READ_ONLY_SQL_TRANSACTION: SqlState = make_sqlstate(*b"25006");
-pub const ERRCODE_SCHEMA_AND_DATA_STATEMENT_MIXING_NOT_SUPPORTED: SqlState = make_sqlstate(*b"25007");
+pub const ERRCODE_SCHEMA_AND_DATA_STATEMENT_MIXING_NOT_SUPPORTED: SqlState =
+    make_sqlstate(*b"25007");
 pub const ERRCODE_NO_ACTIVE_SQL_TRANSACTION: SqlState = make_sqlstate(*b"25P01");
 pub const ERRCODE_IN_FAILED_SQL_TRANSACTION: SqlState = make_sqlstate(*b"25P02");
 pub const ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT: SqlState = make_sqlstate(*b"25P03");

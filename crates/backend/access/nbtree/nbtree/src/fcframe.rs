@@ -73,7 +73,10 @@ impl OrderProcFrame {
                         PackedVarlena::from_ptr(right.as_usize() as *const u8),
                     )
                 };
-                Ok(::adt_numeric::sortsupport::numeric_fast_cmp(a.data(), b.data()))
+                Ok(::adt_numeric::sortsupport::numeric_fast_cmp(
+                    a.data(),
+                    b.data(),
+                ))
             }
             _ => Ok(self.call(key, left, right)?.as_i32()),
         }
@@ -120,7 +123,10 @@ impl OrderProcFrame {
                         PackedVarlena::from_ptr(right.as_usize() as *const u8),
                     )
                 };
-                Ok(::adt_numeric::sortsupport::numeric_fast_cmp(a.data(), b.data()))
+                Ok(::adt_numeric::sortsupport::numeric_fast_cmp(
+                    a.data(),
+                    b.data(),
+                ))
             }
             _ => {
                 let fcinfo = &mut self.fcinfo;

@@ -42,10 +42,33 @@ impl ErrorLocation {
 
     #[cold]
     fn new_impl(filename: String, lineno: i32, funcname: String) -> Self {
+        let (filename, lineno) = Self::c_source_pair(filename, lineno);
         Self {
             filename: Some(filename),
             lineno,
             funcname: Some(funcname),
+        }
+    }
+
+    /// Location of a Rust report site (`#[track_caller]`/`file!()`),
+    /// expressed in C terms for the wire: the C basename the crate ports and
+    /// line 0 (Rust lines have no C counterpart; see `source_map`).
+    #[cold]
+    pub fn from_rust_site(file: &str, _line: u32) -> Self {
+        let (filename, lineno) = Self::c_source_pair(String::from(file), 0);
+        Self {
+            filename: Some(filename),
+            lineno,
+            funcname: None,
+        }
+    }
+
+    /// A C filename passes through with its line; a Rust path is mapped to
+    /// its C basename and the line dropped to 0.
+    fn c_source_pair(filename: String, lineno: i32) -> (String, i32) {
+        match crate::source_map::c_basename_for_rust_path(&filename) {
+            Some(c) => (c, 0),
+            None => (filename, lineno),
         }
     }
 }
@@ -107,11 +130,7 @@ impl PgError {
     }
 
     #[cold]
-    fn new_impl(
-        level: ErrorLevel,
-        message: String,
-        caller: &core::panic::Location<'_>,
-    ) -> Self {
+    fn new_impl(level: ErrorLevel, message: String, caller: &core::panic::Location<'_>) -> Self {
         Self {
             level,
             sqlstate: default_sqlstate_for_level(level),
@@ -127,11 +146,7 @@ impl PgError {
             context_domain: None,
             hide_statement: false,
             hide_context: false,
-            location: Some(ErrorLocation {
-                filename: Some(caller.file().into()),
-                lineno: caller.line() as i32,
-                funcname: None,
-            }),
+            location: Some(ErrorLocation::from_rust_site(caller.file(), caller.line())),
             saved_errno: None,
             cursor_position: None,
             internal_position: None,
@@ -382,8 +397,16 @@ impl PgError {
             Some(captured) => {
                 let explicit_pair = location.filename.is_some() || location.lineno > 0;
                 ErrorLocation {
-                    filename: if explicit_pair { location.filename } else { captured.filename },
-                    lineno: if explicit_pair { location.lineno } else { captured.lineno },
+                    filename: if explicit_pair {
+                        location.filename
+                    } else {
+                        captured.filename
+                    },
+                    lineno: if explicit_pair {
+                        location.lineno
+                    } else {
+                        captured.lineno
+                    },
                     funcname: location.funcname.or(captured.funcname),
                 }
             }
@@ -635,14 +658,36 @@ mod tests {
     }
 
     // C parity: every report site carries file/line (the wire F/L fields).
+    // A Rust site is reported as the C basename of the crate it ports (the
+    // wire must never carry a `crates/...` path) with line 0.
     #[test]
-    fn construction_captures_caller_file_line() {
-        let before = line!();
+    fn construction_captures_caller_as_c_basename() {
         let err = PgError::error("boom");
         let loc = err.location().expect("track_caller capture");
-        assert_eq!(loc.filename.as_deref(), Some(file!()));
-        assert_eq!(loc.lineno, before as i32 + 1);
+        assert_eq!(loc.filename.as_deref(), Some("types_error.c"));
+        assert_eq!(loc.lineno, 0);
         assert_eq!(loc.funcname, None);
+        assert!(!file!().ends_with(".c"));
+    }
+
+    #[test]
+    fn explicit_rust_path_location_is_mapped_too() {
+        // Sites that build `ErrorLocation::new(file!(), line!(), func)` get
+        // the same treatment as the implicit capture.
+        let loc = ErrorLocation::new(
+            "crates/backend/parser/parse_func/src/lib.rs",
+            1038,
+            "ParseFuncOrColumn",
+        );
+        assert_eq!(loc.filename.as_deref(), Some("parse_func.c"));
+        assert_eq!(loc.lineno, 0);
+        assert_eq!(loc.funcname.as_deref(), Some("ParseFuncOrColumn"));
+        // C names keep their line.
+        let loc = ErrorLocation::new("scan.l", 1240, "scanner_yyerror");
+        assert_eq!(
+            (loc.filename.as_deref(), loc.lineno),
+            (Some("scan.l"), 1240)
+        );
     }
 
     #[test]
@@ -651,8 +696,8 @@ mod tests {
         let err = PgError::error("x").with_funcname("RevalidateCachedQuery");
         let loc = err.location().unwrap();
         assert_eq!(loc.funcname.as_deref(), Some("RevalidateCachedQuery"));
-        assert_eq!(loc.filename.as_deref(), Some(file!()));
-        assert!(loc.lineno > 0);
+        assert_eq!(loc.filename.as_deref(), Some("types_error.c"));
+        assert_eq!(loc.lineno, 0);
 
         // All-empty explicit location (elog's): capture stands.
         let err = PgError::error("x").with_error_location(ErrorLocation {
@@ -660,7 +705,10 @@ mod tests {
             lineno: 0,
             funcname: None,
         });
-        assert_eq!(err.location().unwrap().filename.as_deref(), Some(file!()));
+        assert_eq!(
+            err.location().unwrap().filename.as_deref(),
+            Some("types_error.c")
+        );
 
         // Explicit file/line pair replaces the captured pair as a unit.
         let err = PgError::error("x").with_error_location(ErrorLocation {
@@ -688,7 +736,9 @@ mod tests {
             .with_error_field(PG_DIAG_COLUMN_NAME, "col")
             .unwrap();
         assert_eq!(err.column_name(), Some("col"));
-        assert!(PgError::error("x").with_error_field(ErrorField(0), "v").is_err());
+        assert!(PgError::error("x")
+            .with_error_field(ErrorField(0), "v")
+            .is_err());
 
         let mut soft = SoftErrorContext::new(true);
         assert!(!soft.error_occurred());

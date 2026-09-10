@@ -11,7 +11,6 @@ use types_rel::{
     NoLock, Relation, RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 
-
 const MaxHeapAttributeNumber: usize = 1600;
 
 pub(crate) struct InheritedNotNull<'mcx> {
@@ -93,7 +92,10 @@ pub(crate) fn merge_column_options<'mcx>(
         }
         let (colname, has_typename) = {
             let cd = elts[i].as_variant::<ColumnDef>().expect("ColumnDef");
-            (cd.colname.expect("ColumnDef.colname"), cd.typeName.is_some())
+            (
+                cd.colname.expect("ColumnDef.colname"),
+                cd.typeName.is_some(),
+            )
         };
         if !has_typename {
             return Err(Box::new(
@@ -112,8 +114,10 @@ pub(crate) fn merge_column_options<'mcx>(
             if !matches {
                 continue;
             }
-            let is_from_type =
-                elts[i].as_variant::<ColumnDef>().expect("ColumnDef").is_from_type;
+            let is_from_type = elts[i]
+                .as_variant::<ColumnDef>()
+                .expect("ColumnDef")
+                .is_from_type;
             if !is_from_type {
                 return Err(duplicate_column(colname));
             }
@@ -161,8 +165,11 @@ pub(crate) fn partition_column_dup_scan(table_elts: &NodeList<'_>) -> PgResult<(
         return Err(too_many_columns());
     }
     for (i, elt) in table_elts.iter().enumerate() {
-        let colname =
-            elt.as_variant::<ColumnDef>().expect("ColumnDef").colname.expect("ColumnDef.colname");
+        let colname = elt
+            .as_variant::<ColumnDef>()
+            .expect("ColumnDef")
+            .colname
+            .expect("ColumnDef.colname");
         for rest in table_elts.iter().skip(i + 1) {
             let restdef = rest.as_variant::<ColumnDef>().expect("ColumnDef");
             if restdef.colname == Some(colname) {
@@ -261,7 +268,8 @@ pub(crate) fn MergeAttributes<'mcx>(
         let tupdesc = relation.descr();
         // newattmap: parent attno (1-based) -> child attno (1-based), 0 for
         // dropped parent columns.
-        let mut newattmap: PgVec<'mcx, i16> = mcx::vec_from_elem_in(mcx, 0i16, tupdesc.natts as usize);
+        let mut newattmap: PgVec<'mcx, i16> =
+            mcx::vec_from_elem_in(mcx, 0i16, tupdesc.natts as usize);
 
         let nnconstrs = pg_constraint::RelationGetNotNullConstraints(mcx, &relation, false)?;
         let mut nncols: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
@@ -306,9 +314,7 @@ pub(crate) fn MergeAttributes<'mcx>(
             // Regular inheritance children do not inherit identity; only
             // partitions do (they take the lib.rs descriptor-copy leg).
 
-            let exist = inh_defs
-                .iter()
-                .position(|d| d.colname == Some(att_name));
+            let exist = inh_defs.iter().position(|d| d.colname == Some(att_name));
             let merged_idx = match exist {
                 Some(idx) => {
                     merge_inherited_attribute(mcx, &mut inh_defs[idx], &newdef)?;
@@ -341,8 +347,14 @@ pub(crate) fn MergeAttributes<'mcx>(
                     )
                 });
             let raw = readfuncs::stringToNode(mcx, &adbin)?;
-            let (expr, found_whole_row) =
-                rewrite_manip::map_variable_attnos(mcx, raw, 1, 0, &newattmap, types_core::InvalidOid)?;
+            let (expr, found_whole_row) = rewrite_manip::map_variable_attnos(
+                mcx,
+                raw,
+                1,
+                0,
+                &newattmap,
+                types_core::InvalidOid,
+            )?;
             let def = &mut inh_defs[idx];
             if found_whole_row {
                 return Err(Box::new(
@@ -377,8 +389,14 @@ pub(crate) fn MergeAttributes<'mcx>(
                     mcx,
                     check.ccbin.as_ref().expect("check ccbin").as_str(),
                 )?;
-                let (expr, found_whole_row) =
-                    rewrite_manip::map_variable_attnos(mcx, raw, 1, 0, &newattmap, types_core::InvalidOid)?;
+                let (expr, found_whole_row) = rewrite_manip::map_variable_attnos(
+                    mcx,
+                    raw,
+                    1,
+                    0,
+                    &newattmap,
+                    types_core::InvalidOid,
+                )?;
                 if found_whole_row {
                     return Err(Box::new(
                         PgError::new(ERROR, "cannot convert whole-row table reference".to_string())
@@ -449,7 +467,12 @@ pub(crate) fn MergeAttributes<'mcx>(
         }
     }
 
-    Ok(MergedAttributes { columns: merged, checks, notnulls, gendefs })
+    Ok(MergedAttributes {
+        columns: merged,
+        checks,
+        notnulls,
+        gendefs,
+    })
 }
 
 // makeColumnDef (makefuncs.c): direct-OID TypeName.
@@ -601,7 +624,10 @@ fn merge_inherited_attribute<'mcx>(
             return Err(column_conflict(
                 "column \"{}\" has a compression method conflict",
                 attname,
-                format!("{} versus {newcomp}", prevdef.compression.expect("compression")),
+                format!(
+                    "{} versus {newcomp}",
+                    prevdef.compression.expect("compression")
+                ),
                 types_error::ERRCODE_DATATYPE_MISMATCH,
             ));
         }
@@ -684,7 +710,10 @@ fn merge_child_attribute<'mcx>(
             return Err(column_conflict(
                 "column \"{}\" has a compression method conflict",
                 attname,
-                format!("{} versus {newcomp}", inhdef.compression.expect("compression")),
+                format!(
+                    "{} versus {newcomp}",
+                    inhdef.compression.expect("compression")
+                ),
                 types_error::ERRCODE_DATATYPE_MISMATCH,
             ));
         }
@@ -705,7 +734,11 @@ fn merge_child_attribute<'mcx>(
         return Err(child_generation_expression(attname));
     }
     if inhdef.generated != 0 && newdef.generated != 0 && newdef.generated != inhdef.generated {
-        return Err(generation_kind_conflict(attname, inhdef.generated, newdef.generated));
+        return Err(generation_kind_conflict(
+            attname,
+            inhdef.generated,
+            newdef.generated,
+        ));
     }
     if newdef.raw_default.is_some() {
         inhdef.raw_default = newdef.raw_default;
@@ -869,8 +902,11 @@ fn too_many_columns() -> Box<PgError> {
 #[inline(never)]
 pub(crate) fn duplicate_column(colname: &str) -> Box<PgError> {
     Box::new(
-        PgError::new(ERROR, format!("column \"{colname}\" specified more than once"))
-            .with_sqlstate(types_error::ERRCODE_DUPLICATE_COLUMN),
+        PgError::new(
+            ERROR,
+            format!("column \"{colname}\" specified more than once"),
+        )
+        .with_sqlstate(types_error::ERRCODE_DUPLICATE_COLUMN),
     )
 }
 
@@ -895,9 +931,7 @@ fn too_many_parents() -> Box<PgError> {
 #[cold]
 #[inline(never)]
 fn invalid_column_definition(msg: String) -> Box<PgError> {
-    Box::new(
-        PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION),
-    )
+    Box::new(PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION))
 }
 
 #[track_caller]
@@ -919,7 +953,11 @@ fn child_generation_expression(attname: &str) -> Box<PgError> {
 #[inline(never)]
 fn generation_kind_conflict(attname: &str, parent: u8, child: u8) -> Box<PgError> {
     let kind = |g: u8| {
-        if g == types_core::ATTRIBUTE_GENERATED_STORED { "STORED" } else { "VIRTUAL" }
+        if g == types_core::ATTRIBUTE_GENERATED_STORED {
+            "STORED"
+        } else {
+            "VIRTUAL"
+        }
     };
     Box::new(
         PgError::new(
@@ -968,7 +1006,11 @@ fn column_conflict(
 ) -> Box<PgError> {
     let msg = template.replacen("{}", attname, 1);
     let e = PgError::new(ERROR, msg).with_sqlstate(sqlstate);
-    Box::new(if detail.is_empty() { e } else { e.with_detail(detail) })
+    Box::new(if detail.is_empty() {
+        e
+    } else {
+        e.with_detail(detail)
+    })
 }
 
 #[cold]
@@ -1111,8 +1153,11 @@ pub(crate) fn CreateInheritance<'mcx>(
     parent_rel: &Relation<'mcx>,
     ispartition: bool,
 ) -> PgResult<()> {
-    let catalog_rel =
-        table::table_open(mcx, pg_inherits::InheritsRelationId, types_rel::RowExclusiveLock)?;
+    let catalog_rel = table::table_open(
+        mcx,
+        pg_inherits::InheritsRelationId,
+        types_rel::RowExclusiveLock,
+    )?;
     let key = crate::alter::oid_scankey(
         pg_inherits::Anum_pg_inherits_inhrelid as usize,
         child_rel.rd_id,
@@ -1203,8 +1248,9 @@ fn MergeAttributesIntoExisting<'mcx>(
             continue;
         }
         let attname_bytes = parent_att.attname.name_str();
-        let parent_attname =
-            core::str::from_utf8(attname_bytes).expect("attname UTF-8").to_string();
+        let parent_attname = core::str::from_utf8(attname_bytes)
+            .expect("attname UTF-8")
+            .to_string();
         let Some(child_attno) = desc_attno_by_name(child_desc, attname_bytes) else {
             return Err(column_conflict(
                 "child table is missing column \"{}\"",
@@ -1214,8 +1260,7 @@ fn MergeAttributesIntoExisting<'mcx>(
             ));
         };
         let child_att = child_desc.attr(child_attno as usize - 1);
-        if parent_att.atttypid != child_att.atttypid
-            || parent_att.atttypmod != child_att.atttypmod
+        if parent_att.atttypid != child_att.atttypid || parent_att.atttypmod != child_att.atttypmod
         {
             return Err(Box::new(
                 PgError::new(
@@ -1367,8 +1412,9 @@ fn collect_con_rows<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Vec<
             )
         };
         let namelen = namebytes.iter().position(|&b| b == 0).unwrap_or(64);
-        let conname =
-            core::str::from_utf8(&namebytes[..namelen]).expect("conname UTF-8").to_string();
+        let conname = core::str::from_utf8(&namebytes[..namelen])
+            .expect("conname UTF-8")
+            .to_string();
         let decompiled = if contype == pg_constraint::CONSTRAINT_CHECK {
             let mut isnull = false;
             // SAFETY: conbin under pg_constraint's descriptor; null-checked below.
@@ -1400,7 +1446,11 @@ fn collect_con_rows<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Vec<
             let image =
                 unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
             let payload = varlena::open_image(mcx, image)?;
-            Some(core::str::from_utf8(payload.as_bytes()).expect("text UTF-8").to_string())
+            Some(
+                core::str::from_utf8(payload.as_bytes())
+                    .expect("text UTF-8")
+                    .to_string(),
+            )
         } else {
             None
         };
@@ -1410,7 +1460,11 @@ fn collect_con_rows<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Vec<
             if att.attisdropped {
                 return Err(notnull_constraint_on_dropped_column());
             }
-            Some(core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8").to_string())
+            Some(
+                core::str::from_utf8(att.attname.name_str())
+                    .expect("attname UTF-8")
+                    .to_string(),
+            )
         } else {
             None
         };
@@ -1488,7 +1542,11 @@ fn MergeConstraintsIntoExisting<'mcx>(
                 return Err(child_con_conflict(&ccon.conname, &child_name, "NOT VALID"));
             }
             if pcon.conenforced && !ccon.conenforced {
-                return Err(child_con_conflict(&ccon.conname, &child_name, "NOT ENFORCED"));
+                return Err(child_con_conflict(
+                    &ccon.conname,
+                    &child_name,
+                    "NOT ENFORCED",
+                ));
             }
             if ccon.coninhcount == i16::MAX {
                 return Err(too_many_parents());
@@ -1542,7 +1600,9 @@ pub(crate) fn ATExecDropInherit<'mcx>(
     prv: &types_nodes::RangeVar<'_>,
 ) -> PgResult<()> {
     if rel.rd_rel.relispartition {
-        return Err(wrong_parent("cannot change inheritance of a partition".to_string()));
+        return Err(wrong_parent(
+            "cannot change inheritance of a partition".to_string(),
+        ));
     }
     let rv = rel_vocab::RangeVar {
         catalogname: prv.catalogname,
@@ -1578,9 +1638,7 @@ pub(crate) fn RemoveInheritance<'mcx>(
     )?;
     if !found {
         let msg = if is_partitioning {
-            format!(
-                "relation \"{child_name}\" is not a partition of relation \"{parent_name}\""
-            )
+            format!("relation \"{child_name}\" is not a partition of relation \"{parent_name}\"")
         } else {
             format!("relation \"{parent_name}\" is not a parent of relation \"{child_name}\"")
         };
@@ -1601,7 +1659,10 @@ pub(crate) fn RemoveInheritance<'mcx>(
         }
         let newcount = att.attinhcount - 1;
         let mut fields: PgVec<'mcx, (usize, datum::Datum)> = PgVec::new_in(mcx);
-        fields.push((Anum_pg_attribute_attinhcount, datum::Datum::from_i16(newcount)));
+        fields.push((
+            Anum_pg_attribute_attinhcount,
+            datum::Datum::from_i16(newcount),
+        ));
         if newcount == 0 {
             fields.push((Anum_pg_attribute_attislocal, datum::Datum::from_bool(true)));
         }
@@ -1699,8 +1760,11 @@ fn drop_parent_dependency<'mcx>(
     refobjid: Oid,
     deptype: pg_depend::DependencyType,
 ) -> PgResult<()> {
-    let dep_rel =
-        table::table_open(mcx, pg_depend::DependRelationId, types_rel::RowExclusiveLock)?;
+    let dep_rel = table::table_open(
+        mcx,
+        pg_depend::DependRelationId,
+        types_rel::RowExclusiveLock,
+    )?;
     let keys = [
         crate::alter::oid_scankey(1, RELATION_RELATION_ID),
         crate::alter::oid_scankey(2, relid),
@@ -1719,17 +1783,13 @@ fn drop_parent_dependency<'mcx>(
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let mut isnull = false;
         // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
-        let refclassid =
-            unsafe { types_tuple::heap_getattr(tup, 4, desc, &mut isnull) }.as_oid();
+        let refclassid = unsafe { types_tuple::heap_getattr(tup, 4, desc, &mut isnull) }.as_oid();
         // SAFETY: as above.
-        let dep_refobjid =
-            unsafe { types_tuple::heap_getattr(tup, 5, desc, &mut isnull) }.as_oid();
+        let dep_refobjid = unsafe { types_tuple::heap_getattr(tup, 5, desc, &mut isnull) }.as_oid();
         // SAFETY: as above.
-        let refobjsubid =
-            unsafe { types_tuple::heap_getattr(tup, 6, desc, &mut isnull) }.as_i32();
+        let refobjsubid = unsafe { types_tuple::heap_getattr(tup, 6, desc, &mut isnull) }.as_i32();
         // SAFETY: as above.
-        let dtype =
-            unsafe { types_tuple::heap_getattr(tup, 7, desc, &mut isnull) }.as_i8();
+        let dtype = unsafe { types_tuple::heap_getattr(tup, 7, desc, &mut isnull) }.as_i8();
         if refclassid == RELATION_RELATION_ID
             && dep_refobjid == refobjid
             && refobjsubid == 0
@@ -1802,7 +1862,8 @@ mod tests {
         let mcx = ctx().mcx();
         let mut cols = NodeList::nil();
         cols.lappend(mcx, coldef(mcx, "id", true, false)).unwrap();
-        cols.lappend(mcx, coldef(mcx, "myname", false, true)).unwrap();
+        cols.lappend(mcx, coldef(mcx, "myname", false, true))
+            .unwrap();
         let e = merge_column_options(mcx, &cols).unwrap_err();
         assert_eq!(e.message(), "column \"myname\" does not exist");
     }
@@ -1813,7 +1874,8 @@ mod tests {
         let mut cols = NodeList::nil();
         cols.lappend(mcx, coldef(mcx, "name", true, false)).unwrap();
         cols.lappend(mcx, coldef(mcx, "name", false, true)).unwrap();
-        cols.lappend(mcx, coldef(mcx, "name", false, false)).unwrap();
+        cols.lappend(mcx, coldef(mcx, "name", false, false))
+            .unwrap();
         let e = merge_column_options(mcx, &cols).unwrap_err();
         assert_eq!(e.message(), "column \"name\" specified more than once");
     }
@@ -1861,7 +1923,9 @@ mod panic_hygiene_tests {
 #[cold]
 #[inline(never)]
 pub(crate) fn null_conbin_for_constraint(conoid: Oid) -> Box<PgError> {
-    Box::new(PgError::error(format!("null conbin for constraint {conoid}")))
+    Box::new(PgError::error(format!(
+        "null conbin for constraint {conoid}"
+    )))
 }
 
 // elog(ERROR, "found not-null constraint on dropped columns")
@@ -1869,7 +1933,9 @@ pub(crate) fn null_conbin_for_constraint(conoid: Oid) -> Box<PgError> {
 #[cold]
 #[inline(never)]
 pub(crate) fn notnull_constraint_on_dropped_column() -> Box<PgError> {
-    Box::new(PgError::error("found not-null constraint on dropped columns"))
+    Box::new(PgError::error(
+        "found not-null constraint on dropped columns",
+    ))
 }
 
 // elog(ERROR, "relation %u has non-inherited constraint \"%s\"")
@@ -1909,7 +1975,10 @@ mod elog_hygiene_tests_b088 {
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         let r = std::panic::catch_unwind(|| super::non_inherited_constraint(16384, "c_chk"));
         let e = r.expect("non_inherited_constraint panicked");
-        assert_eq!(e.message(), "relation 16384 has non-inherited constraint \"c_chk\"");
+        assert_eq!(
+            e.message(),
+            "relation 16384 has non-inherited constraint \"c_chk\""
+        );
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
         let r = std::panic::catch_unwind(|| super::unmatched_constraints(2, "child", "parent"));
         let e = r.expect("unmatched_constraints panicked");

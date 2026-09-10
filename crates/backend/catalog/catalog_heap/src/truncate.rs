@@ -1,7 +1,9 @@
 use mcx::{Mcx, PgVec};
 use types_core::{InvalidOid, Oid, CONSTRAINT_OID_INDEX_ID, CONSTRAINT_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, Relation, RELKIND_PARTITIONED_TABLE};
+use types_rel::{
+    AccessExclusiveLock, AccessShareLock, NoLock, Relation, RELKIND_PARTITIONED_TABLE,
+};
 
 use pg_constraint::{
     Anum_pg_constraint_confrelid, Anum_pg_constraint_conparentid, Anum_pg_constraint_conrelid,

@@ -138,7 +138,10 @@ fn errno_helpers_match_postgres_categories() {
         errno::sqlstate_for_file_access(errno::EEXIST),
         ERRCODE_DUPLICATE_FILE
     );
-    assert_eq!(errno::sqlstate_for_file_access(errno::ENOSPC), ERRCODE_DISK_FULL);
+    assert_eq!(
+        errno::sqlstate_for_file_access(errno::ENOSPC),
+        ERRCODE_DISK_FULL
+    );
     assert_eq!(
         errno::sqlstate_for_socket_access(errno::ECONNRESET),
         ERRCODE_CONNECTION_FAILURE
@@ -226,7 +229,9 @@ fn unhandled_error_report_promotes_error_to_fatal() {
 
     static SEEN: Mutex<Vec<(ErrorLevel, String)>> = Mutex::new(Vec::new());
     fn hook(error: &PgError, _output_to_server: &mut bool) {
-        SEEN.lock().unwrap().push((error.level, error.message.clone()));
+        SEEN.lock()
+            .unwrap()
+            .push((error.level, error.message.clone()));
     }
     SEEN.lock().unwrap().clear();
     let previous = set_emit_log_hook(Some(hook));
@@ -243,7 +248,10 @@ fn unhandled_error_report_promotes_error_to_fatal() {
     assert_eq!(
         seen.as_slice(),
         [
-            (FATAL, "maximum number of prepared transactions reached".to_owned()),
+            (
+                FATAL,
+                "maximum number of prepared transactions reached".to_owned()
+            ),
             (WARNING, "still a warning".to_owned()),
             (PANIC, "still a panic".to_owned()),
         ]
@@ -314,7 +322,9 @@ fn context_attaches_on_propagation_innermost_first() {
             .map_err(|e| e.add_context("inner frame"))
             .map_err(::core::convert::Into::into)
     }
-    let err = middle().map_err(|e| e.add_context("outer frame")).unwrap_err();
+    let err = middle()
+        .map_err(|e| e.add_context("outer frame"))
+        .unwrap_err();
     assert_eq!(err.context.as_deref(), Some("inner frame\nouter frame"));
 }
 
@@ -677,7 +687,10 @@ fn log_destination_check_accepts_structured_writers() {
     // error_small_seams by syslogger::init_seams), so the GUC accepts the
     // keywords as C does. The former seam-audit F2 rejection is retired.
     use types_error::{LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG};
-    assert_eq!(check_log_destination("csvlog").unwrap(), LOG_DESTINATION_CSVLOG);
+    assert_eq!(
+        check_log_destination("csvlog").unwrap(),
+        LOG_DESTINATION_CSVLOG
+    );
     assert_eq!(
         check_log_destination("stderr, JSONLOG").unwrap(),
         LOG_DESTINATION_STDERR | LOG_DESTINATION_JSONLOG
@@ -735,7 +748,10 @@ fn err_sendbytes_passes_raw_high_bytes() {
 
     let e = ::types_error::PgError::error_raw_message(b"unrecognized weight: \xE5".to_vec());
     assert_eq!(e.message(), "unrecognized weight: \u{FFFD}");
-    assert_eq!(e.message_raw.as_deref(), Some(&b"unrecognized weight: \xE5"[..]));
+    assert_eq!(
+        e.message_raw.as_deref(),
+        Some(&b"unrecognized weight: \xE5"[..])
+    );
     // The NUL variant: lossy message ends where C's cstring would.
     let e = ::types_error::PgError::error_raw_message(b"unrecognized weight: \0".to_vec());
     assert_eq!(e.message(), "unrecognized weight: ");
@@ -811,7 +827,10 @@ fn exit_on_any_error_is_the_globals_cell() {
     let _guard = lock();
     let saved = init_small::globals::ExitOnAnyError();
     init_small::globals::SetExitOnAnyError(true);
-    assert!(config::exit_on_any_error(), "async.c:1933's SetExitOnAnyError(true) must reach errstart");
+    assert!(
+        config::exit_on_any_error(),
+        "async.c:1933's SetExitOnAnyError(true) must reach errstart"
+    );
     init_small::globals::SetExitOnAnyError(false);
     assert!(!config::exit_on_any_error());
     // The GUC/xact side writes through elog's setter; the globals cell follows.
@@ -839,6 +858,9 @@ fn is_under_postmaster_is_the_globals_cell() {
     let _guard = lock();
     let saved = init_small::globals::IsUnderPostmaster();
     init_small::globals::SetIsUnderPostmaster(true);
-    assert!(config::is_under_postmaster(), "miscinit's SetIsUnderPostmaster(true) must reach DebugFileOpen");
+    assert!(
+        config::is_under_postmaster(),
+        "miscinit's SetIsUnderPostmaster(true) must reach DebugFileOpen"
+    );
     init_small::globals::SetIsUnderPostmaster(saved);
 }

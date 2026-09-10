@@ -4,7 +4,7 @@ use std::sync::Once;
 use mcx::{Mcx, MemoryContext, PgVec};
 use parser_small1::{make_parsestate, ParseNamespaceItem, ParseState};
 use types_core::catalog::{INT4OID, RECORDOID, TEXTOID};
-use types_core::{InvalidOid, Oid, RELPERSISTENCE_PERMANENT, INVALID_PROC_NUMBER};
+use types_core::{InvalidOid, Oid, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
 use types_error::{
     PgResult, ERRCODE_AMBIGUOUS_ALIAS, ERRCODE_AMBIGUOUS_COLUMN, ERRCODE_DUPLICATE_ALIAS,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_TABLE,
@@ -12,8 +12,8 @@ use types_error::{
 use types_nodes::parsenodes::ACL_SELECT;
 use types_nodes::{Alias, Node, NodeList, RTEKind, RTEPermissionInfo};
 use types_rel::{
-    AccessShareLock, FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData,
-    LOCKMODE, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,
+    AccessShareLock, FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData, LOCKMODE,
+    RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,
 };
 use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
 use types_tuple::{FormData_pg_attribute, NameData};
@@ -33,14 +33,26 @@ struct Col {
 }
 
 const fn col(name: &'static str, typid: Oid, collation: Oid) -> Col {
-    Col { name, typid, typmod: -1, collation, dropped: false }
+    Col {
+        name,
+        typid,
+        typmod: -1,
+        collation,
+        dropped: false,
+    }
 }
 
 static T_COLS: [Col; 2] = [col("x", INT4OID, InvalidOid), col("y", TEXTOID, 100)];
 static U_COLS: [Col; 1] = [col("x", INT4OID, InvalidOid)];
 static D_COLS: [Col; 3] = [
     col("a", INT4OID, InvalidOid),
-    Col { name: "", typid: InvalidOid, typmod: -1, collation: InvalidOid, dropped: true },
+    Col {
+        name: "",
+        typid: InvalidOid,
+        typmod: -1,
+        collation: InvalidOid,
+        dropped: true,
+    },
     col("b", TEXTOID, 100),
 ];
 
@@ -75,7 +87,9 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, cols: &[Col]) -> Relation<'m
         a.attname.namestrcpy(c.name);
         attrs.push(a);
     }
-    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+    let data = RelationData {
+        rd_locator: Default::default(),
+        rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -84,7 +98,12 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, cols: &[Col]) -> Relation<'m
         rd_newRelfilelocatorSubid: std::cell::Cell::new(0),
         rd_firstRelfilelocatorSubid: std::cell::Cell::new(0),
         rd_droppedSubid: std::cell::Cell::new(0),
-        rd_lockInfo: LockInfoData { lockRelId: LockRelId { relId: oid, dbId: 5 } },
+        rd_lockInfo: LockInfoData {
+            lockRelId: LockRelId {
+                relId: oid,
+                dbId: 5,
+            },
+        },
         rd_rel: FormData_pg_class {
             relname,
             relnamespace: 2200,
@@ -119,19 +138,24 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, cols: &[Col]) -> Relation<'m
         pgstat_enabled: std::cell::Cell::new(false),
         pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_opcoptions: Default::default(),
         rd_indexlist: Default::default(),
-            rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
     };
     Relation::open(data, None)
 }
 
 fn by_name(relname: &str) -> Option<Oid> {
-    [T_OID, U_OID, D_OID].into_iter().find(|&oid| entry(oid).unwrap().0 == relname)
+    [T_OID, U_OID, D_OID]
+        .into_iter()
+        .find(|&oid| entry(oid).unwrap().0 == relname)
 }
 
 fn fake_relation_open(mcx: Mcx<'_>, oid: Oid, _lockmode: LOCKMODE) -> PgResult<Relation<'_>> {
@@ -177,7 +201,11 @@ fn install() {
     });
 }
 
-fn rv<'mcx>(mcx: Mcx<'mcx>, relname: &'mcx str, alias: Option<&'mcx Alias<'mcx>>) -> &'mcx types_nodes::RangeVar<'mcx> {
+fn rv<'mcx>(
+    mcx: Mcx<'mcx>,
+    relname: &'mcx str,
+    alias: Option<&'mcx Alias<'mcx>>,
+) -> &'mcx types_nodes::RangeVar<'mcx> {
     Node::mk_mut(
         mcx,
         types_nodes::RangeVar {
@@ -204,7 +232,9 @@ fn add<'mcx>(
     addRangeTableEntry(mcx, pstate, r, alias, r.inh, true).unwrap()
 }
 
-fn perminfo_of<'mcx>(nsitem: &parser_small1::ParseNamespaceItem<'mcx>) -> &'mcx RTEPermissionInfo<'mcx> {
+fn perminfo_of<'mcx>(
+    nsitem: &parser_small1::ParseNamespaceItem<'mcx>,
+) -> &'mcx RTEPermissionInfo<'mcx> {
     nsitem.p_perminfo.unwrap().as_rte_permission_info().unwrap()
 }
 
@@ -231,7 +261,11 @@ fn add_range_table_entry_builds_relation_rte() {
 
     let eref = rte.eref.unwrap();
     assert_eq!(eref.aliasname, Some("t"));
-    let names: Vec<_> = eref.colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+    let names: Vec<_> = eref
+        .colnames
+        .iter()
+        .map(|n| n.as_string().unwrap().sval)
+        .collect();
     assert_eq!(names, ["x", "y"]);
 
     assert_eq!(pstate.p_rtable.len(), 1);
@@ -244,7 +278,10 @@ fn add_range_table_entry_builds_relation_rte() {
 
     let cols = nsitem.p_nscolumns;
     assert_eq!(cols.len(), 2);
-    assert_eq!((cols[0].p_varno, cols[0].p_varattno, cols[0].p_vartype), (1, 1, INT4OID));
+    assert_eq!(
+        (cols[0].p_varno, cols[0].p_varattno, cols[0].p_vartype),
+        (1, 1, INT4OID)
+    );
     assert_eq!((cols[1].p_vartype, cols[1].p_varcollid), (TEXTOID, 100));
     assert!(nsitem.p_rel_visible && nsitem.p_cols_visible);
 }
@@ -257,14 +294,27 @@ fn alias_overrides_refname_and_colnames() {
     let mut pstate = make_parsestate(mcx, None);
 
     let mut colnames = NodeList::nil();
-    colnames.lappend(mcx, Node::mk_string(mcx, "a").unwrap()).unwrap();
-    let alias =
-        Node::mk_mut(mcx, Alias { aliasname: Some("c"), colnames }).unwrap().seal_ref();
+    colnames
+        .lappend(mcx, Node::mk_string(mcx, "a").unwrap())
+        .unwrap();
+    let alias = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("c"),
+            colnames,
+        },
+    )
+    .unwrap()
+    .seal_ref();
 
     let nsitem = add(mcx, &mut pstate, "t", Some(alias));
     let eref = nsitem.rte().eref.unwrap();
     assert_eq!(eref.aliasname, Some("c"));
-    let names: Vec<_> = eref.colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+    let names: Vec<_> = eref
+        .colnames
+        .iter()
+        .map(|n| n.as_string().unwrap().sval)
+        .collect();
     assert_eq!(names, ["a", "y"]);
     assert_eq!(nsitem.rte().alias.unwrap().aliasname, Some("c"));
 }
@@ -278,16 +328,29 @@ fn too_many_column_aliases_is_42p10() {
 
     let mut colnames = NodeList::nil();
     for n in ["a", "b"] {
-        colnames.lappend(mcx, Node::mk_string(mcx, n).unwrap()).unwrap();
+        colnames
+            .lappend(mcx, Node::mk_string(mcx, n).unwrap())
+            .unwrap();
     }
-    let alias =
-        Node::mk_mut(mcx, Alias { aliasname: Some("c"), colnames }).unwrap().seal_ref();
+    let alias = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("c"),
+            colnames,
+        },
+    )
+    .unwrap()
+    .seal_ref();
 
     let r = rv(mcx, "u", Some(alias));
-    let err =
-        addRangeTableEntry(mcx, &mut pstate, r, Some(alias), true, true).map(|_| ()).unwrap_err();
+    let err = addRangeTableEntry(mcx, &mut pstate, r, Some(alias), true, true)
+        .map(|_| ())
+        .unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_COLUMN_REFERENCE);
-    assert_eq!(err.message, "table \"c\" has 1 columns available but 2 columns specified");
+    assert_eq!(
+        err.message,
+        "table \"c\" has 1 columns available but 2 columns specified"
+    );
 }
 
 #[test]
@@ -299,8 +362,9 @@ fn missing_relation_is_42p01() {
     pstate.p_sourcetext = Some(b"SELECT x FROM nope");
 
     let r = rv(mcx, "nope", None);
-    let err =
-        addRangeTableEntry(mcx, &mut pstate, r, None, true, true).map(|_| ()).unwrap_err();
+    let err = addRangeTableEntry(mcx, &mut pstate, r, None, true, true)
+        .map(|_| ())
+        .unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_TABLE);
     assert_eq!(err.message, "relation \"nope\" does not exist");
     assert_eq!(err.cursor_position(), Some(15));
@@ -319,16 +383,27 @@ fn col_name_to_var_builds_var_and_marks_select_priv() {
     let node = colNameToVar(mcx, &pstate, "y", false, 7).unwrap().unwrap();
     let var = node.as_var().unwrap();
     assert_eq!((var.varno, var.varattno), (1, 2));
-    assert_eq!((var.vartype, var.vartypmod, var.varcollid), (TEXTOID, -1, 100));
+    assert_eq!(
+        (var.vartype, var.vartypmod, var.varcollid),
+        (TEXTOID, -1, 100)
+    );
     assert_eq!(var.varlevelsup, 0);
     assert_eq!((var.varnosyn, var.varattnosyn), (1, 2));
     assert_eq!(var.location, 7);
 
-    let perminfo = pstate.p_rteperminfos.nth(0).as_rte_permission_info().unwrap();
+    let perminfo = pstate
+        .p_rteperminfos
+        .nth(0)
+        .as_rte_permission_info()
+        .unwrap();
     assert_eq!(perminfo.requiredPerms, ACL_SELECT);
-    assert!(perminfo.selectedCols.is_member(2 - FirstLowInvalidHeapAttributeNumber));
+    assert!(perminfo
+        .selectedCols
+        .is_member(2 - FirstLowInvalidHeapAttributeNumber));
 
-    assert!(colNameToVar(mcx, &pstate, "nope", false, 7).unwrap().is_none());
+    assert!(colNameToVar(mcx, &pstate, "nope", false, 7)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -355,16 +430,23 @@ fn ambiguous_table_alias_is_42p09() {
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
 
-    let alias = Node::mk_mut(mcx, Alias { aliasname: Some("z"), colnames: NodeList::nil() })
-        .unwrap()
-        .seal_ref();
+    let alias = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("z"),
+            colnames: NodeList::nil(),
+        },
+    )
+    .unwrap()
+    .seal_ref();
     let n1 = add(mcx, &mut pstate, "t", Some(alias));
     pstate.p_namespace.push(n1);
     let n2 = add(mcx, &mut pstate, "u", Some(alias));
     pstate.p_namespace.push(n2);
 
-    let err =
-        refnameNamespaceItem(&pstate, None, "z", -1, None).map(|_| ()).unwrap_err();
+    let err = refnameNamespaceItem(&pstate, None, "z", -1, None)
+        .map(|_| ())
+        .unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_AMBIGUOUS_ALIAS);
     assert_eq!(err.message, "table reference \"z\" is ambiguous");
 }
@@ -385,7 +467,9 @@ fn refname_namespace_item_finds_by_name() {
         .unwrap();
     assert_eq!(found.p_rtindex, 1);
     assert_eq!(sublevels_up, 0);
-    assert!(refnameNamespaceItem(&pstate, None, "nope", -1, None).unwrap().is_none());
+    assert!(refnameNamespaceItem(&pstate, None, "nope", -1, None)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -395,15 +479,20 @@ fn duplicate_alias_is_42712() {
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
 
-    let alias = Node::mk_mut(mcx, Alias { aliasname: Some("z"), colnames: NodeList::nil() })
-        .unwrap()
-        .seal_ref();
+    let alias = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("z"),
+            colnames: NodeList::nil(),
+        },
+    )
+    .unwrap()
+    .seal_ref();
     let n1 = add(mcx, &mut pstate, "t", Some(alias));
     pstate.p_namespace.push(n1);
     let n2 = add(mcx, &mut pstate, "u", Some(alias));
 
-    let err = checkNameSpaceConflicts(pstate.p_namespace.as_slice(), &[n2])
-        .unwrap_err();
+    let err = checkNameSpaceConflicts(pstate.p_namespace.as_slice(), &[n2]).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_DUPLICATE_ALIAS);
     assert_eq!(err.message, "table name \"z\" specified more than once");
 
@@ -459,17 +548,29 @@ fn error_missing_rte_alias_hint_arm() {
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
 
-    let alias = Node::mk_mut(mcx, Alias { aliasname: Some("f"), colnames: NodeList::nil() })
-        .unwrap()
-        .seal_ref();
+    let alias = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("f"),
+            colnames: NodeList::nil(),
+        },
+    )
+    .unwrap()
+    .seal_ref();
     let n1 = add(mcx, &mut pstate, "t", Some(alias));
     pstate.p_namespace.push(n1);
 
     let r = rv(mcx, "t", None);
     let err = errorMissingRTE(mcx, &pstate, r);
     assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_TABLE);
-    assert_eq!(err.message, "invalid reference to FROM-clause entry for table \"t\"");
-    assert_eq!(err.hint(), Some("Perhaps you meant to reference the table alias \"f\"."));
+    assert_eq!(
+        err.message,
+        "invalid reference to FROM-clause entry for table \"t\""
+    );
+    assert_eq!(
+        err.hint(),
+        Some("Perhaps you meant to reference the table alias \"f\".")
+    );
 }
 
 #[test]
@@ -493,9 +594,17 @@ fn expand_ns_item_attrs_builds_target_entries() {
     assert_eq!((te1.resno, te1.resname), (2, Some("y")));
     assert_eq!(pstate.p_next_resno, 3);
 
-    let perminfo = pstate.p_rteperminfos.nth(0).as_rte_permission_info().unwrap();
-    assert!(perminfo.selectedCols.is_member(1 - FirstLowInvalidHeapAttributeNumber));
-    assert!(perminfo.selectedCols.is_member(2 - FirstLowInvalidHeapAttributeNumber));
+    let perminfo = pstate
+        .p_rteperminfos
+        .nth(0)
+        .as_rte_permission_info()
+        .unwrap();
+    assert!(perminfo
+        .selectedCols
+        .is_member(1 - FirstLowInvalidHeapAttributeNumber));
+    assert!(perminfo
+        .selectedCols
+        .is_member(2 - FirstLowInvalidHeapAttributeNumber));
 }
 
 #[test]
@@ -506,8 +615,14 @@ fn dropped_columns_skip_expansion_and_get_empty_eref_cells() {
     let mut pstate = make_parsestate(mcx, None);
 
     let nsitem = add(mcx, &mut pstate, "d", None);
-    let eref_names: Vec<_> =
-        nsitem.rte().eref.unwrap().colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+    let eref_names: Vec<_> = nsitem
+        .rte()
+        .eref
+        .unwrap()
+        .colnames
+        .iter()
+        .map(|n| n.as_string().unwrap().sval)
+        .collect();
     assert_eq!(eref_names, ["a", "", "b"]);
     assert_eq!(nsitem.p_nscolumns[1].p_varno, 0);
 
@@ -515,7 +630,10 @@ fn dropped_columns_skip_expansion_and_get_empty_eref_cells() {
     let nsitem = pstate.p_namespace[0];
     let (vars, colnames) = expandNSItemVars(mcx, &pstate, nsitem, 0, 7).unwrap();
     assert_eq!(vars.len(), 2);
-    let names: Vec<_> = colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+    let names: Vec<_> = colnames
+        .iter()
+        .map(|n| n.as_string().unwrap().sval)
+        .collect();
     assert_eq!(names, ["a", "b"]);
     assert_eq!(vars.nth(1).as_var().unwrap().varattno, 3);
 }
@@ -538,7 +656,10 @@ fn expand_rte_relation_arm_matches_ns_item_expansion() {
         false,
     )
     .unwrap();
-    let names: Vec<_> = colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+    let names: Vec<_> = colnames
+        .iter()
+        .map(|n| n.as_string().unwrap().sval)
+        .collect();
     assert_eq!(names, ["a", "b"]);
     assert_eq!(colvars.len(), 2);
     assert_eq!(colvars.nth(1).as_var().unwrap().varattno, 3);
@@ -555,7 +676,10 @@ fn add_ns_item_to_query_sets_flags_and_joinlist() {
     addNSItemToQuery(mcx, &mut pstate, nsitem, true, true, false).unwrap();
 
     assert_eq!(pstate.p_joinlist.len(), 1);
-    assert_eq!(pstate.p_joinlist.nth(0).as_range_tbl_ref().unwrap().rtindex, 1);
+    assert_eq!(
+        pstate.p_joinlist.nth(0).as_range_tbl_ref().unwrap().rtindex,
+        1
+    );
     let item = pstate.p_namespace[0];
     assert!(item.p_rel_visible);
     assert!(!item.p_cols_visible);
@@ -583,19 +707,38 @@ fn system_columns_resolve_with_catalog_types() {
         let node = colNameToVar(mcx, &pstate, name, false, 7).unwrap().unwrap();
         let var = node.as_var().unwrap();
         assert_eq!((var.varno, var.varattno), (1, attnum));
-        assert_eq!((var.vartype, var.vartypmod, var.varcollid), (typid, -1, InvalidOid));
+        assert_eq!(
+            (var.vartype, var.vartypmod, var.varcollid),
+            (typid, -1, InvalidOid)
+        );
         assert_eq!((var.varnosyn, var.varattnosyn), (1, attnum));
     }
 
-    let perminfo = pstate.p_rteperminfos.nth(0).as_rte_permission_info().unwrap();
-    assert!(perminfo.selectedCols.is_member(-1 - FirstLowInvalidHeapAttributeNumber));
+    let perminfo = pstate
+        .p_rteperminfos
+        .nth(0)
+        .as_rte_permission_info()
+        .unwrap();
+    assert!(perminfo
+        .selectedCols
+        .is_member(-1 - FirstLowInvalidHeapAttributeNumber));
 
     // A user column alias shadows a system column name.
     let mut colnames = NodeList::nil();
     for n in ["ctid", "y2"] {
-        colnames.lappend(mcx, Node::mk_string(mcx, n).unwrap()).unwrap();
+        colnames
+            .lappend(mcx, Node::mk_string(mcx, n).unwrap())
+            .unwrap();
     }
-    let alias = Node::mk_mut(mcx, Alias { aliasname: Some("c"), colnames }).unwrap().seal_ref();
+    let alias = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("c"),
+            colnames,
+        },
+    )
+    .unwrap()
+    .seal_ref();
     let mut p2 = make_parsestate(mcx, None);
     let n2 = add(mcx, &mut p2, "t", Some(alias));
     p2.p_namespace.push(n2);
@@ -612,7 +755,9 @@ fn system_column_without_pg_attribute_row_is_no_match() {
 
     let nsitem = add(mcx, &mut pstate, "u", None);
     pstate.p_namespace.push(nsitem);
-    assert!(colNameToVar(mcx, &pstate, "ctid", false, 7).unwrap().is_none());
+    assert!(colNameToVar(mcx, &pstate, "ctid", false, 7)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -628,8 +773,13 @@ fn system_column_in_check_constraint_is_42p10() {
 
     let err = colNameToVar(mcx, &pstate, "xmin", false, 7).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_COLUMN_REFERENCE);
-    assert_eq!(err.message, "system column \"xmin\" reference in check constraint is invalid");
-    let ok = colNameToVar(mcx, &pstate, "tableoid", false, 7).unwrap().unwrap();
+    assert_eq!(
+        err.message,
+        "system column \"xmin\" reference in check constraint is invalid"
+    );
+    let ok = colNameToVar(mcx, &pstate, "tableoid", false, 7)
+        .unwrap()
+        .unwrap();
     assert_eq!(ok.as_var().unwrap().varattno, -6);
 }
 
@@ -656,7 +806,10 @@ fn error_missing_column_single_fuzzy_hint() {
     let err = errorMissingColumn(mcx, &pstate, None, "aa", 7);
     assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_COLUMN);
     assert_eq!(err.message, "column \"aa\" does not exist");
-    assert_eq!(err.hint(), Some("Perhaps you meant to reference the column \"d.a\"."));
+    assert_eq!(
+        err.hint(),
+        Some("Perhaps you meant to reference the column \"d.a\".")
+    );
 }
 
 #[test]
@@ -671,9 +824,7 @@ fn error_missing_column_two_fuzzy_hints() {
     assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_COLUMN);
     assert_eq!(
         err.hint(),
-        Some(
-            "Perhaps you meant to reference the column \"d.a\" or the column \"d.b\"."
-        )
+        Some("Perhaps you meant to reference the column \"d.a\" or the column \"d.b\".")
     );
 }
 
@@ -718,7 +869,10 @@ fn error_missing_column_qualified_message_and_rte_penalty() {
     let err = errorMissingColumn(mcx, &pstate, Some("t"), "xx", 7);
     assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_COLUMN);
     assert_eq!(err.message, "column t.xx does not exist");
-    assert_eq!(err.hint(), Some("Perhaps you meant to reference the column \"t.x\"."));
+    assert_eq!(
+        err.hint(),
+        Some("Perhaps you meant to reference the column \"t.x\".")
+    );
 }
 
 const F_COMPOSITE: Oid = 9001;
@@ -847,15 +1001,19 @@ fn composite_function_rte_expands_rowtype_columns() {
     let mut pstate = make_parsestate(mcx, None);
 
     let fe = func_expr(mcx, F_COMPOSITE, COMPOSITE_TYPE);
-    let nsitem =
-        add_function_rte(mcx, &mut pstate, "f", fe).unwrap();
+    let nsitem = add_function_rte(mcx, &mut pstate, "f", fe).unwrap();
 
     let rte = nsitem.rte();
     assert_eq!(rte.rtekind, RTEKind::RTE_FUNCTION);
     let rtfunc = rte.functions.nth(0).as_range_tbl_function().unwrap();
     assert_eq!(rtfunc.funccolcount, 2);
-    let names: Vec<_> =
-        rte.eref.unwrap().colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+    let names: Vec<_> = rte
+        .eref
+        .unwrap()
+        .colnames
+        .iter()
+        .map(|n| n.as_string().unwrap().sval)
+        .collect();
     assert_eq!(names, ["c1", "c2"]);
     assert_eq!(nsitem.p_nscolumns[0].p_vartype, INT4OID);
     assert_eq!(nsitem.p_nscolumns[1].p_vartype, TEXTOID);
@@ -870,13 +1028,19 @@ fn composite_function_rte_expands_rowtype_columns() {
         false,
     )
     .unwrap();
-    let names: Vec<_> = colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+    let names: Vec<_> = colnames
+        .iter()
+        .map(|n| n.as_string().unwrap().sval)
+        .collect();
     assert_eq!(names, ["c1", "c2"]);
     assert_eq!(colvars.len(), 2);
     let v1 = colvars.nth(0).as_var().unwrap();
     assert_eq!((v1.varno, v1.varattno, v1.vartype), (1, 1, INT4OID));
     let v2 = colvars.nth(1).as_var().unwrap();
-    assert_eq!((v2.varno, v2.varattno, v2.vartype, v2.varcollid), (1, 2, TEXTOID, 100));
+    assert_eq!(
+        (v2.varno, v2.varattno, v2.vartype, v2.varcollid),
+        (1, 2, TEXTOID, 100)
+    );
 }
 
 #[test]
@@ -887,8 +1051,7 @@ fn scalar_function_rte_expands_single_var() {
     let mut pstate = make_parsestate(mcx, None);
 
     let fe = func_expr(mcx, F_SCALAR, INT4OID);
-    let nsitem =
-        add_function_rte(mcx, &mut pstate, "f", fe).unwrap();
+    let nsitem = add_function_rte(mcx, &mut pstate, "f", fe).unwrap();
 
     let (colnames, colvars) = expandRTE(
         mcx,
@@ -903,7 +1066,10 @@ fn scalar_function_rte_expands_single_var() {
     assert_eq!(colnames.nth(0).as_string().unwrap().sval, "f");
     assert_eq!(colvars.len(), 1);
     let v = colvars.nth(0).as_var().unwrap();
-    assert_eq!((v.varno, v.varattno, v.vartype, v.vartypmod), (3, 1, INT4OID, -1));
+    assert_eq!(
+        (v.varno, v.varattno, v.vartype, v.vartypmod),
+        (3, 1, INT4OID, -1)
+    );
 }
 
 // upstream 9108fed3eda9 (18.5): Fix parsing of parenthesised OLD/NEW in RETURNING list.
@@ -959,20 +1125,28 @@ fn get_ns_item_by_var_matches_returning_type() {
     };
 
     // The rtindex-only lookup cannot tell the three apart: first wins.
-    assert_eq!(GetNSItemByRangeTablePosn(&pstate, 1, 0).p_returning_type, VAR_RETURNING_DEFAULT);
+    assert_eq!(
+        GetNSItemByRangeTablePosn(&pstate, 1, 0).p_returning_type,
+        VAR_RETURNING_DEFAULT
+    );
     // The Var-driven lookup honours varreturningtype (bug #19516).
     for rt in [VAR_RETURNING_DEFAULT, VAR_RETURNING_OLD, VAR_RETURNING_NEW] {
         let found = GetNSItemByVar(&pstate, &whole_row(rt));
         assert_eq!((found.p_rtindex, found.p_returning_type), (1, rt));
     }
-    assert!(core::ptr::eq(GetNSItemByVar(&pstate, &whole_row(VAR_RETURNING_NEW)), new_item));
+    assert!(core::ptr::eq(
+        GetNSItemByVar(&pstate, &whole_row(VAR_RETURNING_NEW)),
+        new_item
+    ));
 
     // The coerce_record_to_complex seam threads it through to the expansion:
     // (old).* / (new).* yield Vars carrying the requested returning type.
     for rt in [VAR_RETURNING_OLD, VAR_RETURNING_NEW] {
         let vars = expand_nsitem_vars_at(mcx, &pstate, &whole_row(rt)).unwrap();
         assert_eq!(vars.len(), 2);
-        assert!(vars.iter().all(|v| v.as_var().unwrap().varreturningtype == rt));
+        assert!(vars
+            .iter()
+            .all(|v| v.as_var().unwrap().varreturningtype == rt));
         assert!(vars.iter().all(|v| v.as_var().unwrap().location == 7));
     }
 }
@@ -981,7 +1155,7 @@ fn get_ns_item_by_var_matches_returning_type() {
 
 // parse_relation.c:2224 addRangeTableEntryForValues: an alias with more
 // column names than the VALUES rows supply is reported as
-// 
+//
 // (not the relation-alias wording of buildRelationAliases).
 #[test]
 fn values_alias_overflow_uses_values_lists_message() {
@@ -995,10 +1169,19 @@ fn values_alias_overflow_uses_values_lists_message() {
     let exprs = NodeList::make1(mcx, row).unwrap();
     let mut colnames = NodeList::nil();
     for n in ["a", "b"] {
-        colnames.lappend(mcx, Node::mk_string(mcx, n).unwrap()).unwrap();
+        colnames
+            .lappend(mcx, Node::mk_string(mcx, n).unwrap())
+            .unwrap();
     }
-    let alias =
-        Node::mk_mut(mcx, Alias { aliasname: Some("v"), colnames }).unwrap().seal_ref();
+    let alias = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("v"),
+            colnames,
+        },
+    )
+    .unwrap()
+    .seal_ref();
     let mut coltypes = types_nodes::list::OidList::nil();
     coltypes.lappend(mcx, INT4OID).unwrap();
     let mut coltypmods = types_nodes::list::IntList::nil();
@@ -1068,7 +1251,10 @@ fn enr_invalid_atttypid_is_catchable_xx000() {
         .map(|_| ())
         .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
-    assert_eq!(err.message(), "atttypid is invalid for non-dropped column in \"newtab\"");
+    assert_eq!(
+        err.message(),
+        "atttypid is invalid for non-dropped column in \"newtab\""
+    );
 }
 
 // parse_relation.c:2958 expandRTE: a FROM function whose result class is
@@ -1084,11 +1270,23 @@ fn expand_rte_unsupported_function_return_type_is_catchable_xx000() {
     let fe = func_expr(mcx, F_RECORD, RECORDOID);
     let rtfunc = Node::mk(
         mcx,
-        types_nodes::RangeTblFunction { funcexpr: Some(fe), funccolcount: 1, ..Default::default() },
+        types_nodes::RangeTblFunction {
+            funcexpr: Some(fe),
+            funccolcount: 1,
+            ..Default::default()
+        },
     )
     .unwrap();
     let colnames = NodeList::make1(mcx, Node::mk_string(mcx, "f").unwrap()).unwrap();
-    let eref = Node::mk_mut(mcx, Alias { aliasname: Some("f"), colnames }).unwrap().seal_ref();
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("f"),
+            colnames,
+        },
+    )
+    .unwrap()
+    .seal_ref();
     let rte = Node::mk(
         mcx,
         RangeTblEntry {
@@ -1112,7 +1310,10 @@ fn expand_rte_unsupported_function_return_type_is_catchable_xx000() {
     .map(|_| ())
     .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
-    assert_eq!(err.message(), "function in FROM has unsupported return type");
+    assert_eq!(
+        err.message(),
+        "function in FROM has unsupported return type"
+    );
 }
 
 // parse_relation.c:3390 get_rte_attribute_name: "*" for InvalidAttrNumber, a
@@ -1145,8 +1346,15 @@ fn get_rte_attribute_name_alias_catalog_eref_arms() {
     let mut pstate = make_parsestate(mcx, None);
 
     let acol = NodeList::make1(mcx, Node::mk_string(mcx, "ax").unwrap()).unwrap();
-    let alias =
-        Node::mk_mut(mcx, Alias { aliasname: Some("a"), colnames: acol }).unwrap().seal_ref();
+    let alias = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("a"),
+            colnames: acol,
+        },
+    )
+    .unwrap()
+    .seal_ref();
     let nsitem = add(mcx, &mut pstate, "t", Some(alias));
     let rte = nsitem.rte();
     assert_eq!(get_rte_attribute_name(mcx, rte, 0).unwrap(), "*");
@@ -1154,8 +1362,20 @@ fn get_rte_attribute_name_alias_catalog_eref_arms() {
     assert_eq!(get_rte_attribute_name(mcx, rte, 2).unwrap(), "y_renamed");
 
     let colnames = NodeList::make1(mcx, Node::mk_string(mcx, "z").unwrap()).unwrap();
-    let eref = Node::mk_mut(mcx, Alias { aliasname: Some("s"), colnames }).unwrap().seal_ref();
-    let sub = RangeTblEntry { rtekind: RTEKind::RTE_SUBQUERY, eref: Some(eref), ..Default::default() };
+    let eref = Node::mk_mut(
+        mcx,
+        Alias {
+            aliasname: Some("s"),
+            colnames,
+        },
+    )
+    .unwrap()
+    .seal_ref();
+    let sub = RangeTblEntry {
+        rtekind: RTEKind::RTE_SUBQUERY,
+        eref: Some(eref),
+        ..Default::default()
+    };
     assert_eq!(get_rte_attribute_name(mcx, &sub, 1).unwrap(), "z");
     let err = get_rte_attribute_name(mcx, &sub, 2).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
@@ -1184,14 +1404,33 @@ fn attnum_lookups_cover_system_user_and_bogus_attnums() {
     assert_eq!(attnumCollationId(&rel, -1).unwrap(), InvalidOid);
 
     for (name, err) in [
-        ("attnumAttName", attnumAttName(&rel, 3).map(|_| ()).unwrap_err()),
-        ("attnumTypeId", attnumTypeId(&rel, 3).map(|_| ()).unwrap_err()),
-        ("attnumCollationId", attnumCollationId(&rel, 3).map(|_| ()).unwrap_err()),
+        (
+            "attnumAttName",
+            attnumAttName(&rel, 3).map(|_| ()).unwrap_err(),
+        ),
+        (
+            "attnumTypeId",
+            attnumTypeId(&rel, 3).map(|_| ()).unwrap_err(),
+        ),
+        (
+            "attnumCollationId",
+            attnumCollationId(&rel, 3).map(|_| ()).unwrap_err(),
+        ),
     ] {
-        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR, "{name}");
+        assert_eq!(
+            err.sqlstate(),
+            types_error::ERRCODE_INTERNAL_ERROR,
+            "{name}"
+        );
         assert_eq!(err.message(), "invalid attribute number 3", "{name}");
     }
     // heap.c:239: attid 0 and below the system range are elog(ERROR).
-    assert_eq!(attnumAttName(&rel, 0).unwrap_err().message(), "invalid system attribute number 0");
-    assert_eq!(attnumTypeId(&rel, -7).unwrap_err().message(), "invalid system attribute number -7");
+    assert_eq!(
+        attnumAttName(&rel, 0).unwrap_err().message(),
+        "invalid system attribute number 0"
+    );
+    assert_eq!(
+        attnumTypeId(&rel, -7).unwrap_err().message(),
+        "invalid system attribute number -7"
+    );
 }
