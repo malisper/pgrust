@@ -30,7 +30,21 @@ antithesis = [
     "xlogutils/antithesis",
 ]
 
+# Registers the C regression module's OAuth validators (`validator`,
+# `fail_validator`, `oauth_test_validator`) and their oauth_validator.* GUCs.
+# Test/CI builds only: these authorize any bearer token. Product builds
+# (default features) compile none of it — see the oauth_validators crate
+# header for why this is a feature and not a GUC.
+oauth-test-validator = [
+    "oauth_validators/test-validator",
+    "guc_tables/oauth-test-validator",
+]
+
 [dependencies]
+# Feature carriers for oauth-test-validator (both already in the graph
+# transitively via seams_init / guc).
+oauth_validators = { path = "../../libpq/oauth_validators" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
 # Antithesis SDK (assertions/lifecycle); portable, but only compiled under
 # the `antithesis` feature.
 antithesis_sdk = { version = "0.2.9", optional = true }

@@ -1,0 +1,30 @@
+[package]
+name = "oauth_validators"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "oauth_validators"
+path = "src/lib.rs"
+
+[features]
+# The C test module's `validator` / `fail_validator` (src/test/modules/
+# oauth_validator) and the token-prefix `oauth_test_validator`: forgeable
+# credentials, compiled and registered ONLY under this feature (enabled by
+# main_main's `oauth-test-validator`). See the crate header for why a build
+# feature and not a GUC.
+test-validator = ["guc_tables/oauth-test-validator"]
+
+[dependencies]
+auth_oauth = { path = "../auth_oauth" }
+elog = { path = "../../utils/error/elog" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+pg_clock = { path = "../../../port/pg_clock" }
+pgsync = { path = "../../../_support/pgsync" }
+types_error = { path = "../../../_support/types/types_error" }
+
+# Same vendored build be_secure_openssl and auth (ldapber) link; openssl-src
+# does not compile for wasm32, where jwt_validator is not registered.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

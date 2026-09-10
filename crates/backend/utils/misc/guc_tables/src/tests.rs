@@ -106,12 +106,22 @@ fn table_counts_match_compiled_backend_shape() {
     //   DefineCustomBoolVariable, PGC_POSTMASTER): Bool +1
     //   pg_prewarm.autoprewarm (-> 143) = 484 — the autoprewarm leader gate,
     //   statically defined like pg_prewarm.autoprewarm_interval.
-    assert_eq!(ConfigureNamesBool.len(), 143);
-    assert_eq!(ConfigureNamesInt.len(), 178);
+    // oauth-validator lane (pgrust-only, notes/oauth-validator-lane.md): the
+    //   in-tree jwt_validator configuration — String +7 jwt_validator.jwks_uri
+    //   / audience / identity_claim / introspection_uri /
+    //   introspection_client_id / introspection_client_secret / ca_file
+    //   (-> 89), Bool +2 jwt_validator.require_scopes / allow_insecure_http
+    //   (-> 145), Int +3 jwt_validator.clock_skew / jwks_cache_ttl /
+    //   http_timeout (-> 181) = 496. Under the oauth-test-validator feature
+    //   only: String +1 oauth_validator.authn_id, Bool +1
+    //   oauth_validator.authorize_tokens (the C test module's custom GUCs).
+    let test_validator = usize::from(cfg!(feature = "oauth-test-validator"));
+    assert_eq!(ConfigureNamesBool.len(), 145 + test_validator);
+    assert_eq!(ConfigureNamesInt.len(), 181);
     assert_eq!(ConfigureNamesReal.len(), 31);
-    assert_eq!(ConfigureNamesString.len(), 82);
+    assert_eq!(ConfigureNamesString.len(), 89 + test_validator);
     assert_eq!(ConfigureNamesEnum.len(), 50);
-    assert_eq!(all_settings().count(), 484);
+    assert_eq!(all_settings().count(), 496 + 2 * test_validator);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

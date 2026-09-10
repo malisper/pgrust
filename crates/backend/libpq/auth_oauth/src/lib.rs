@@ -1,7 +1,8 @@
 //! auth-oauth.c: server-side OAUTHBEARER SASL mechanism (RFC 7628) and the
 //! validator dispatch. C dlopens validator modules; pgrust resolves the same
 //! names against a builtin registry (no-dlopen carve §2, dfmgr precedent) —
-//! an unregistered name is C's dlopen stat miss (58P01).
+//! an unregistered name is C's dlopen stat miss (58P01). The in-tree
+//! validators live in crates/backend/libpq/oauth_validators.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -19,6 +20,8 @@ use types_error::{
     ERRCODE_PROTOCOL_VIOLATION, ERRCODE_UNDEFINED_FILE, ERROR, FATAL, LOG, WARNING,
 };
 use types_startup::Port;
+
+pub use types_core::fmgr::PG_VERSION_NUM;
 
 pub const OAUTHBEARER_NAME: &str = "OAUTHBEARER";
 
@@ -39,11 +42,20 @@ pub struct ValidatorModuleResult {
     pub authn_id: Option<String>,
 }
 
+// The HBA line's oauth options, C's MyProcPort->hba->oauth_* as seen by
+// validator modules.
+#[derive(Clone, Copy, Debug)]
+pub struct ValidatorEnv<'a> {
+    pub issuer: Option<&'a str>,
+    pub scope: Option<&'a str>,
+}
+
 pub trait OAuthValidator: Sync {
     fn startup(&self, _sversion: i32) {}
     fn shutdown(&self) {}
     fn validate(
         &self,
+        env: ValidatorEnv<'_>,
         token: &str,
         role: &str,
         result: &mut ValidatorModuleResult,
@@ -84,7 +96,7 @@ fn load_validator_library(libname: &str) -> PgResult<&'static (dyn OAuthValidato
             .finish(loc(751, "load_validator_library"))?;
         unreachable!()
     };
-    validator.startup(types_core::fmgr::PG_VERSION_NUM);
+    validator.startup(PG_VERSION_NUM);
     Ok(validator)
 }
 
@@ -474,7 +486,11 @@ fn validate(mech: &OAuthMech, ctx: &OauthCtx, port: &Port, auth: &[u8]) -> PgRes
         authorized: false,
         authn_id: None,
     };
-    match ctx.validator.validate(token, user_name, &mut ret) {
+    let env = ValidatorEnv {
+        issuer: ctx.issuer.as_deref(),
+        scope: ctx.scope.as_deref(),
+    };
+    match ctx.validator.validate(env, token, user_name, &mut ret) {
         Ok(true) => {}
         Ok(false) => {
             ereport(WARNING)
@@ -524,25 +540,13 @@ fn validate(mech: &OAuthMech, ctx: &OauthCtx, port: &Port, auth: &[u8]) -> PgRes
     Ok(map_status == STATUS_OK)
 }
 
-// Builtin deterministic test validator. It authorizes any "valid-<id>" bearer
-// token as identity <id> with NO cryptographic/issuer/audience/expiry check —
-// a forgeable credential. Upstream C PostgreSQL ships NO validator in the
-// production server; its equivalent lives in src/test/modules/oauth_validator,
-// built and dlopen'd only for the regression suite (auth-oauth.c has no
-// built-in token-accepting validator). Because pgrust has no dlopen, the
-// builtin registry is the only validator source, so this MUST NOT be compiled
-// into or registered by production binaries — otherwise naming it in
-// oauth_validator_libraries would turn it into a live authentication backdoor.
+// In-crate forgeable test validator, cfg(test) only: the crate's own unit
+// tests exercise the dispatch path with it. Shipped binaries register
+// validators from crates/backend/libpq/oauth_validators (jwt_validator
+// always; the C test module's `validator` only under its cargo feature).
 //
-// It is therefore gated entirely behind #[cfg(test)]: absent from every shipped
-// server binary (which is built without cfg(test)), where load_validator_library
-// then treats the name as a registry miss and raises 58P01 — the exact parity
-// of C's dlopen stat miss. It remains available only to this crate's in-crate
-// unit tests.
-//
-// Tokens (test builds only): "valid-<id>" authorized as <id>; "noauthz-<id>"
-// denied as <id>; "noident" authorized w/o identity; "modulefail" module error;
-// else denied.
+// Tokens: "valid-<id>" authorized as <id>; "noauthz-<id>" denied as <id>;
+// "noident" authorized w/o identity; "modulefail" module error; else denied.
 
 #[cfg(test)]
 pub const TEST_VALIDATOR_NAME: &str = "oauth_test_validator";
@@ -554,6 +558,7 @@ struct TestValidator;
 impl OAuthValidator for TestValidator {
     fn validate(
         &self,
+        _env: ValidatorEnv<'_>,
         token: &str,
         role: &str,
         result: &mut ValidatorModuleResult,
@@ -583,10 +588,6 @@ impl OAuthValidator for TestValidator {
 #[cfg(test)]
 static TEST_VALIDATOR: TestValidator = TestValidator;
 
-// Production binaries ship no builtin validator (C-parity: no built-in
-// token-accepting validator exists in the server). Under #[cfg(test)] only, the
-// forgeable test validator is registered so the crate's own unit tests can
-// exercise the dispatch path.
 pub fn init_seams() {
     #[cfg(test)]
     register_builtin_validator(TEST_VALIDATOR_NAME, &TEST_VALIDATOR);

@@ -4358,8 +4358,8 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit",
- "pg_path",
  "objectaccess",
+ "pg_path",
  "pg_shdepend",
  "procsignal",
  "reloptions",
@@ -8598,8 +8598,8 @@ dependencies = [
  "indexam",
  "mcx",
  "miscinit",
- "pg_depend",
  "objectaccess",
+ "pg_depend",
  "pg_largeobject",
  "snapmgr",
  "table",
@@ -9358,6 +9358,7 @@ dependencies = [
  "antithesis_sdk",
  "elog",
  "guc",
+ "guc_tables",
  "init_small",
  "ipc",
  "libc",
@@ -9365,6 +9366,7 @@ dependencies = [
  "mcx",
  "memwatchdog",
  "mimalloc",
+ "oauth_validators",
  "pg_locale",
  "pg_path",
  "pgsync",
@@ -9450,10 +9452,10 @@ dependencies = [
 name = "mcx"
 version = "0.0.0"
 dependencies = [
- "mimalloc",
  "allocator-api2",
  "hashbrown",
  "libc",
+ "mimalloc",
  "rustc-hash",
  "types_error",
 ]
@@ -9595,8 +9597,8 @@ dependencies = [
  "guc_tables",
  "init_small",
  "libc",
- "lwlock",
  "lmgr_proc",
+ "lwlock",
  "mcx",
  "multixact_seams",
  "pgstat_seams",
@@ -10254,8 +10256,8 @@ dependencies = [
  "types_fmgr",
  "types_nbtree",
  "types_nodes",
- "types_relscan",
  "types_rel",
+ "types_relscan",
  "types_scan",
  "types_slot",
  "types_snapshot",
@@ -11007,6 +11009,19 @@ dependencies = [
 name = "numutils"
 version = "0.1.0"
 dependencies = [
+ "types_error",
+]
+
+[[package]]
+name = "oauth_validators"
+version = "0.0.0"
+dependencies = [
+ "auth_oauth",
+ "elog",
+ "guc_tables",
+ "openssl",
+ "pg_clock",
+ "pgsync",
  "types_error",
 ]
 
@@ -14167,8 +14182,8 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "types_portal",
- "types_resowner",
  "types_rel",
+ "types_resowner",
  "types_storage",
  "types_trigger",
  "types_trigger_call",
@@ -16952,6 +16967,7 @@ dependencies = [
  "nodetidscan",
  "nodeunique",
  "nodewindowagg",
+ "oauth_validators",
  "opclasscmds",
  "operatorcmds",
  "orderedsetaggs",

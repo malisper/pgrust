@@ -470,6 +470,64 @@ fn install_guc_tables_owned_vars() {
         get: backing::oauth_validator_libraries,
         set: backing::set_oauth_validator_libraries,
     });
+    vars::jwt_validator_jwks_uri.install(GucVarAccessors {
+        get: backing::jwt_validator_jwks_uri,
+        set: backing::set_jwt_validator_jwks_uri,
+    });
+    vars::jwt_validator_audience.install(GucVarAccessors {
+        get: backing::jwt_validator_audience,
+        set: backing::set_jwt_validator_audience,
+    });
+    vars::jwt_validator_identity_claim.install(GucVarAccessors {
+        get: backing::jwt_validator_identity_claim,
+        set: backing::set_jwt_validator_identity_claim,
+    });
+    vars::jwt_validator_introspection_uri.install(GucVarAccessors {
+        get: backing::jwt_validator_introspection_uri,
+        set: backing::set_jwt_validator_introspection_uri,
+    });
+    vars::jwt_validator_introspection_client_id.install(GucVarAccessors {
+        get: backing::jwt_validator_introspection_client_id,
+        set: backing::set_jwt_validator_introspection_client_id,
+    });
+    vars::jwt_validator_introspection_client_secret.install(GucVarAccessors {
+        get: backing::jwt_validator_introspection_client_secret,
+        set: backing::set_jwt_validator_introspection_client_secret,
+    });
+    vars::jwt_validator_ca_file.install(GucVarAccessors {
+        get: backing::jwt_validator_ca_file,
+        set: backing::set_jwt_validator_ca_file,
+    });
+    vars::jwt_validator_require_scopes.install(GucVarAccessors {
+        get: backing::jwt_validator_require_scopes,
+        set: backing::set_jwt_validator_require_scopes,
+    });
+    vars::jwt_validator_allow_insecure_http.install(GucVarAccessors {
+        get: backing::jwt_validator_allow_insecure_http,
+        set: backing::set_jwt_validator_allow_insecure_http,
+    });
+    vars::jwt_validator_clock_skew.install(GucVarAccessors {
+        get: backing::jwt_validator_clock_skew,
+        set: backing::set_jwt_validator_clock_skew,
+    });
+    vars::jwt_validator_jwks_cache_ttl.install(GucVarAccessors {
+        get: backing::jwt_validator_jwks_cache_ttl,
+        set: backing::set_jwt_validator_jwks_cache_ttl,
+    });
+    vars::jwt_validator_http_timeout.install(GucVarAccessors {
+        get: backing::jwt_validator_http_timeout,
+        set: backing::set_jwt_validator_http_timeout,
+    });
+    #[cfg(feature = "oauth-test-validator")]
+    vars::oauth_validator_authn_id.install(GucVarAccessors {
+        get: backing::oauth_validator_authn_id,
+        set: backing::set_oauth_validator_authn_id,
+    });
+    #[cfg(feature = "oauth-test-validator")]
+    vars::oauth_validator_authorize_tokens.install(GucVarAccessors {
+        get: backing::oauth_validator_authorize_tokens,
+        set: backing::set_oauth_validator_authorize_tokens,
+    });
     vars::output_plugin_libraries_string.install(GucVarAccessors {
         get: backing::output_plugin_libraries_string,
         set: backing::set_output_plugin_libraries_string,

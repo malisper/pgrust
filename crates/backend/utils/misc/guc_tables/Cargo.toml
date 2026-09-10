@@ -8,6 +8,11 @@ publish.workspace = true
 name = "guc_tables"
 path = "src/lib.rs"
 
+[features]
+# Compiles in the C test module's oauth_validator.* GUCs; enabled only by
+# main_main's oauth-test-validator feature (never in a product build).
+oauth-test-validator = []
+
 [dependencies]
 types_error = { path = "../../../../_support/types/types_error" }
 types_guc = { path = "../../../../_support/types/types_guc" }

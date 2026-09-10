@@ -102,6 +102,7 @@ nodememoize = { path = "../../backend/executor/nodememoize" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
 auth_oauth = { path = "../../backend/libpq/auth_oauth" }
+oauth_validators = { path = "../../backend/libpq/oauth_validators" }
 auth_scram = { path = "../../backend/libpq/auth_scram" }
 crypt = { path = "../../backend/libpq/crypt" }
 be_secure = { path = "../../backend/libpq/be_secure" }

@@ -447,6 +447,24 @@ string_var!(
     set_oauth_validator_libraries,
     Some("")
 );
+// jwt_validator.* / oauth_validator.* (pgrust-only): the in-tree OAuth
+// validators' configuration (crates/backend/libpq/oauth_validators).
+string_var!(CELL_jwt_validator_jwks_uri, jwt_validator_jwks_uri, set_jwt_validator_jwks_uri, Some(""));
+string_var!(CELL_jwt_validator_audience, jwt_validator_audience, set_jwt_validator_audience, Some(""));
+string_var!(CELL_jwt_validator_identity_claim, jwt_validator_identity_claim, set_jwt_validator_identity_claim, Some("sub"));
+string_var!(CELL_jwt_validator_introspection_uri, jwt_validator_introspection_uri, set_jwt_validator_introspection_uri, Some(""));
+string_var!(CELL_jwt_validator_introspection_client_id, jwt_validator_introspection_client_id, set_jwt_validator_introspection_client_id, Some(""));
+string_var!(CELL_jwt_validator_introspection_client_secret, jwt_validator_introspection_client_secret, set_jwt_validator_introspection_client_secret, Some(""));
+string_var!(CELL_jwt_validator_ca_file, jwt_validator_ca_file, set_jwt_validator_ca_file, Some(""));
+bool_var!(B_jwt_validator_require_scopes, jwt_validator_require_scopes, set_jwt_validator_require_scopes, true);
+bool_var!(B_jwt_validator_allow_insecure_http, jwt_validator_allow_insecure_http, set_jwt_validator_allow_insecure_http, false);
+int_var!(I_jwt_validator_clock_skew, jwt_validator_clock_skew, set_jwt_validator_clock_skew, 60);
+int_var!(I_jwt_validator_jwks_cache_ttl, jwt_validator_jwks_cache_ttl, set_jwt_validator_jwks_cache_ttl, 300);
+int_var!(I_jwt_validator_http_timeout, jwt_validator_http_timeout, set_jwt_validator_http_timeout, 10);
+#[cfg(feature = "oauth-test-validator")]
+string_var!(CELL_oauth_validator_authn_id, oauth_validator_authn_id, set_oauth_validator_authn_id, None);
+#[cfg(feature = "oauth-test-validator")]
+bool_var!(B_oauth_validator_authorize_tokens, oauth_validator_authorize_tokens, set_oauth_validator_authorize_tokens, true);
 bool_var!(
     B_restart_after_crash,
     restart_after_crash,

@@ -684,6 +684,7 @@ members = [
     "crates/backend/libpq/auth_seams",
     "crates/backend/libpq/auth_sasl",
     "crates/backend/libpq/auth_oauth",
+    "crates/backend/libpq/oauth_validators",
     "crates/backend/libpq/auth",
     "crates/backend/libpq/crypt",
     "crates/backend/libpq/hba",

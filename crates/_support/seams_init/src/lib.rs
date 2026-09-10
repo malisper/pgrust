@@ -170,6 +170,7 @@ pub fn init_all_with_transport(transport: Transport) {
     tuplesort::init_seams();
     auth::init_seams();
     auth_oauth::init_seams();
+    oauth_validators::init_seams();
     auth_scram::init_seams();
     crypt::init_seams();
     hba::init_seams();
