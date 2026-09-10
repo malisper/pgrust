@@ -1675,26 +1675,18 @@ use crate::exec::attach_frame_context_at_exit as attach_exec_context;
 const ATTRIBUTE_GENERATED_STORED: i8 = b's' as i8;
 const TYPALIGN_INT: u8 = b'i';
 
+// The trigger tuple's descriptor as a record shape (pl_exec.c:966-984 via
+// expanded_record_set_tuple): attname kept as stored — NEW."camelCase" is
+// resolved by ER_lookup_fieldnum/namestrcmp case-sensitively
+// (expandedrecord.c:1032), so downcasing here made every quoted mixed-case
+// column of the trigger table unreachable through NEW/OLD.
 fn recdesc_from_tupdesc(td: &types_tuple::TupleDescData<'_>) -> (crate::exec::RecDesc, Vec<bool>) {
-    let natts = td.attrs.len();
-    let mut d = crate::exec::RecDesc {
-        names: Vec::with_capacity(natts),
-        types: Vec::with_capacity(natts),
-        typmods: Vec::with_capacity(natts),
-        typlens: Vec::with_capacity(natts),
-        typbyvals: Vec::with_capacity(natts),
-        dropped: Vec::with_capacity(natts),
-    };
-    let mut generated = Vec::with_capacity(natts);
-    for a in td.attrs.iter() {
-        d.names.push(String::from_utf8_lossy(a.attname.name_str()).to_ascii_lowercase());
-        d.types.push(a.atttypid);
-        d.typmods.push(a.atttypmod);
-        d.typlens.push(a.attlen);
-        d.typbyvals.push(a.attbyval);
-        d.dropped.push(a.attisdropped);
-        generated.push(a.attgenerated == ATTRIBUTE_GENERATED_STORED);
-    }
+    let d = crate::exec::RecDesc::from_tupdesc(td);
+    let generated = td
+        .attrs
+        .iter()
+        .map(|a| a.attgenerated == ATTRIBUTE_GENERATED_STORED)
+        .collect();
     (d, generated)
 }
 
