@@ -20,6 +20,7 @@ rewrite_handler_seams = { path = "../rewrite_handler_seams" }
 foreigncmds_seams = { path = "../../commands/foreigncmds_seams" }
 nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
 rewrite_manip = { path = "../rewrite_manip" }
 rewrite_search_cycle = { path = "../rewrite_search_cycle" }
 relcache = { path = "../../utils/cache/relcache" }

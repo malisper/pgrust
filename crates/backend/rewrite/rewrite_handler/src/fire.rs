@@ -81,7 +81,7 @@ pub(crate) fn fireRules<'mcx>(
     for &li in locks {
         let rule = &rules[li];
         let qsrc = if rule.is_instead {
-            if rule.qual_src.is_some() {
+            if rule.has_qual() {
                 QuerySource::QSRC_QUAL_INSTEAD_RULE
             } else {
                 *instead_flag = true;
@@ -98,27 +98,30 @@ pub(crate) fn fireRules<'mcx>(
             CopyAndAddInvertedQual(
                 mcx,
                 qual_product.expect("just set"),
-                rule.qual_src.as_ref().expect("qualified rule").as_str(),
+                rule.qual.expect("qualified rule"),
                 rt_index,
                 event,
                 rel_owner,
             )?;
         }
 
-        let actions_node = readfuncs::stringToNode(mcx, rule.action_src.as_str())?;
-        // setRuleCheckAsUser at RelationBuildRuleLock (relcache.c): the rule's
-        // table references are checked as the relation owner, not the invoker.
-        crate::set_rule_check_as_user_node(actions_node, rel_owner)?;
-        let actions = actions_node.as_list().expect("ev_action is a List");
-        for action_node in actions.iter() {
-            let action_q = action_node.as_query().expect("rule action is a Query");
+        let actions = rule.actions.as_list().expect("ev_action is a List");
+        for cached_action in actions.iter() {
+            let action_q = cached_action.as_query().expect("rule action is a Query");
             if action_q.commandType == CmdType::CMD_NOTHING {
                 continue;
             }
-            let rule_qual = match &rule.qual_src {
+            // C rewriteRuleAction: rule_action = copyObject(rule_action),
+            // rule_qual = copyObject(rule_qual) — per action, out of the
+            // shared rd_rules tree.
+            let action_node = copyfuncs::copy_object(mcx, cached_action)?;
+            // setRuleCheckAsUser at RelationBuildRuleLock (relcache.c): the
+            // rule's table references are checked as the relation owner, not
+            // the invoker; the cache holds the tree unstamped, so stamp the copy.
+            crate::set_rule_check_as_user_node(action_node, rel_owner)?;
+            let rule_qual = match rule.copy_qual(mcx)? {
                 None => None,
-                Some(s) => {
-                    let q = readfuncs::stringToNode(mcx, s.as_str())?;
+                Some(q) => {
                     crate::set_rule_check_as_user_node(q, rel_owner)?;
                     Some(q)
                 }
@@ -132,7 +135,7 @@ pub(crate) fn fireRules<'mcx>(
                 event,
                 returning_flag,
             )?;
-            // SAFETY: fresh-read tree, exclusively ours.
+            // SAFETY: this call's private copy of the rule action.
             unsafe {
                 rule_action.with_mut::<Query, _>(|q| {
                     q.querySource = qsrc;
@@ -147,7 +150,7 @@ pub(crate) fn fireRules<'mcx>(
 }
 
 // rewriteRuleAction (rewriteHandler.c). `rule_action_node` and `rule_qual`
-// are fresh reads owned by this call; `parsetree` is read-only here and
+// are private copies owned by this call; `parsetree` is read-only here and
 // everything taken from it is deep-copied before insertion.
 #[allow(clippy::too_many_arguments)]
 fn rewriteRuleAction<'mcx>(
@@ -467,16 +470,17 @@ fn adjustJoinTreeList<'mcx>(
 }
 
 // CopyAndAddInvertedQual (rewriteHandler.c); `qual_product_node` is the
-// already-copied original query.
+// already-copied original query, `rule_qual` the cached rd_rules tree
+// (C: new_qual = copyObject(rule_qual)).
 fn CopyAndAddInvertedQual<'mcx>(
     mcx: Mcx<'mcx>,
     qual_product_node: Node<'mcx>,
-    qual_src: &str,
+    rule_qual: Node<'_>,
     rt_index: i32,
     event: CmdType,
     rel_owner: Oid,
 ) -> PgResult<()> {
-    let new_qual = readfuncs::stringToNode(mcx, qual_src)?;
+    let new_qual = copyfuncs::copy_object(mcx, rule_qual)?;
     crate::set_rule_check_as_user_node(new_qual, rel_owner)?;
     acquire_locks_on_sublinks(mcx, Some(new_qual))?;
     rewrite_manip::ChangeVarNodes(mcx, new_qual, PRS2_OLD_VARNO, rt_index, 0)?;

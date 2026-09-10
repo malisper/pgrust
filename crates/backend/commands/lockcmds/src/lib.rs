@@ -175,7 +175,7 @@ pub fn LockViewRecurse<'mcx>(
     ancestor_views.push(reloid);
     {
         let mut ctx = LockViewRecurseCtx { mcx, lockmode, nowait, check_as_user, ancestor_views };
-        ctx.query(viewquery)?;
+        ctx.query(&viewquery)?;
     }
     ancestor_views.pop();
 

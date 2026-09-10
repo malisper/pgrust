@@ -104,18 +104,25 @@ seam_core::seam!(
     ) -> PgResult<Rc<IndexAttrBitmaps>>
 );
 
-// RewriteRuleMeta marshal shape (relcache::rules), owned copies for the seam
-// boundary (cold path: currtid_for_view).
-pub struct RuleShape {
+// RewriteRuleMeta marshal shape (relcache::rules) for the seam boundary
+// (cold path: currtid_for_view); `actions` is the ev_action List deep-copied
+// (copyObject) into the caller's context.
+pub struct RuleShape<'mcx> {
     pub event: i32,
     pub is_instead: bool,
-    pub action_src: String,
+    pub actions: types_nodes::Node<'mcx>,
 }
 
 seam_core::seam!(
     // RelationGetRules (relcache.c rd_rules), SELECT-event rules only need
     // this shape; empty Vec == rd_rules == NULL.
-    pub fn relation_get_rules(relid: Oid) -> PgResult<Vec<RuleShape>>
+    pub fn relation_get_rules<'mcx>(mcx: mcx::Mcx<'mcx>, relid: Oid) -> PgResult<Vec<RuleShape<'mcx>>>
+);
+
+seam_core::seam!(
+    // rd_rules != NULL without copying any tree (vacuum.c's
+    // vac_update_relstats relhasrules check).
+    pub fn relation_has_rules(relid: Oid) -> PgResult<bool>
 );
 
 seam_core::seam!(

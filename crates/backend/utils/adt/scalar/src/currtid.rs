@@ -228,7 +228,7 @@ fn currtid_for_view<'mcx>(
         return Err(view_unsupported("currtid cannot handle views with no CTID"));
     };
 
-    let rules = relcache_seams::relation_get_rules::call(viewrel.data_rc().rd_id)?;
+    let rules = relcache_seams::relation_get_rules::call(mcx, viewrel.data_rc().rd_id)?;
     if rules.is_empty() {
         return Err(view_unsupported("the view has no rules"));
     }
@@ -236,8 +236,7 @@ fn currtid_for_view<'mcx>(
         if rule.event != CmdType::CMD_SELECT as i32 {
             continue;
         }
-        let actions_node = readfuncs::stringToNode(mcx, &rule.action_src)?;
-        let actions = actions_node.as_list().expect("ev_action is a List");
+        let actions = rule.actions.as_list().expect("ev_action is a List");
         if actions.len() != 1 {
             return Err(view_unsupported("only one select rule is allowed in views"));
         }

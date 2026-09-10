@@ -1,27 +1,58 @@
 use std::rc::Rc;
 
-use mcx::{Mcx, PgString};
+use mcx::{Mcx, MemoryContext};
 use types_core::Oid;
 use types_error::PgResult;
+use types_nodes::Node;
 
-use crate::{cache_mcx, with_state};
+use crate::with_state;
 
-// C divergence: rd_rules caches stringToNode'd trees (copyObject per use);
-// this cache keeps the text; the consumer reads a fresh tree per use.
+// RewriteRule (rd_rules entry, relcache.c RelationBuildRuleLock): the qual
+// and action trees are stringToNode'd ONCE at cache fill into the entry's
+// rule context and held for the life of the cache entry. Consumers read them
+// in place while they hold the `Rc<RdRules>` (which pins the context across
+// an invalidation) and `copy_*` before modifying — C's copyObject per use.
 pub struct RewriteRuleMeta {
     pub rule_id: Oid,
     // C: rewrite_form->ev_type - '0' (CmdType numeric value).
     pub event: i32,
     pub enabled: u8,
     pub is_instead: bool,
-    pub qual_src: Option<PgString<'static>>,
-    pub action_src: PgString<'static>,
+    // Owned by the enclosing RdRules' rulescxt; valid while that Rc lives.
+    // Never modify in place: every reader of this cache shares the tree.
+    pub qual: Option<Node<'static>>,
+    // The ev_action List of Query nodes; same ownership as `qual`.
+    pub actions: Node<'static>,
+}
+
+impl RewriteRuleMeta {
+    #[inline]
+    pub fn has_qual(&self) -> bool {
+        self.qual.is_some()
+    }
+
+    // copyObject(rule->actions) into the caller's context.
+    pub fn copy_actions<'mcx>(&self, mcx: Mcx<'mcx>) -> PgResult<Node<'mcx>> {
+        copyfuncs::copy_object(mcx, self.actions)
+    }
+
+    // copyObject(rule->qual) into the caller's context.
+    pub fn copy_qual<'mcx>(&self, mcx: Mcx<'mcx>) -> PgResult<Option<Node<'mcx>>> {
+        match self.qual {
+            Some(q) => Ok(Some(copyfuncs::copy_object(mcx, q)?)),
+            None => Ok(None),
+        }
+    }
 }
 
 pub struct RdRules {
     // std Vec justified: Rc-owned droppy owner outside the arenas
     // (rd_supportinfo precedent); drop = C's MemoryContextDelete(rulescxt).
     pub rules: Vec<RewriteRuleMeta>,
+    // C's rulescxt ("relation rules" child of CacheMemoryContext): owns every
+    // tree in `rules`. Declared last so the trees' handles drop first; freed
+    // with the last holder, i.e. after invalidation once no consumer is mid-use.
+    _rulescxt: MemoryContext,
 }
 
 // Rule-5 cache keyed by relid in the relcache state, not a RelationData
@@ -35,7 +66,11 @@ pub fn RelationGetRules<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Option<Rc<
     if rows.is_empty() {
         return Ok(None);
     }
-    let cmcx = cache_mcx();
+    let rulescxt = MemoryContext::new("relation rules");
+    // SAFETY: every allocation below lands in `rulescxt`, which the returned
+    // RdRules owns and drops after its `rules` field; the handles are only
+    // reachable through the Rc<RdRules>, so nothing outlives the context.
+    let rmcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(rulescxt.mcx()) };
     let mut rules: Vec<RewriteRuleMeta> = Vec::with_capacity(rows.len());
     for row in rows.iter() {
         rules.push(RewriteRuleMeta {
@@ -43,15 +78,15 @@ pub fn RelationGetRules<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Option<Rc<
             event: (row.ev_type - b'0') as i32,
             enabled: row.ev_enabled,
             is_instead: row.is_instead,
-            qual_src: if row.ev_qual == "<>" {
+            qual: if row.ev_qual == "<>" {
                 None
             } else {
-                Some(PgString::from_str_in(row.ev_qual, cmcx)?)
+                Some(readfuncs::stringToNode(rmcx, row.ev_qual)?)
             },
-            action_src: PgString::from_str_in(row.ev_action, cmcx)?,
+            actions: readfuncs::stringToNode(rmcx, row.ev_action)?,
         });
     }
-    let built = Rc::new(RdRules { rules });
+    let built = Rc::new(RdRules { rules, _rulescxt: rulescxt });
     with_state(|st| st.rules_cache.insert(relid, Rc::clone(&built)));
     Ok(Some(built))
 }
@@ -60,20 +95,29 @@ pub(crate) fn forget(relid: Oid) {
     with_state(|st| st.rules_cache.remove(&relid));
 }
 
-pub(crate) fn RelationGetRulesShapes(relid: Oid) -> PgResult<Vec<relcache_seams::RuleShape>> {
-    let mcx = cache_mcx();
+pub(crate) fn RelationGetRulesShapes<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Vec<relcache_seams::RuleShape<'mcx>>> {
     match RelationGetRules(mcx, relid)? {
         None => Ok(Vec::new()),
-        Some(rules) => Ok(rules
+        Some(rules) => rules
             .rules
             .iter()
-            .map(|r| relcache_seams::RuleShape {
-                event: r.event,
-                is_instead: r.is_instead,
-                action_src: r.action_src.as_str().to_string(),
+            .map(|r| {
+                Ok(relcache_seams::RuleShape {
+                    event: r.event,
+                    is_instead: r.is_instead,
+                    actions: r.copy_actions(mcx)?,
+                })
             })
-            .collect()),
+            .collect(),
     }
+}
+
+pub(crate) fn RelationHasRules(relid: Oid) -> PgResult<bool> {
+    let cx = MemoryContext::new("RelationHasRules");
+    Ok(RelationGetRules(cx.mcx(), relid)?.is_some())
 }
 
 #[cfg(test)]
@@ -83,6 +127,10 @@ mod tests {
 
     use mcx::MemoryContext;
     use relcache_build_seams::PgRewriteRuleShape;
+
+    // A real _RETURN rule action (pg_stat_activity), so the fill parses it.
+    const EV_ACTION: &str =
+        include_str!("../../../../nodes/readfuncs/src/fixtures/pg_stat_activity.ev_action");
 
     thread_local! {
         static SCANS: Cell<u32> = const { Cell::new(0) };
@@ -101,7 +149,7 @@ mod tests {
                         ev_enabled: b'O',
                         is_instead: true,
                         ev_qual: "<>",
-                        ev_action: "({QUERY})",
+                        ev_action: EV_ACTION,
                     });
                 }
                 Ok(rows)
@@ -123,17 +171,35 @@ mod tests {
         assert_eq!(rule.event, 1);
         assert_eq!(rule.enabled, b'O');
         assert!(rule.is_instead);
-        assert!(rule.qual_src.is_none());
-        assert_eq!(rule.action_src.as_str(), "({QUERY})");
+        assert!(!rule.has_qual());
+        // Parsed once at fill: the cached tree is the ev_action List.
+        let actions = rule.actions.as_list().expect("ev_action is a List");
+        assert_eq!(actions.len(), 1);
+        assert!(actions.nth(0).as_query().is_some());
         assert_eq!(SCANS.with(|c| c.get()), 1);
 
+        // A second use is a cache hit sharing the same trees (no re-parse).
         let again = super::RelationGetRules(mcx, 21000).unwrap().unwrap();
         assert_eq!(SCANS.with(|c| c.get()), 1);
         assert!(std::rc::Rc::ptr_eq(&r, &again));
+        assert!(again.rules[0].actions.ptr_eq(rule.actions));
 
+        // Per-use copies land in the caller's context and serialize identically.
+        let copy = rule.copy_actions(mcx).unwrap();
+        assert!(!copy.ptr_eq(rule.actions));
+        let a = outfuncs::nodeToString(mcx, copy).unwrap().as_str().to_string();
+        let orig = outfuncs::nodeToString(mcx, rule.actions).unwrap().as_str().to_string();
+        assert_eq!(a, orig);
+        assert!(rule.copy_qual(mcx).unwrap().is_none());
+
+        // Invalidation drops the map entry; a holder keeps its trees alive
+        // (C: the old rulescxt outlives the rebuild for whoever still reads it).
         super::forget(21000);
-        let _ = super::RelationGetRules(mcx, 21000).unwrap().unwrap();
+        let rebuilt = super::RelationGetRules(mcx, 21000).unwrap().unwrap();
         assert_eq!(SCANS.with(|c| c.get()), 2);
+        assert!(!std::rc::Rc::ptr_eq(&r, &rebuilt));
+        let b = outfuncs::nodeToString(mcx, r.rules[0].actions).unwrap().as_str().to_string();
+        assert_eq!(a, b);
 
         assert!(super::RelationGetRules(mcx, 21001).unwrap().is_none());
         assert!(super::RelationGetRules(mcx, 21001).unwrap().is_none());

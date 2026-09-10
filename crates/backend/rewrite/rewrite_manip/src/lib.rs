@@ -178,25 +178,26 @@ fn mva_mutate<'mcx>(
     nodes_core::expression_tree_mutator(mcx, node, &mut m)
 }
 
-// copyObject: serialize/deserialize round trip — the only generic deep copy
-// this vocabulary has; rule firing is per-statement on rule-bearing tables
-// only, and both halves panic loudly on unported arms.
+// copyObject: the generated structural deep copy (copyfuncs). Tags without a
+// vocabulary struct fall back, inside copyfuncs, to the out/read round trip.
 pub fn copy_node<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
-    let s = outfuncs::nodeToString(mcx, node)?;
-    readfuncs::stringToNode(mcx, s.as_str())
+    copyfuncs::copy_object(mcx, node)
 }
 
+// list_copy_deep: exact-length preallocation, one copy_object per cell.
 pub fn copy_node_list<'mcx>(mcx: Mcx<'mcx>, list: &NodeList<'mcx>) -> PgResult<NodeList<'mcx>> {
     if list.is_nil() {
         return Ok(NodeList::nil());
     }
-    let copied = copy_node(mcx, Node::mk_list(mcx, list.clone_in(mcx)?)?)?;
-    Ok(copied.as_list().expect("List round trip").clone_in(mcx)?)
+    let mut out = NodeList::with_capacity(mcx, list.len())?;
+    for cell in list.iter() {
+        out.lappend(mcx, copyfuncs::copy_object(mcx, cell)?)?;
+    }
+    Ok(out)
 }
 
 pub fn copy_query_node<'mcx>(mcx: Mcx<'mcx>, q: &Query<'_>) -> PgResult<Node<'mcx>> {
-    let s = outfuncs::queryToString(mcx, q)?;
-    readfuncs::stringToNode(mcx, s.as_str())
+    Node::mk(mcx, copyfuncs::copy_query(mcx, q)?)
 }
 
 // CombineRangeTables (rewriteManip.c). C scribbles src RTEs' perminfoindex;

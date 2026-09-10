@@ -136,7 +136,7 @@ fn update_one<'mcx>(
                 if check_option {
                     let view_query = rewrite_handler::get_view_query(mcx, rel)?;
                     if let Some(view_updatable_error) =
-                        rewrite_handler::view_query_is_auto_updatable(view_query, true)
+                        rewrite_handler::view_query_is_auto_updatable(&view_query, true)
                     {
                         genam::systable_endscan(mcx, scan)?;
                         return Err(Box::new(

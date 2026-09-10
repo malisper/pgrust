@@ -181,7 +181,9 @@ pub fn RefreshMatViewByOid<'mcx>(
         }
     }
 
-    let data_query_node = readfuncs::stringToNode(mcx, rule.action_src.as_str())?;
+    // C copies inside refresh_matview_datafill (copyObject before
+    // QueryRewrite); the copy out of the shared rd_rules tree happens here.
+    let data_query_node = rule.copy_actions(mcx)?;
     let actions = data_query_node.as_list().expect("ev_action is a List");
     if actions.len() != 1 {
         return Err(internal(format!(

@@ -1158,7 +1158,7 @@ pub fn vac_update_relstats(
         (false, false)
     } else {
         (
-            relcache_seams::relation_get_rules::call(relid)?.is_empty(),
+            !relcache_seams::relation_has_rules::call(relid)?,
             relcache_seams::relation_get_trigger_desc::call(relid)?.is_none(),
         )
     };

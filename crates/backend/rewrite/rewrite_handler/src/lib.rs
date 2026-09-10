@@ -937,7 +937,7 @@ fn rewriteValuesRTE<'mcx>(
         // (rewriteTargetView errors otherwise).
         !locks
             .iter()
-            .any(|&i| rules[i].is_instead && rules[i].qual_src.is_none())
+            .any(|&i| rules[i].is_instead && !rules[i].has_qual())
     } else {
         false
     };
@@ -1605,22 +1605,44 @@ fn instead_trigger_flags(rel: &Relation<'_>) -> PgResult<(bool, bool, bool)> {
     })
 }
 
-// get_view_query (rewriteHandler.c). C returns a read-only relcache pointer;
-// the text cache re-reads, so the result is a fresh tree the caller owns.
-pub fn get_view_query<'mcx>(
-    mcx: Mcx<'mcx>,
-    view: &Relation<'mcx>,
-) -> PgResult<&'mcx Query<'mcx>> {
+// The read-only view of a _RETURN rule action C's get_view_query returns as
+// a bare rd_rules pointer. Holding the rule-cache entry keeps its trees alive
+// across a relcache invalidation for as long as the caller reads them
+// (C's rulescxt is freed under a reader that let its refcount lapse). Copy
+// (copyfuncs::copy_query) before modifying — every reader shares the tree —
+// and do not keep node handles taken from it past the guard.
+pub struct ViewQuery<'mcx> {
+    _hold: std::rc::Rc<relcache::rules::RdRules>,
+    query: &'mcx Query<'mcx>,
+}
+
+impl<'mcx> core::ops::Deref for ViewQuery<'mcx> {
+    type Target = Query<'mcx>;
+    #[inline]
+    fn deref(&self) -> &Query<'mcx> {
+        self.query
+    }
+}
+
+// get_view_query (rewriteHandler.c): the cached rd_rules tree, read in place.
+pub fn get_view_query<'mcx>(mcx: Mcx<'mcx>, view: &Relation<'mcx>) -> PgResult<ViewQuery<'mcx>> {
     debug_assert_eq!(view.rd_rel.relkind, RELKIND_VIEW);
     if let Some(rules) = relcache::RelationGetRules(mcx, view.rd_id)? {
         for rule in rules.rules.iter() {
             if rule.event == CmdType::CMD_SELECT as i32 {
-                let actions_node = readfuncs::stringToNode(mcx, rule.action_src.as_str())?;
-                let actions = actions_node.as_list().expect("ev_action is a List");
+                let actions = rule.actions.as_list().expect("ev_action is a List");
                 if actions.len() != 1 {
                     return Err(internal_error("invalid _RETURN rule action specification"));
                 }
-                return Ok(actions.nth(0).as_query().expect("rule action is a Query"));
+                let query: &'static Query<'static> =
+                    actions.nth(0).as_query().expect("rule action is a Query");
+                // SAFETY: the tree lives in the rule context `rules` owns, which
+                // the guard holds; Query is invariant in its arena lifetime, so
+                // the 'static handle is narrowed to the guard's use lifetime here.
+                let query = unsafe {
+                    core::mem::transmute::<&'static Query<'static>, &'mcx Query<'mcx>>(query)
+                };
+                return Ok(ViewQuery { query, _hold: rules });
             }
         }
     }
@@ -1940,7 +1962,7 @@ pub fn relation_is_updatable<'mcx>(
     if rel.rd_hasrules {
         if let Some(rules) = relcache::RelationGetRules(mcx, rel.rd_id)? {
             for rule in rules.rules.iter() {
-                if rule.is_instead && rule.qual_src.is_none() {
+                if rule.is_instead && !rule.has_qual() {
                     events |= (1 << rule.event) & ALL_EVENTS;
                 }
             }
@@ -1981,6 +2003,7 @@ pub fn relation_is_updatable<'mcx>(
 
     if rel.rd_rel.relkind == RELKIND_VIEW {
         let viewquery = get_view_query(mcx, &rel)?;
+        let viewquery = &*viewquery;
         if view_query_is_auto_updatable(viewquery, false).is_none() {
             let mut updatable_cols = Bitmapset::empty();
             let mut non_updatable_col = None;
@@ -2038,16 +2061,22 @@ fn rewriteTargetView<'mcx>(
     use rewrite_manip::{ReplaceVarsFromTargetList, ReplaceVarsNoMatchOption};
     use types_nodes::primnodes::{OnConflictAction, OnConflictExpr, TargetEntry};
 
-    let viewquery = get_view_query(mcx, view)?;
+    // C: viewquery = copyObject(get_view_query(view)) — this arm scribbles on
+    // the tree (RTE relkind/lock mode, perminfos), so it works on a copy.
+    let cached_viewquery = get_view_query(mcx, view)?;
+    let viewquery_node = Node::mk(mcx, copyfuncs::copy_query(mcx, &cached_viewquery)?)?;
+    drop(cached_viewquery);
+    let viewquery = viewquery_node.as_query().expect("Query");
 
     // setRuleCheckAsUser (relcache.c RelationBuildRuleLock): C's get_view_query
     // returns the relcache rule tree, whose RTEPermissionInfos were already
     // stamped at load with the view owner (or InvalidOid for security_invoker
-    // views). The text cache re-reads a fresh tree with checkAsUser = 0, so we
-    // must stamp it here before any of the view query's perminfos — including
-    // those of sublink/subquery RTEs, not just the top base RTE — get folded
-    // into the outer parsetree. Otherwise injected sublink subqueries would be
-    // permission-checked and RLS-filtered as the invoker instead of the owner.
+    // views). The rule cache holds the tree unstamped (checkAsUser = 0), so we
+    // must stamp the copy here before any of the view query's perminfos —
+    // including those of sublink/subquery RTEs, not just the top base RTE —
+    // get folded into the outer parsetree. Otherwise injected sublink
+    // subqueries would be permission-checked and RLS-filtered as the invoker
+    // instead of the owner.
     let check_as_user = if view
         .rd_options
         .as_ref()
@@ -2205,7 +2234,7 @@ fn rewriteTargetView<'mcx>(
     let base_rel = table::table_open(mcx, rte_of(base_rte_node).relid, RowExclusiveLock)?;
 
     let is_insert = parsetree.commandType == CmdType::CMD_INSERT;
-    // SAFETY: viewquery is a fresh stringToNode tree owned by the rewriter.
+    // SAFETY: viewquery is this call's private copy of the rule tree.
     unsafe {
         base_rte_node.with_mut::<RangeTblEntry, _>(|r| {
             r.relkind = base_rel.rd_rel.relkind;
@@ -2617,7 +2646,7 @@ fn ApplyRetrieveRule<'mcx>(
     active_rirs: &mut PgVec<'mcx, Oid>,
     caller_has_row_security: &mut bool,
 ) -> PgResult<()> {
-    if rule.qual_src.is_some() {
+    if rule.has_qual() {
         return Err(internal_error("cannot handle qualified ON SELECT rule"));
     }
     check_view_expansion_restricted(relation)?;
@@ -2632,18 +2661,18 @@ fn ApplyRetrieveRule<'mcx>(
         (rc.strength, rc.waitPolicy)
     });
 
-    // C copyObject's the rulescxt tree; the cache stores ev_action text, so
-    // the per-use modifiable copy is a fresh read into the query context.
-    let actions_node = readfuncs::stringToNode(mcx, rule.action_src.as_str())?;
-    let actions = actions_node.as_list().expect("ev_action is a List");
+    // C: rule_action = copyObject(linitial(rule->actions)) — the per-use
+    // modifiable copy of the cached rd_rules tree, in the query context.
+    let actions = rule.actions.as_list().expect("ev_action is a List");
     if actions.len() != 1 {
         return Err(internal_error("expected just one rule action"));
     }
-    let action_node = actions.nth(0);
+    let action_node = copyfuncs::copy_object(mcx, actions.nth(0))?;
     let rule_action = action_node.as_query().expect("rule action is a Query");
 
     // setRuleCheckAsUser (rewriteDefine.c): C applies it once at rule load;
-    // the text cache defers it to the freshly read tree — same net state.
+    // the rule cache holds the tree unstamped and defers it to each copy —
+    // same net state.
     let view_opts = relation.rd_options.as_ref().and_then(|o| o.view());
     let check_as_user = if view_opts.is_some_and(|v| v.security_invoker) {
         InvalidOid
@@ -2820,8 +2849,8 @@ fn applyLockingClause<'mcx>(
 }
 
 // setRuleCheckAsUser (rewriteDefine.c) over a bare node. C stamps the rule
-// cache once in RelationBuildRuleLock (relcache.c); the text cache defers it
-// to each fresh read.
+// cache once in RelationBuildRuleLock (relcache.c); the rule cache holds the
+// tree unstamped and defers it to each per-use copy.
 pub(crate) fn set_rule_check_as_user_node<'mcx>(node: Node<'mcx>, userid: Oid) -> PgResult<()> {
     let mut w = RuleCheckAsUser { userid };
     nodes_core::NodeWalker::visit(&mut w, node)?;
@@ -2831,7 +2860,7 @@ pub(crate) fn set_rule_check_as_user_node<'mcx>(node: Node<'mcx>, userid: Oid) -
 // setRuleCheckAsUser_Query (rewriteDefine.c).
 fn set_rule_check_as_user<'mcx>(qry: &'mcx Query<'mcx>, userid: Oid) -> PgResult<()> {
     for pnode in qry.rteperminfos.iter() {
-        // SAFETY: the tree was just read by stringToNode; exclusively ours.
+        // SAFETY: the tree is the caller's private copy of the rule action.
         unsafe { pnode.with_mut::<RTEPermissionInfo, _>(|p| p.checkAsUser = userid) }
             .expect("rteperminfos holds RTEPermissionInfo nodes");
     }

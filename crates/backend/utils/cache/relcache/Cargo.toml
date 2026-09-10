@@ -29,6 +29,7 @@ snapmgr = { path = "../../time/snapmgr" }
 types_nodes = { path = "../../../../_support/types/nodes" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 readfuncs = { path = "../../../nodes/readfuncs" }
+copyfuncs = { path = "../../../nodes/copyfuncs" }
 relcache_seams = { path = "../relcache_seams" }
 parallel_seams = { path = "../../../access/transam/parallel_seams" }
 catalog_storage_seams = { path = "../../../catalog/storage_seams" }
@@ -45,4 +46,5 @@ miscinit_seams = { path = "../../init/miscinit_seams" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
 
 [dev-dependencies]
+outfuncs = { path = "../../../nodes/outfuncs" }
 types_spgist = { path = "../../../../_support/types/types_spgist" }

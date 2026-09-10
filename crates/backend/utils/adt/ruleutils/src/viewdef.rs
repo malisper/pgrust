@@ -31,11 +31,14 @@ pub fn pg_get_viewdef_worker(
     let Some(rule) = rules.rules.iter().find(|r| r.event == CmdType::CMD_SELECT as i32) else {
         return Ok(None);
     };
-    if !rule.is_instead || rule.qual_src.is_some() {
+    if !rule.is_instead || rule.has_qual() {
         return Ok(None);
     }
 
-    let actions = readfuncs::stringToNode(mcx, rule.action_src.as_str())?;
+    // C's pg_get_viewdef_worker stringToNode's a fresh tree from pg_rewrite
+    // (not rd_rules), and get_query_def's AcquireRewriteLocks scribbles on
+    // it (dropped-column fix-up of JOIN RTEs): deparse a private copy.
+    let actions = rule.copy_actions(mcx)?;
     let actions = actions.as_list().expect("ev_action is a List");
     if actions.len() != 1 {
         return Ok(None);

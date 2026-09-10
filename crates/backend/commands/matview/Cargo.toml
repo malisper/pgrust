@@ -41,7 +41,6 @@ multixact = { path = "../../access/transam/multixact" }
 pgstat = { path = "../../utils/activity/pgstat" }
 postgres = { path = "../../tcop/postgres" }
 procarray = { path = "../../storage/ipc/procarray" }
-readfuncs = { path = "../../nodes/readfuncs" }
 relcache = { path = "../../utils/cache/relcache" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }
 ruleutils = { path = "../../utils/adt/ruleutils" }

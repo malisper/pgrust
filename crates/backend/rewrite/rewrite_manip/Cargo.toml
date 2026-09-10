@@ -15,6 +15,5 @@ nodes_core = { path = "../../nodes/nodes_core" }
 datum = { path = "../../../_support/types/datum" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 parse_relation = { path = "../../parser/parse_relation" }
-outfuncs = { path = "../../nodes/outfuncs" }
-readfuncs = { path = "../../nodes/readfuncs" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
 coerce = { path = "../../parser/coerce" }

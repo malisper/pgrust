@@ -296,5 +296,6 @@ pub fn init_seams() {
     relcache_seams::at_eoxact_relation_cache::set(invalidate::AtEOXact_RelationCache);
     relcache_seams::at_eosubxact_relation_cache::set(invalidate::AtEOSubXact_RelationCache);
     relcache_seams::relation_get_rules::set(rules::RelationGetRulesShapes);
+    relcache_seams::relation_has_rules::set(rules::RelationHasRules);
     relcache_seams::relation_get_deform_kernel::set(deform_jit::RelationGetDeformKernel);
 }
