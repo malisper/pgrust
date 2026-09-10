@@ -192,7 +192,7 @@ pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResul
         crate::REPLICATION_ACTIVE.with(|c| c.set(true));
 
         let mut reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
-        let r = WalSndLoop(&mut |()| XLogSendPhysical(&mut reader));
+        let r = WalSndLoop(&mut |()| XLogSendPhysical(&mut reader), false);
 
         crate::REPLICATION_ACTIVE.with(|c| c.set(false));
         r?;
@@ -496,13 +496,24 @@ pub(crate) fn wal_read_raise_error(
     }
 }
 
+// WALSENDER_STATS_FLUSH_INTERVAL (walsender.c:100), ms: how often a waiting
+// walsender flushes its IO statistics (WalSndLoop for physical senders,
+// WalSndWaitForWal for logical ones).
+pub(crate) const WALSENDER_STATS_FLUSH_INTERVAL: i64 = 1000;
+
 // static void WalSndLoop(WalSndSendDataCallback send_data): shared by the
 // physical (XLogSendPhysical) and logical (XLogSendLogical) walsenders; the
 // C function pointer is a closure here.
-pub(crate) fn WalSndLoop(send_data: &mut dyn FnMut(()) -> PgResult<()>) -> PgResult<()> {
-    // WALSENDER_STATS_FLUSH_INTERVAL (walsender.c:100), ms.
-    const WALSENDER_STATS_FLUSH_INTERVAL: i64 = 1000;
-
+//
+// `logical` is C's `send_data != XLogSendLogical` test (walsender.c:2930): a
+// logical walsender never blocks here when caught up — XLogSendLogical's
+// page-read callback blocks in WalSndWaitForWal instead, which is also where
+// an idle logical receiver gets its keepalives (the flush < sentPtr ping,
+// walsender.c:1896) and its IO-stats flush.
+pub(crate) fn WalSndLoop(
+    send_data: &mut dyn FnMut(()) -> PgResult<()>,
+    logical: bool,
+) -> PgResult<()> {
     // Initialize the last reply timestamp; that enables timeout processing.
     crate::LAST_REPLY_TIMESTAMP.with(|c| c.set(get_ts()));
     set_waiting_for_ping_response(false);
@@ -556,9 +567,16 @@ pub(crate) fn WalSndLoop(send_data: &mut dyn FnMut(()) -> PgResult<()>) -> PgRes
         WalSndCheckTimeOut();
         WalSndKeepaliveIfNecessary()?;
 
-        // Block if we have unsent data, or (physical) if caught up: send_data
+        // Block if we have unsent data. For logical replication, let
+        // WalSndWaitForWal handle any other blocking; idle receivers need
+        // its additional actions (walsender.c:2919). Blocking a caught-up
+        // logical walsender HERE instead delays the flush < sentPtr
+        // keepalive until the client's next status update (or the
+        // wal_sender_timeout/2 timer): WalSndWaitForWal's fast path returns
+        // without setting the latch, so the wait below really sleeps. For
+        // physical replication, also block if caught up; its send_data
         // does not block.
-        if (caught_up() && !streaming_done_sending()) || pqcomm::pq_is_send_pending() {
+        if (caught_up() && !logical && !streaming_done_sending()) || pqcomm::pq_is_send_pending() {
             let mut wake_events: u32 = if !streaming_done_receiving() {
                 WL_SOCKET_READABLE
             } else {

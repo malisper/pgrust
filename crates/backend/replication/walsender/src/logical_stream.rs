@@ -118,7 +118,7 @@ pub(crate) fn StartLogicalReplication(cmd: &StartReplicationCmd) -> PgResult<()>
     }
 
     let mut routine = LogicalWalSndPageRead;
-    let r = WalSndLoop(&mut |()| XLogSendLogical(&mut ctx, &mut routine));
+    let r = WalSndLoop(&mut |()| XLogSendLogical(&mut ctx, &mut routine), true);
 
     let free_r = ctx.free();
     let rel_r = slot::ReplicationSlotRelease();
@@ -346,6 +346,7 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
     // C's `wait_event` is declared outside the loop and persists across
     // iterations: it gates whether RecentFlushPtr is recomputed (below).
     let mut wait_event: u32 = 0;
+    let mut last_flush: TimestampTz = 0;
 
     // Fast path to avoid work when we already know we have enough WAL AND all
     // standby servers have confirmed receipt up to RecentFlushPtr
@@ -472,6 +473,22 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
         }
         if pqcomm::pq_is_send_pending() {
             wake_events |= WL_SOCKET_WRITEABLE;
+        }
+
+        // Report IO statistics, if needed (walsender.c:1990): a logical
+        // walsender waits here, not in WalSndLoop, so this is its only
+        // periodic flush.
+        if adt_timestamp::TimestampDifferenceExceeds(
+            last_flush,
+            now,
+            crate::streaming::WALSENDER_STATS_FLUSH_INTERVAL as i32,
+        ) {
+            pgstat::io::pgstat_flush_io(false);
+            let _ = pgstat::backend::pgstat_flush_backend(
+                false,
+                pgstat::backend::PGSTAT_BACKEND_FLUSH_IO,
+            );
+            last_flush = now;
         }
 
         WalSndWait(wake_events, sleeptime, wait_event)?;
