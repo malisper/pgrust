@@ -18,6 +18,7 @@ use alloc::boxed::Box;
 use alloc::format;
 
 use ::datum::Datum;
+use ::fmgr::rsinfo::SrfShutdownHook;
 use ::fmgr::{FmgrBuiltin, FmgrInfo, FnKind, FunctionCallInfoBaseData, TRACK_FUNC_ALL};
 use ::types_core::{primitive::InvalidOid, Oid, TransactionId};
 use ::types_error::PgResult;
@@ -781,6 +782,27 @@ struct SecurityDefinerCache {
     // Userid to switch to; InvalidOid = proconfig-only wrapping.
     userid: Oid,
     proconfig: Option<alloc::vec::Vec<alloc::string::String>>,
+    // The srf_shutdown hook the INNER function planted on rsinfo. C's
+    // ShutdownSQLFunction is registered with its fcache pointer
+    // (functions.c RegisterExprContextCallback(..., PointerGetDatum(fcache)))
+    // and never re-derives the fcache from a FmgrInfo; the port's hook
+    // re-derives it from the FmgrInfo it is handed, and the SRF node hands
+    // it the OUTER FmgrInfo -- whose fn_extra is this cache, not the fcache.
+    // So the wrapper interposes: the outer hook is shutdown_security_definer_srf,
+    // which forwards to this hook with `flinfo` (the inner FmgrInfo).
+    inner_shutdown: Option<SrfShutdownHook>,
+}
+
+// srf_shutdown for a fmgr_security_definer-wrapped SRF: unwrap the outer
+// fn_extra and fire the inner function's hook on the inner FmgrInfo.
+fn shutdown_security_definer_srf(flinfo: &mut FmgrInfo) -> PgResult<()> {
+    let Some(cache) = flinfo.fn_extra_mut::<SecurityDefinerCache>() else {
+        return Ok(());
+    };
+    match cache.inner_shutdown.take() {
+        Some(hook) => hook(&mut cache.flinfo),
+        None => Ok(()),
+    }
 }
 
 // Transaction abort restores user and GUC state after an error.
@@ -803,6 +825,7 @@ pub fn fmgr_security_definer(
             flinfo: inner,
             userid,
             proconfig: row.proconfig,
+            inner_shutdown: None,
         }));
     }
     let cache = flinfo
@@ -835,7 +858,19 @@ pub fn fmgr_security_definer(
         None
     };
 
+    // Hide our own interposed hook from the inner call so that a hook it
+    // plants (or leaves alone) is distinguishable afterwards.
+    let outer_hook = fcinfo.rsinfo_mut().and_then(|rsi| rsi.srf_shutdown.take());
     let result = cache.flinfo.invoke(fcinfo)?;
+    if let Some(rsi) = fcinfo.rsinfo_mut() {
+        match rsi.srf_shutdown.take() {
+            Some(inner_hook) => {
+                cache.inner_shutdown = Some(inner_hook);
+                rsi.srf_shutdown = Some(shutdown_security_definer_srf);
+            }
+            None => rsi.srf_shutdown = outer_hook,
+        }
+    }
 
     if let Some(fcu) = &fcu {
         let finalize = fcinfo
