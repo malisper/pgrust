@@ -3500,3 +3500,23 @@ fn call_stmt_cache_lookup_failure_is_catchable_xx000() {
     assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     assert_eq!(e.level(), types_error::ERROR);
 }
+
+// C: pstate->p_sourcetext = sourceText (a pointer). A per-statement arena
+// copy of the whole message made a 45k-statement dump cost N x len(message).
+#[test]
+fn parse_analyze_does_not_copy_the_source_text_into_the_arena() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let target = Node::mk_res_target(mcx, None, NodeList::nil(), Some(int_const(mcx, 1, 7)), 7)
+        .unwrap();
+    let raw_stmt = raw(select_stmt(mcx, &[target]), 8);
+    let padding = 1usize << 20;
+    let source = format!("SELECT 1;{}", " ".repeat(padding));
+    let before = ctx.used();
+
+    let q = analyze(mcx, &source, &raw_stmt);
+
+    assert_eq!(q.commandType, CmdType::CMD_SELECT);
+    let grew = ctx.used() - before;
+    assert!(grew < padding / 4, "analysis of an 8-byte statement charged {grew} bytes to the arena");
+}

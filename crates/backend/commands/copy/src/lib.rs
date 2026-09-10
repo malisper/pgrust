@@ -225,12 +225,7 @@ pub fn DoCopy<'mcx>(
     let mut where_clause = NodeList::nil();
     if let Some(wc) = stmt.whereClause {
         let mut pstate = parser_small1::make_parsestate(mcx, None);
-        {
-            let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-            mcx::vec_append_bytes(&mut v, source_text.as_bytes())
-                .map_err(|_| mcx.oom(source_text.len()))?;
-            pstate.p_sourcetext = Some(v.leak());
-        }
+        pstate.p_sourcetext = Some(source_text.as_bytes());
         let nsitem =
             parse_relation::addRangeTableEntryForRelation(mcx, &mut pstate, &rel, lockmode, None, false, false)?;
         let where_perminfo = nsitem.p_perminfo;

@@ -133,7 +133,7 @@ impl<'mcx> ParseNamespaceItem<'mcx> {
 #[allow(non_snake_case)]
 pub struct ParseState<'p, 'mcx> {
     pub parentParseState: Option<&'p ParseState<'p, 'mcx>>,
-    pub p_sourcetext: Option<&'mcx [u8]>,
+    pub p_sourcetext: Option<&'p [u8]>,
     pub p_rtable: types_nodes::NodeList<'mcx>,
     pub p_rteperminfos: types_nodes::NodeList<'mcx>,
     pub p_joinexprs: PgVec<'mcx, Option<Node<'mcx>>>,

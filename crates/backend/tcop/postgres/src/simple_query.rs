@@ -497,121 +497,136 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
             snapshot_set = true;
         }
 
-        // C uses a per-parsetree child context for all but the last parsetree
-        // so multi-statement strings free as they go; collapsed onto the
-        // MessageContext arena (its reset reclaims everything per message).
-        let querytree_list = pg_analyze_and_rewrite_fixedparams(
-            mcx,
-            parsetree,
-            query_string,
-            &[],
-            QueryEnvHandle::NULL,
-        )?;
-        crate::stmt_trace::probe("q.rewrite");
+        // All but the last parsetree analyze+plan in a child context freed
+        // after the statement (C: per_parsetree_context), so an N-statement
+        // message retains O(len), not N x per-statement work. On the error
+        // path the failed portal still points into it, so it is parked in
+        // MessageContext's reset, which runs after error recovery has dropped
+        // the portals.
+        let per_parsetree_context =
+            (!is_last).then(|| mcx.context().new_child_bump("per-parsetree message context"));
+        let smcx: Mcx<'_> = per_parsetree_context.as_ref().map_or(mcx, |c| c.mcx());
+        let result = (|| -> PgResult<()> {
+            let querytree_list = pg_analyze_and_rewrite_fixedparams(
+                smcx,
+                parsetree,
+                query_string,
+                &[],
+                QueryEnvHandle::NULL,
+            )?;
+            crate::stmt_trace::probe("q.rewrite");
 
-        let plantree_list = pg_plan_queries(
-            mcx,
-            querytree_list,
-            query_string,
-            CURSOR_OPT_PARALLEL_OK,
-            ParamListHandle::NULL,
-        )?;
-        crate::stmt_trace::probe("q.plan");
+            let plantree_list = pg_plan_queries(
+                smcx,
+                querytree_list,
+                query_string,
+                CURSOR_OPT_PARALLEL_OK,
+                ParamListHandle::NULL,
+            )?;
+            crate::stmt_trace::probe("q.plan");
 
-        if snapshot_set {
-            snapmgr::PopActiveSnapshot()?;
-        }
-
-        check_for_interrupts()?;
-
-        let portal = portalmem::CreatePortal("", true, true)?;
-        portal.borrow_mut().visible = false;
-
-        // SAFETY: `plantree_list` is arena-backed by `mcx` and neither moves
-        // nor drops before `stmt_list::free(stmts)` / the next reset_all().
-        let stmts = unsafe { pquery::stmt_list::register(&plantree_list) };
-        portalmem::PortalDefineQuery(
-            &portal,
-            None,
-            query_string,
-            command_tag,
-            stmts,
-            CachedPlanHandle::NULL,
-        )?;
-
-        pquery::PortalStart(&portal, ParamListHandle::NULL, 0, None)?;
-        crate::stmt_trace::probe("q.portalstart");
-
-        /* Output format: text unless FETCH from a binary cursor. */
-        let format: i16 = match stmt.node_tag() {
-            NodeTag::T_FetchStmt => {
-                let fstmt = stmt.as_fetch_stmt().expect("T_FetchStmt");
-                let binary = !fstmt.ismove
-                    && portalmem::GetPortalByName(fstmt.portalname).is_some_and(|fportal| {
-                        fportal.borrow().cursorOptions & types_portal::CURSOR_OPT_BINARY != 0
-                    });
-                i16::from(binary)
+            if snapshot_set {
+                snapmgr::PopActiveSnapshot()?;
             }
-            _ => 0, /* TEXT is default */
-        };
-        pquery::PortalSetResultFormat(&portal, &[format])?;
 
-        let mut receiver = tcop_dest::CreateDestReceiver(dest);
-        if dest == CommandDest::Remote {
-            tcop_dest::SetRemoteDestReceiverParams(&mut receiver, portal.clone());
-        }
+            check_for_interrupts()?;
 
-        // GL-STMTTASK-1 (kill knob PGRUST_STMT_TASK, default OFF): arm the
-        // statement-as-task executor hook for exactly THIS statement's
-        // top-level portal run — the protocol-level half of the admission
-        // envelope (simple protocol, single statement, wire dest, a raw
-        // SELECT, normal non-subtransaction session state). The executor
-        // hook owns the plan-shape gates and consumes the arm; the guard
-        // disarms on every exit path so the arm can never leak past the
-        // statement. Knob-OFF cost: one memoized bool read per statement.
-        let _stmt_task_arm = postgres_seams::stmt_task_arm::arm_statement(
-            n == 1
-                && dest == CommandDest::Remote
-                && stmt.node_tag() == NodeTag::T_SelectStmt
-                && !xact::IsSubTransaction(),
-        );
+            let portal = portalmem::CreatePortal("", true, true)?;
+            portal.borrow_mut().visible = false;
 
-        let mut qc = QueryCompletion::default();
-        let _ = pquery::PortalRun(
-            &portal,
-            FETCH_ALL,
-            true, /* always top level */
-            &mut receiver,
-            None, /* altdest aliases dest, as in C */
-            Some(&mut qc),
-        )?;
+            // SAFETY: `plantree_list` is arena-backed by `mcx` and neither moves
+            // nor drops before `stmt_list::free(stmts)` / the next reset_all().
+            let stmts = unsafe { pquery::stmt_list::register(&plantree_list) };
+            portalmem::PortalDefineQuery(
+                &portal,
+                None,
+                query_string,
+                command_tag,
+                stmts,
+                CachedPlanHandle::NULL,
+            )?;
 
-        crate::stmt_trace::probe("q.run");
-        receiver.destroy();
+            pquery::PortalStart(&portal, ParamListHandle::NULL, 0, None)?;
+            crate::stmt_trace::probe("q.portalstart");
 
-        portalmem::PortalDrop(&portal, false)?;
-        pquery::stmt_list::free(stmts);
+            /* Output format: text unless FETCH from a binary cursor. */
+            let format: i16 = match stmt.node_tag() {
+                NodeTag::T_FetchStmt => {
+                    let fstmt = stmt.as_fetch_stmt().expect("T_FetchStmt");
+                    let binary = !fstmt.ismove
+                        && portalmem::GetPortalByName(fstmt.portalname).is_some_and(|fportal| {
+                            fportal.borrow().cursorOptions & types_portal::CURSOR_OPT_BINARY != 0
+                        });
+                    i16::from(binary)
+                }
+                _ => 0, /* TEXT is default */
+            };
+            pquery::PortalSetResultFormat(&portal, &[format])?;
 
-        if is_last {
-            if use_implicit_block {
-                xact::EndImplicitTransactionBlock();
+            let mut receiver = tcop_dest::CreateDestReceiver(dest);
+            if dest == CommandDest::Remote {
+                tcop_dest::SetRemoteDestReceiverParams(&mut receiver, portal.clone());
             }
-            finish_xact_command()?;
-        } else if stmt.node_tag() == NodeTag::T_TransactionStmt {
-            finish_xact_command()?;
-        } else {
-            debug_assert!(
-                (xact::MyXactFlags() & types_core::xact::XACT_FLAGS_NEEDIMMEDIATECOMMIT) == 0
+
+            // GL-STMTTASK-1 (kill knob PGRUST_STMT_TASK, default OFF): arm the
+            // statement-as-task executor hook for exactly THIS statement's
+            // top-level portal run — the protocol-level half of the admission
+            // envelope (simple protocol, single statement, wire dest, a raw
+            // SELECT, normal non-subtransaction session state). The executor
+            // hook owns the plan-shape gates and consumes the arm; the guard
+            // disarms on every exit path so the arm can never leak past the
+            // statement. Knob-OFF cost: one memoized bool read per statement.
+            let _stmt_task_arm = postgres_seams::stmt_task_arm::arm_statement(
+                n == 1
+                    && dest == CommandDest::Remote
+                    && stmt.node_tag() == NodeTag::T_SelectStmt
+                    && !xact::IsSubTransaction(),
             );
 
-            xact::CommandCounterIncrement()?;
+            let mut qc = QueryCompletion::default();
+            let _ = pquery::PortalRun(
+                &portal,
+                FETCH_ALL,
+                true, /* always top level */
+                &mut receiver,
+                None, /* altdest aliases dest, as in C */
+                Some(&mut qc),
+            )?;
 
-            disable_statement_timeout()?;
+            crate::stmt_trace::probe("q.run");
+            receiver.destroy();
+
+            portalmem::PortalDrop(&portal, false)?;
+            pquery::stmt_list::free(stmts);
+
+            if is_last {
+                if use_implicit_block {
+                    xact::EndImplicitTransactionBlock();
+                }
+                finish_xact_command()?;
+            } else if stmt.node_tag() == NodeTag::T_TransactionStmt {
+                finish_xact_command()?;
+            } else {
+                debug_assert!(
+                    (xact::MyXactFlags() & types_core::xact::XACT_FLAGS_NEEDIMMEDIATECOMMIT) == 0
+                );
+
+                xact::CommandCounterIncrement()?;
+
+                disable_statement_timeout()?;
+            }
+
+            tcop_dest::EndCommand(&qc, dest, false)?;
+            Ok(())
+        })();
+        match (result, per_parsetree_context) {
+            (Ok(()), ctx) => drop(ctx),
+            (Err(e), Some(ctx)) => {
+                mcx.context().register_reset_callback(move || drop(ctx));
+                return Err(e);
+            }
+            (Err(e), None) => return Err(e),
         }
-
-        tcop_dest::EndCommand(&qc, dest, false)?;
-
-        /* (per_parsetree_context delete: collapsed onto the arena.) */
     }
 
     finish_xact_command()?;

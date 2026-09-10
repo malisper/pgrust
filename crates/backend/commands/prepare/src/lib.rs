@@ -138,7 +138,7 @@ fn fill_plansource(
         .expect("created with a raw tree");
 
     let mut pstate = parser_small1::make_parsestate(qmcx, None);
-    pstate.p_sourcetext = Some(mcx::slice_in(qmcx, source_text.as_bytes())?.leak());
+    pstate.p_sourcetext = Some(source_text.as_bytes());
     let mut argtypes: mcx::PgVec<'_, types_core::Oid> =
         mcx::vec_with_capacity_in(qmcx, stmt.argtypes.len())?;
     for tn_node in stmt.argtypes.iter() {
@@ -266,7 +266,7 @@ fn EvaluateParams<'mcx>(
     }
 
     let mut pstate = parser_small1::make_parsestate(mcx, None);
-    pstate.p_sourcetext = Some(mcx::slice_in(mcx, source_text.as_bytes())?.leak());
+    pstate.p_sourcetext = Some(source_text.as_bytes());
 
     // Pass 1 (prepare.c:311-342): parse-analyze and coerce EVERY parameter
     // before any of them is evaluated, so a coercion failure of $j (42804) is

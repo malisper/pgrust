@@ -16,3 +16,4 @@ elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 procsignal = { path = "../../storage/ipc/procsignal" }
+libc = "0.2"

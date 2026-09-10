@@ -152,6 +152,7 @@ fn cgroup_mem() -> Option<(u64, Option<u64>)> {
 enum LimitSource {
     Guc,
     Cgroup,
+    Physical,
     None,
 }
 
@@ -191,6 +192,8 @@ fn collect(limit_mb: i32) -> Ledger {
         (rss_bytes, (limit_mb as u64) << 20, LimitSource::Guc)
     } else if let Some((current, Some(max))) = cg {
         (current, max, LimitSource::Cgroup)
+    } else if let Some(total) = physical_memory() {
+        (rss_bytes, total, LimitSource::Physical)
     } else {
         (rss_bytes, 0, LimitSource::None)
     };
@@ -202,6 +205,25 @@ fn collect(limit_mb: i32) -> Ledger {
         cg,
         accounted: mcx::global_footprint::bytes(),
         alloc,
+    }
+}
+
+// Total physical RAM: the limit of last resort. With neither a cgroup limit nor
+// the GUC, the only thing that ends a runaway process is the kernel (Linux OOM
+// killer, macOS jetsam) and a SIGKILL leaves no log line — the thread model
+// has no surviving postmaster to report "terminated by signal 9".
+fn physical_memory() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        // SAFETY: sysconf takes an integer name and touches no memory.
+        let (pages, page) = unsafe {
+            (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE))
+        };
+        (pages > 0 && page > 0).then(|| pages as u64 * page as u64)
+    }
+    #[cfg(not(unix))]
+    {
+        None
     }
 }
 
@@ -286,8 +308,8 @@ fn announce(state: &mut WatchState, l: &Ledger, base: i32) {
     state.latched = 0;
     match l.source {
         LimitSource::None => log_line(
-            "idle: no memory limit signal (no bounded cgroup v2 limit found and \
-             pgrust.memory_watchdog_limit is 0)",
+            "idle: no memory limit signal (no bounded cgroup v2 limit found, \
+             pgrust.memory_watchdog_limit is 0, physical memory size unreadable)",
         ),
         _ => {
             let t = tiers(base);
@@ -297,6 +319,7 @@ fn announce(state: &mut WatchState, l: &Ledger, base: i32) {
                 match l.source {
                     LimitSource::Guc => "pgrust.memory_watchdog_limit",
                     LimitSource::Cgroup => "cgroup v2 memory.max",
+                    LimitSource::Physical => "physical memory; no cgroup v2 limit, pgrust.memory_watchdog_limit is 0",
                     LimitSource::None => unreachable!(),
                 },
                 t[0],
@@ -379,6 +402,17 @@ mod tests {
             assert!(m.rss_kb > 0);
         } else {
             assert!(proc_status().is_none() || proc_status().is_some());
+        }
+    }
+
+    #[test]
+    fn physical_memory_is_the_fallback_limit() {
+        let total = physical_memory().expect("physical RAM readable on this platform");
+        assert!(total >= 256 << 20, "implausible RAM size {total}");
+        let l = collect(0);
+        if l.cg.map_or(true, |(_, max)| max.is_none()) {
+            assert_eq!(l.source, LimitSource::Physical);
+            assert_eq!(l.limit, total);
         }
     }
 

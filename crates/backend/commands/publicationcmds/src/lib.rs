@@ -668,11 +668,7 @@ fn TransformPubWhereClauses<'mcx>(
         }
 
         let mut pstate = make_parsestate(mcx, None);
-        {
-            let mut v: PgVec<'mcx, u8> = PgVec::new_in(mcx);
-            mcx::vec_append_bytes(&mut v, query_string.as_bytes())?;
-            pstate.p_sourcetext = Some(v.leak());
-        }
+        pstate.p_sourcetext = Some(query_string.as_bytes());
         let nsitem = addRangeTableEntryForRelation(
             mcx,
             &mut pstate,

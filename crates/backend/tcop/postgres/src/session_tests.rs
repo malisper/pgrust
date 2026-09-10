@@ -24,6 +24,9 @@ thread_local! {
         const { Cell::new(types_resowner::ResourceOwner::NULL) };
     static SNAPSHOT_REFS: RefCell<Vec<(types_resowner::ResourceOwner, usize)>> =
         const { RefCell::new(Vec::new()) };
+    // High-water of MessageContext.used() over the session, sampled before
+    // each reset: what one message left charged to the arena.
+    static PEAK_MESSAGE_USED: Cell<usize> = const { Cell::new(0) };
 }
 
 // The process-wide stub set shared by every test module in this crate (the
@@ -632,6 +635,7 @@ fn run_session(input: Vec<u8>) -> Vec<u8> {
     WIRE.with(|w| w.borrow_mut().clear());
     INPUT.with(|q| *q.borrow_mut() = input);
     INPUT_POS.with(|c| c.set(0));
+    PEAK_MESSAGE_USED.with(|c| c.set(0));
 
     let mut message_context = MemoryContext::new_bump("MessageContext-test");
     let mut state = LoopState {
@@ -642,6 +646,7 @@ fn run_session(input: Vec<u8>) -> Vec<u8> {
     };
 
     for _ in 0..200 {
+        PEAK_MESSAGE_USED.with(|c| c.set(c.get().max(message_context.used())));
         message_context.reset();
         let mcx = message_context.mcx();
         match run_one_iteration(mcx, &mut state) {
@@ -1183,5 +1188,32 @@ fn explain_rows_from_sqlvaluefunction_matches_live_pg_shape() {
     assert_eq!(
         line,
         "Function Scan on \"current_date\"  (cost=0.01..0.01 rows=1 width=0)"
+    );
+}
+
+// One simple-query message of N statements must cost O(N + len), not
+// N x len: exec_simple_query keeps ONE copy of the query string in
+// MessageContext and per-statement analysis borrows it (C: p_sourcetext is
+// a pointer). Before the fix a 4.77 MB / 45k-statement dump retained
+// ~200 GB and the server was SIGKILLed.
+#[test]
+fn simple_query_multi_statement_message_does_not_retain_n_times_len() {
+    install_generate_series_fixture();
+
+    let n = 2000;
+    let sql = "SELECT 1;".repeat(n);
+    let input: Vec<u8> = [simple_query_msg(&sql), msg(b'X', &[])].concat();
+    let wire = run_session(input);
+    let all = frames(&wire);
+
+    let completes = all.iter().filter(|(t, _)| *t == b'C').count();
+    assert_eq!(completes, n, "frame types: {:?}", all.iter().map(|f| f.0 as char).collect::<Vec<_>>());
+
+    let peak = PEAK_MESSAGE_USED.with(|c| c.get());
+    let n_times_len = n * sql.len();
+    assert!(
+        peak < n_times_len / 8,
+        "MessageContext held {peak} bytes for a {}-byte message of {n} statements (N x len = {n_times_len})",
+        sql.len()
     );
 }

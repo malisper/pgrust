@@ -9511,6 +9511,7 @@ version = "0.0.0"
 dependencies = [
  "elog",
  "guc_tables",
+ "libc",
  "lmgr_proc",
  "mcx",
  "procsignal",

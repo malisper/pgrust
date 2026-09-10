@@ -818,9 +818,7 @@ fn transform_when_clause<'mcx>(
 ) -> PgResult<(Node<'mcx>, mcx::PgString<'mcx>, NodeList<'mcx>)> {
     let mut pstate = parser_small1::make_parsestate(mcx, None);
     if let Some(s) = query_string {
-        let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len())?;
-        mcx::vec_append_bytes(&mut buf, s.as_bytes())?;
-        pstate.p_sourcetext = Some(buf.leak());
+        pstate.p_sourcetext = Some(s.as_bytes());
     }
 
     let old_alias = mcx::leak_in(mcx::alloc_in(

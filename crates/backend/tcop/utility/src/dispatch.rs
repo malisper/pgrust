@@ -398,11 +398,7 @@ fn dispatch_switch<'mcx>(
             // utility.c:1010 GrantRole(pstate, stmt): the option-error
             // cursors (user.c:1519/:1525) need the statement's ParseState.
             let mut pstate = parser_small1::make_parsestate(mcx, None);
-            {
-                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                pstate.p_sourcetext = Some(v.leak());
-            }
+            pstate.p_sourcetext = Some(source_text.as_bytes());
             user::GrantRole(mcx, Some(&pstate), stmt)?;
             parser_small1::free_parsestate(pstate)?;
         }
@@ -420,11 +416,7 @@ fn dispatch_switch<'mcx>(
             // utility.c:750 createdb(pstate, stmt): errorConflictingDefElem
             // (dbcommands.c:752-764) carries the query cursor.
             let mut pstate = parser_small1::make_parsestate(mcx, None);
-            {
-                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                pstate.p_sourcetext = Some(v.leak());
-            }
+            pstate.p_sourcetext = Some(source_text.as_bytes());
             dbcommands::createdb(mcx, Some(&pstate), stmt)?;
             parser_small1::free_parsestate(pstate)?;
         }
@@ -605,11 +597,7 @@ fn dispatch_switch<'mcx>(
             // utility.c:1054 CreateRole(pstate, stmt): errorConflictingDefElem
             // (user.c:194) carries the query cursor.
             let mut pstate = parser_small1::make_parsestate(mcx, None);
-            {
-                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                pstate.p_sourcetext = Some(v.leak());
-            }
+            pstate.p_sourcetext = Some(source_text.as_bytes());
             user::CreateRole(mcx, Some(&pstate), stmt)?;
             parser_small1::free_parsestate(pstate)?;
         }
@@ -618,11 +606,7 @@ fn dispatch_switch<'mcx>(
             // utility.c:1058 AlterRole(pstate, stmt): errorConflictingDefElem
             // (user.c:662) carries the query cursor.
             let mut pstate = parser_small1::make_parsestate(mcx, None);
-            {
-                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                pstate.p_sourcetext = Some(v.leak());
-            }
+            pstate.p_sourcetext = Some(source_text.as_bytes());
             user::AlterRole(mcx, Some(&pstate), stmt)?;
             parser_small1::free_parsestate(pstate)?;
         }
@@ -970,11 +954,7 @@ fn slow_switch<'mcx>(
                             .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
                             .expect("CreateSeqStmt");
                         let mut pstate = parser_small1::make_parsestate(mcx, None);
-                        {
-                            let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                            mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                            pstate.p_sourcetext = Some(v.leak());
-                        }
+                        pstate.p_sourcetext = Some(source_text.as_bytes());
                         let seqoid = sequence::DefineSequence(mcx, Some(&pstate), seqstmt)?;
                         parser_small1::free_parsestate(pstate)?;
                         event_trigger::EventTriggerCollectSimpleCommand(
@@ -990,11 +970,7 @@ fn slow_switch<'mcx>(
                         // utility.c:1675 AlterSequence(pstate, stmt): the
                         // statement's ParseState reaches init_params.
                         let mut pstate = parser_small1::make_parsestate(mcx, None);
-                        {
-                            let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                            mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                            pstate.p_sourcetext = Some(v.leak());
-                        }
+                        pstate.p_sourcetext = Some(source_text.as_bytes());
                         let seqoid = sequence::AlterSequence(mcx, Some(&pstate), altstmt)?;
                         parser_small1::free_parsestate(pstate)?;
                         event_trigger::EventTriggerCollectSimpleCommand(
@@ -1106,11 +1082,7 @@ fn slow_switch<'mcx>(
                 >(stmt)
             };
             let mut pstate = parser_small1::make_parsestate(mcx, None);
-            {
-                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                pstate.p_sourcetext = Some(v.leak());
-            }
+            pstate.p_sourcetext = Some(source_text.as_bytes());
             let address = functioncmds::CreateFunction(mcx, &mut pstate, stmt, source_text)?;
             parser_small1::free_parsestate(pstate)?;
             Ok(Some(address))
@@ -1328,11 +1300,7 @@ fn slow_switch<'mcx>(
                 .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
                 .expect("CreateSeqStmt");
             let mut pstate = parser_small1::make_parsestate(mcx, None);
-            {
-                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                pstate.p_sourcetext = Some(v.leak());
-            }
+            pstate.p_sourcetext = Some(source_text.as_bytes());
             let seqoid = sequence::DefineSequence(mcx, Some(&pstate), seqstmt)?;
             parser_small1::free_parsestate(pstate)?;
             Ok(Some(ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid)))
@@ -1344,11 +1312,7 @@ fn slow_switch<'mcx>(
                 stmt_node.as_variant::<types_nodes::AlterSeqStmt>().expect("AlterSeqStmt");
             // utility.c:1675 AlterSequence(pstate, stmt).
             let mut pstate = parser_small1::make_parsestate(mcx, None);
-            {
-                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                pstate.p_sourcetext = Some(v.leak());
-            }
+            pstate.p_sourcetext = Some(source_text.as_bytes());
             let seqoid = sequence::AlterSequence(mcx, Some(&pstate), altstmt)?;
             parser_small1::free_parsestate(pstate)?;
             Ok(Some(ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid)))
@@ -1361,11 +1325,7 @@ fn slow_switch<'mcx>(
                 .as_create_domain_stmt()
                 .expect("CreateDomainStmt");
             let mut pstate = parser_small1::make_parsestate(mcx, None);
-            {
-                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                pstate.p_sourcetext = Some(v.leak());
-            }
+            pstate.p_sourcetext = Some(source_text.as_bytes());
             let address = typecmds::DefineDomain(mcx, &mut pstate, stmt)?;
             parser_small1::free_parsestate(pstate)?;
             Ok(Some(address))
@@ -1380,11 +1340,7 @@ fn slow_switch<'mcx>(
             let address = match stmt.kind {
                 types_nodes::parsenodes::ObjectType::OBJECT_COLLATION => {
                     let mut pstate = parser_small1::make_parsestate(mcx, None);
-                    {
-                        let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                        mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                        pstate.p_sourcetext = Some(v.leak());
-                    }
+                    pstate.p_sourcetext = Some(source_text.as_bytes());
                     // C: address = DefineCollation (collationcmds.c).
                     let address = collationcmds::DefineCollation(mcx, &mut pstate, stmt)?;
                     parser_small1::free_parsestate(pstate)?;
@@ -1398,11 +1354,7 @@ fn slow_switch<'mcx>(
                 types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
                     debug_assert!(!stmt.oldstyle);
                     let mut pstate = parser_small1::make_parsestate(mcx, None);
-                    {
-                        let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                        mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                        pstate.p_sourcetext = Some(v.leak());
-                    }
+                    pstate.p_sourcetext = Some(source_text.as_bytes());
                     // C: address = DefineType (typecmds.c).
                     let address =
                         typecmds::DefineType(mcx, &mut pstate, &stmt.defnames, &stmt.definition)?;
@@ -1411,11 +1363,7 @@ fn slow_switch<'mcx>(
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => {
                     let mut pstate = parser_small1::make_parsestate(mcx, None);
-                    {
-                        let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                        mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                        pstate.p_sourcetext = Some(v.leak());
-                    }
+                    pstate.p_sourcetext = Some(source_text.as_bytes());
                     // C: address = DefineAggregate (aggregatecmds.c).
                     let address = aggregatecmds::DefineAggregate(
                         mcx,
@@ -1517,11 +1465,7 @@ fn slow_switch<'mcx>(
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node.as_create_range_stmt().expect("CreateRangeStmt");
             let mut pstate = parser_small1::make_parsestate(mcx, None);
-            {
-                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
-                pstate.p_sourcetext = Some(v.leak());
-            }
+            pstate.p_sourcetext = Some(source_text.as_bytes());
             let address = typecmds::DefineRange(mcx, &mut pstate, stmt)?;
             parser_small1::free_parsestate(pstate)?;
             Ok(Some(address))
