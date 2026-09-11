@@ -2442,6 +2442,12 @@ fn show_agg_keys<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx>>
 // the child plan's tlist; deparsed with showimplicit=true as C.
 fn show_group_keys<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx>>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
     let grp = node.as_group().expect("Group plan node");
+    // show_sort_group_keys: `if (nkeys <= 0) return;` — a Group over a
+    // constant-only GROUP BY (GroupResultPath) has numCols == 0 and prints no
+    // "Group Key" line at all.
+    if grp.numCols <= 0 {
+        return Ok(());
+    }
     let child = grp.plan.lefttree.expect("Group has an outer plan");
     let child_tlist = &plan_of(child).targetlist;
     let mcx = es.str.allocator();

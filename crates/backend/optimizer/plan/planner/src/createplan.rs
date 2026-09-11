@@ -5313,6 +5313,12 @@ pub(crate) fn path_is_reparameterizable_by_child(
         PathNode::MemoizePath(p) => {
             path_is_reparameterizable_by_child(run, p.subpath.unwrap(), child_rel)
         }
+        // pathnode.c T_ForeignPath: only the fdw_outerpath can refuse
+        // (postgres_fdw's parameterized scan paths reparameterize like any
+        // scan; witnessed by fixtures/walker-arms-witness.sql).
+        PathNode::ForeignPath(p) => p
+            .fdw_outerpath
+            .is_none_or(|o| path_is_reparameterizable_by_child(run, o, child_rel)),
         _ => false,
     }
 }
@@ -5343,6 +5349,10 @@ fn reparameterize_path_by_child<'mcx>(
         Sub {
             subpath: PathId,
             param_exprs: Option<mcx::PgVec<'m, types_pathnodes::NodeId>>,
+        },
+        Foreign {
+            fdw_outerpath: Option<PathId>,
+            fdw_restrictinfo: mcx::PgVec<'m, RinfoId>,
         },
         Unsupported,
     }
@@ -5415,6 +5425,10 @@ fn reparameterize_path_by_child<'mcx>(
         PathNode::MemoizePath(p) => Snap::Sub {
             subpath: p.subpath.unwrap(),
             param_exprs: Some(crate::relnode::pgvec_clone_shallow(mcx, &p.param_exprs)),
+        },
+        PathNode::ForeignPath(p) => Snap::Foreign {
+            fdw_outerpath: p.fdw_outerpath,
+            fdw_restrictinfo: crate::relnode::pgvec_clone_shallow(mcx, &p.fdw_restrictinfo),
         },
         _ => Snap::Unsupported,
     };
@@ -5546,6 +5560,31 @@ fn reparameterize_path_by_child<'mcx>(
                 }
                 if let PathNode::MemoizePath(p) = run.root.path_mut(path) {
                     p.param_exprs = new_pe;
+                }
+            }
+        }
+        // pathnode.c T_ForeignPath: ADJUST_CHILD_ATTRS(baserestrictinfo),
+        // reparameterize fdw_outerpath, ADJUST_CHILD_ATTRS(fdw_restrictinfo).
+        // C then hands fdw_private to the FDW's ReparameterizeForeignPathByChild
+        // hook if it defines one; neither in-tree FDW (postgres_fdw, file_fdw)
+        // does and pgrust's FdwKind table carries no such callback, so
+        // fdw_private is left as-is (the same outcome as a NULL hook).
+        Snap::Foreign { fdw_outerpath, fdw_restrictinfo } => {
+            let list = crate::relnode::pgvec_clone_shallow(
+                mcx,
+                &run.root.rel(parent).baserestrictinfo,
+            );
+            let new = adjust_rinfos(run, &list, child_rel, top_parent)?;
+            run.root.rel_mut(parent).baserestrictinfo = new;
+            if let Some(o) = fdw_outerpath {
+                if reparameterize_path_by_child(run, o, child_rel)?.is_none() {
+                    return Ok(None);
+                }
+            }
+            if !fdw_restrictinfo.is_empty() {
+                let new_fr = adjust_rinfos(run, &fdw_restrictinfo, child_rel, top_parent)?;
+                if let PathNode::ForeignPath(p) = run.root.path_mut(path) {
+                    p.fdw_restrictinfo = new_fr;
                 }
             }
         }
