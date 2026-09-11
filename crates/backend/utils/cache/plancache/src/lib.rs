@@ -1129,15 +1129,50 @@ fn rewrite_analyzed(
     // The rewriter scribbles on its input, so copy (C's copyObject).
     let copied: Query<'static> = copyfuncs::copy_query(qmcx, analyzed)?;
     rewrite_handler_seams::acquire_rewrite_locks::call(qmcx, &copied, true, false)?;
-    // pg_rewrite_query's own utility arm (a utility Query has an empty rtable,
-    // so the lock walk above is a no-op for it, exactly as in C).
-    if copied.commandType == CmdType::CMD_UTILITY {
+    pg_rewrite_query(qmcx, copied)
+}
+
+// pg_rewrite_query (tcop/postgres.c:794-869): the rewriter leg both
+// revalidation arms share. tcop's own copy is unreachable from here (tcop
+// sits above plancache), so the C body — the utility arm (a utility Query has
+// an empty rtable, so acquire_rewrite_locks is a no-op for it), the
+// log_parser_stats usage bracket and the debug_print_rewritten dump — is
+// mirrored at this call site as C reaches it from RevalidateCachedQuery.
+fn pg_rewrite_query(
+    qmcx: Mcx<'static>,
+    query: Query<'static>,
+) -> PgResult<PgVec<'static, Query<'static>>> {
+    if guc_tables::backing::Debug_print_parse() {
+        nodes_core::print::debug_print_tree(
+            qmcx,
+            "parse tree",
+            outfuncs::queryToStringWithLocations(qmcx, &query),
+            guc_tables::backing::Debug_pretty_print(),
+        )?;
+    }
+    if guc_tables::backing::log_parser_stats() {
+        postgres_seams::reset_usage::call();
+    }
+    let querytree_list = if query.commandType == CmdType::CMD_UTILITY {
         let mut v = PgVec::new_in(qmcx);
         v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
-        v.push(copied);
-        return Ok(v);
+        v.push(query);
+        v
+    } else {
+        rewrite_handler_seams::query_rewrite::call(qmcx, query)?
+    };
+    if guc_tables::backing::log_parser_stats() {
+        postgres_seams::show_usage::call("REWRITER STATISTICS")?;
     }
-    rewrite_handler_seams::query_rewrite::call(qmcx, copied)
+    if guc_tables::backing::Debug_print_rewritten() {
+        nodes_core::print::debug_print_tree(
+            qmcx,
+            "rewritten parse tree",
+            outfuncs::queryListToStringWithLocations(qmcx, &querytree_list),
+            guc_tables::backing::Debug_pretty_print(),
+        )?;
+    }
+    Ok(querytree_list)
 }
 
 // pg_analyze_and_rewrite_fixedparams (tcop/postgres.c) via the seams, the
@@ -1156,14 +1191,7 @@ fn reanalyze_fixedparams(
         param_types,
         query_env,
     )?;
-    if query.commandType == CmdType::CMD_UTILITY {
-        let mut v = PgVec::new_in(qmcx);
-        v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
-        v.push(query);
-        Ok(v)
-    } else {
-        rewrite_handler_seams::query_rewrite::call(qmcx, query)
-    }
+    pg_rewrite_query(qmcx, query)
 }
 
 fn CheckCachedPlan(h: CachedPlanSourceHandle) -> PgResult<bool> {
@@ -1317,13 +1345,32 @@ fn build_stmt_list(
                 });
             } else {
                 let input = mcx::leak_in(mcx::alloc_in(mcx, copy_query_in(mcx, q)?)?);
-                stmts.push(planner_seams::planner::call(
+                // pg_plan_query (tcop/postgres.c:880-946) as BuildCachedPlan
+                // reaches it through pg_plan_queries: the log_planner_stats
+                // usage bracket and the debug_print_plan dump around the
+                // planner call (tcop's copy sits above plancache).
+                if guc_tables::backing::log_planner_stats() {
+                    postgres_seams::reset_usage::call();
+                }
+                let plan = planner_seams::planner::call(
                     mcx,
                     input,
                     query_string,
                     cursor_options,
                     boundParams,
-                )?);
+                )?;
+                if guc_tables::backing::log_planner_stats() {
+                    postgres_seams::show_usage::call("PLANNER STATISTICS")?;
+                }
+                if guc_tables::backing::Debug_print_plan() {
+                    nodes_core::print::debug_print_tree(
+                        mcx,
+                        "plan",
+                        outfuncs::plannedStmtToStringWithLocations(mcx, &plan),
+                        guc_tables::backing::Debug_pretty_print(),
+                    )?;
+                }
+                stmts.push(plan);
             }
         }
         Ok(stmts)

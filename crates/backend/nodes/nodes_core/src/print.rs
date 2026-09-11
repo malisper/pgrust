@@ -6,7 +6,10 @@ use core::fmt::Write;
 
 use mcx::{Mcx, PgString, PgVec};
 use types_core::AttrNumber;
-use types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use types_error::{
+    ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INTERNAL_ERROR, LOG,
+};
 use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
 use types_nodes::primnodes::{INDEX_VAR, INNER_VAR, OUTER_VAR};
 use types_nodes::{Node, NodeList, NodeTag};
@@ -173,15 +176,56 @@ pub fn elog_node_display(
     pretty: bool,
 ) -> PgResult<()> {
     let s = outfuncs::nodeToStringWithLocations(mcx, node)?;
+    elog_node_dump_display(mcx, lev, title, s.as_str(), pretty)
+}
+
+// The debug_print_* arms of pg_rewrite_query / pg_plan_query (postgres.c:803,
+// 870, 954, and plancache.c's calls into them):
+// `elog_node_display(LOG, title, tree, Debug_pretty_print)`. `dump` is the
+// nodeToStringWithLocations text (or its failure). C's outNode can dump every
+// node; here a tree holding a node whose writer is not yet ported comes back
+// as outfuncs' typed ERRCODE_FEATURE_NOT_SUPPORTED refusal, and a debug
+// logging switch must not abort the statement over it: the refusal is logged
+// in the DETAIL slot instead (still the C-shaped LOG + DETAIL pair, never a
+// silently truncated tree). Any other failure (OOM, stack depth) propagates
+// as it would from C.
+pub fn debug_print_tree(
+    mcx: Mcx<'_>,
+    title: &str,
+    dump: PgResult<PgString<'_>>,
+    pretty: bool,
+) -> PgResult<()> {
+    match dump {
+        Ok(s) => elog_node_dump_display(mcx, LOG, title, s.as_str(), pretty),
+        Err(e) if e.sqlstate == ERRCODE_FEATURE_NOT_SUPPORTED => elog::ereport(LOG)
+            .errmsg_internal(format!("{title}:"))
+            .errdetail_internal(format!("{} (node dump not yet ported)", e.message))
+            .finish(ErrorLocation::new("print.c", 88, "elog_node_display")),
+        Err(e) => Err(e),
+    }
+}
+
+// elog_node_display (print.c:70-89) over an already-serialized
+// nodeToStringWithLocations dump: the debug_print_* sites in tcop and
+// plancache hold the Query, the Query list and the PlannedStmt by value
+// (no node handle), so they serialize through outfuncs' slice writers and
+// format here.
+pub fn elog_node_dump_display(
+    mcx: Mcx<'_>,
+    lev: ErrorLevel,
+    title: &str,
+    dump: &str,
+    pretty: bool,
+) -> PgResult<()> {
     let f = if pretty {
-        pretty_format_node_dump(mcx, s.as_str())?
+        pretty_format_node_dump(mcx, dump)?
     } else {
-        format_node_dump(mcx, s.as_str())?
+        format_node_dump(mcx, dump)?
     };
     elog::ereport(lev)
         .errmsg_internal(format!("{title}:"))
         .errdetail_internal(f.as_str().to_owned())
-        .finish(ErrorLocation::new(file!(), line!() as i32, "elog_node_display"))
+        .finish(ErrorLocation::new("print.c", 88, "elog_node_display"))
 }
 
 /// Arena byte buffer for the printf-style printers: C prints raw bytes

@@ -938,16 +938,22 @@ fn xid_list_node_writes_the_x_list() {
 
 // A node tag without a ported writer must be a catchable, typed refusal
 // carrying C outNode's message ("could not dump unrecognized node type: %d",
-// outfuncs.c default arm), never a process panic. A_Star (tag 77) has no
-// writer on either side of this fix.
+// outfuncs.c default arm), never a process panic. CompositeTypeStmt has no
+// writer (its raw tree is not in the debug_print_* ported set yet).
 #[test]
 fn unported_node_tag_is_a_typed_refusal_not_a_panic() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
-    let star = Node::mk(mcx, types_nodes::rawnodes::A_Star).unwrap();
-    let err = nodeToString(mcx, star).unwrap_err();
+    let stmt = Node::mk(mcx, types_nodes::rawnodes::CompositeTypeStmt::default()).unwrap();
+    let err = nodeToString(mcx, stmt).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
-    assert_eq!(err.message(), "could not dump unrecognized node type: 77");
+    assert_eq!(
+        err.message(),
+        format!(
+            "could not dump unrecognized node type: {}",
+            types_nodes::NodeTag::T_CompositeTypeStmt as u16
+        )
+    );
 }
 
 fn byref_const(constlen: i32, value: Datum) -> Const {

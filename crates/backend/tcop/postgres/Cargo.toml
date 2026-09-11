@@ -16,6 +16,11 @@ types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_portal = { path = "../../../_support/types/portal" }
 nodes_params = { path = "../../nodes/params" }
+# debug_print_parse / debug_print_rewritten / debug_print_plan (postgres.c
+# pg_parse_query / pg_rewrite_query / pg_plan_query -> print.c
+# elog_node_display over outfuncs nodeToStringWithLocations).
+nodes_core = { path = "../../nodes/nodes_core" }
+outfuncs = { path = "../../nodes/outfuncs" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_dest = { path = "../../../_support/types/types_dest" }
 stringinfo = { path = "../../../_support/types/stringinfo" }

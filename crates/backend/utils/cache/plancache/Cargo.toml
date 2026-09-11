@@ -32,6 +32,10 @@ analyze_seams = { path = "../../../parser/analyze_seams" }
 copyfuncs = { path = "../../../nodes/copyfuncs" }
 rewrite_handler_seams = { path = "../../../rewrite/rewrite_handler_seams" }
 planner_seams = { path = "../../../optimizer/plan/planner_seams" }
+# pg_rewrite_query / pg_plan_query mirrors (log_*_stats usage brackets,
+# debug_print_rewritten / debug_print_plan dumps) at the plancache call sites.
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+outfuncs = { path = "../../../nodes/outfuncs" }
 pquery_seams = { path = "../../../tcop/pquery_seams" }
 snapmgr = { path = "../../time/snapmgr" }
 utility_seams = { path = "../../../tcop/utility_seams" }

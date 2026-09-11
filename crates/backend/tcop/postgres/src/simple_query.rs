@@ -28,6 +28,22 @@ fn log_statement_stats() -> bool {
     guc_tables::backing::log_statement_stats()
 }
 
+// postgres.c pg_rewrite_query (:803 parse, :870 rewritten) / pg_plan_query
+// (:954): `if (Debug_print_*) elog_node_display(LOG, title, tree,
+// Debug_pretty_print)`.
+fn debug_print_tree<'mcx>(
+    mcx: Mcx<'mcx>,
+    title: &str,
+    dump: PgResult<::mcx::PgString<'mcx>>,
+) -> PgResult<()> {
+    nodes_core::print::debug_print_tree(
+        mcx,
+        title,
+        dump,
+        guc_tables::backing::Debug_pretty_print(),
+    )
+}
+
 pub fn pg_parse_query<'mcx>(
     mcx: Mcx<'mcx>,
     query_string: &str,
@@ -73,6 +89,12 @@ pub fn pg_analyze_and_rewrite_fixedparams<'a, 'mcx>(
 }
 
 pub fn pg_rewrite_query<'mcx>(mcx: Mcx<'mcx>, query: Query<'mcx>) -> PgResult<PgVec<'mcx, Query<'mcx>>> {
+    // postgres.c:803: debug_print_parse dumps the analyzed Query here (the
+    // raw parse tree is never dumped in a stock build).
+    if guc_tables::backing::Debug_print_parse() {
+        debug_print_tree(mcx, "parse tree", outfuncs::queryToStringWithLocations(mcx, &query))?;
+    }
+
     if log_parser_stats() {
         ResetUsage();
     }
@@ -88,6 +110,14 @@ pub fn pg_rewrite_query<'mcx>(mcx: Mcx<'mcx>, query: Query<'mcx>) -> PgResult<Pg
 
     if log_parser_stats() {
         ShowUsage("REWRITER STATISTICS")?;
+    }
+
+    if guc_tables::backing::Debug_print_rewritten() {
+        debug_print_tree(
+            mcx,
+            "rewritten parse tree",
+            outfuncs::queryListToStringWithLocations(mcx, &querytree_list),
+        )?;
     }
 
     Ok(querytree_list)
@@ -115,6 +145,10 @@ pub fn pg_plan_query<'mcx>(
 
     if log_planner_stats() {
         ShowUsage("PLANNER STATISTICS")?;
+    }
+
+    if guc_tables::backing::Debug_print_plan() {
+        debug_print_tree(mcx, "plan", outfuncs::plannedStmtToStringWithLocations(mcx, &plan))?;
     }
 
     Ok(Some(plan))

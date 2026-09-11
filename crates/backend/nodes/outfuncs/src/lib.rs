@@ -22,6 +22,7 @@ use types_nodes::parsenodes::{
     CommonTableExpr, FunctionParameter, ObjectWithArgs, Query, RTEKind, RTEPermissionInfo,
     RangeTblEntry, SortGroupClause, TableSampleClause,
 };
+use types_nodes::plannodes::PlannedStmt;
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue,
     CoerceViaIO, Const, ConvertRowtypeExpr, FromExpr, FuncExpr, JoinExpr, NamedArgExpr, NullTest,
@@ -44,6 +45,8 @@ macro_rules! w {
         write!($out, $($arg)*).expect("outfuncs append")
     };
 }
+
+mod stmt_plan;
 
 thread_local! {
     // outfuncs.c:29 `static bool write_location_fields = false;` — set only
@@ -95,6 +98,53 @@ pub fn nodeToStringWithLocations<'mcx>(
     node: Node<'mcx>,
 ) -> PgResult<PgString<'mcx>> {
     node_to_string_internal(mcx, node, true)
+}
+
+// The debug_print_* dumps (tcop/postgres.c via print.c elog_node_display):
+// C hands elog_node_display the analyzed Query, the rewritten querytree_list
+// List and the PlannedStmt. Those live here as a by-value struct / arena
+// slice with no node handle, so the List/node framing is written directly,
+// with the real locations (nodeToStringWithLocations).
+pub fn queryToStringWithLocations<'mcx>(
+    mcx: Mcx<'mcx>,
+    q: &Query<'_>,
+) -> PgResult<PgString<'mcx>> {
+    to_string_internal(mcx, true, |out| out_query(out, q))
+}
+
+pub fn queryListToStringWithLocations<'mcx>(
+    mcx: Mcx<'mcx>,
+    queries: &[Query<'_>],
+) -> PgResult<PgString<'mcx>> {
+    to_string_internal(mcx, true, |out| out_ref_list(out, queries, out_query))
+}
+
+pub fn plannedStmtToStringWithLocations<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &PlannedStmt<'_>,
+) -> PgResult<PgString<'mcx>> {
+    to_string_internal(mcx, true, |out| stmt_plan::out_planned_stmt(out, stmt))
+}
+
+// _outList over items held by reference rather than as node handles.
+fn out_ref_list<T>(
+    out: &mut PgString<'_>,
+    items: &[T],
+    f: fn(&mut PgString<'_>, &T) -> PgResult<()>,
+) -> PgResult<()> {
+    if items.is_empty() {
+        w!(out, "<>");
+        return Ok(());
+    }
+    w!(out, "(");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            w!(out, " ");
+        }
+        f(out, item)?;
+    }
+    w!(out, ")");
+    Ok(())
 }
 
 // bmsToString (outfuncs.c:822-830): "(b 1 2 ...)" as a plain string — C
@@ -1173,6 +1223,9 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         // node. A tag without a ported writer here is an unported feature: a
         // typed refusal, never a panic and never a silently truncated tree.
         other => {
+            if let Some(r) = stmt_plan::try_out_node(out, node) {
+                return r;
+            }
             return Err(Box::new(
                 PgError::error(format!(
                     "could not dump unrecognized node type: {}",

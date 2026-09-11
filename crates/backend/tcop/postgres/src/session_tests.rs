@@ -1072,6 +1072,100 @@ fn simple_query_prepare_execute_deallocate_round_trip() {
     );
 }
 
+// debug_print_parse / debug_print_rewritten / debug_print_plan are consulted
+// at C's sites (pg_rewrite_query: the analyzed Query, then the rewritten
+// list; pg_plan_query: the PlannedStmt) and emit print.c elog_node_display's
+// LOG "<title>:" + DETAIL <dump> pair, pretty-printed under
+// debug_pretty_print (the default) and 78-column wrapped without it. The
+// switches are flipped in-band by SET/RESET inside one simple-query message
+// (the harness's per-thread setup re-initializes every GUC inside the first
+// run_session, and a terminated session is not reusable), so the expected
+// sequence follows C statement by statement: a SET takes effect at its own
+// execution, after its own parse/rewrite dumps; utility statements are never
+// planned.
+#[test]
+fn simple_query_debug_print_gucs_emit_log_detail_pairs() {
+    use std::sync::Mutex;
+    install_generate_series_fixture();
+
+    static SEEN: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+    fn capture(e: &types_error::PgError, _output_to_server: &mut bool) {
+        if e.level == types_error::LOG {
+            SEEN.lock().unwrap().push((e.message.clone(), e.detail.clone()));
+        }
+    }
+    SEEN.lock().unwrap().clear();
+    let prev_hook = elog::sink::set_emit_log_hook(Some(capture));
+    let sql = "SET debug_print_parse = on; \
+               SET debug_print_rewritten = on; \
+               SET debug_print_plan = on; \
+               SELECT count(*) FROM generate_series(1, 1000); \
+               SET debug_pretty_print = off; \
+               SELECT 1; \
+               RESET debug_pretty_print; \
+               RESET debug_print_plan; \
+               RESET debug_print_rewritten; \
+               RESET debug_print_parse; \
+               SELECT 2";
+    let wire = run_session([simple_query_msg(sql), msg(b'X', &[])].concat());
+    elog::sink::set_emit_log_hook(prev_hook);
+    let seen = std::mem::take(&mut *SEEN.lock().unwrap());
+    let all = frames(&wire);
+
+    // Every statement still completes with the dumps on.
+    let tags: Vec<&[u8]> =
+        all.iter().filter(|(t, _)| *t == b'C').map(|(_, b)| b.as_slice()).collect();
+    assert_eq!(tags.len(), 11, "tags: {tags:?}");
+    assert_eq!(tags[3], b"SELECT 1\0");
+    let datarows: Vec<String> = all
+        .iter()
+        .filter(|(t, _)| *t == b'D')
+        .map(|(_, b)| core::str::from_utf8(&b[6..]).unwrap().to_owned())
+        .collect();
+    assert_eq!(datarows, ["1000", "1", "2"]);
+
+    const P: &str = "parse tree:";
+    const R: &str = "rewritten parse tree:";
+    const L: &str = "plan:";
+    let titles: Vec<&str> = seen.iter().map(|(m, _)| m.as_str()).collect();
+    assert_eq!(
+        titles,
+        [
+            P, //          SET debug_print_rewritten
+            P, R, //       SET debug_print_plan
+            P, R, L, //    SELECT count(*)
+            P, R, //       SET debug_pretty_print = off
+            P, R, L, //    SELECT 1 (flat)
+            P, R, //       RESET debug_pretty_print (flat)
+            P, R, //       RESET debug_print_plan
+            P, R, //       RESET debug_print_rewritten
+            P, //          RESET debug_print_parse
+                   //      SELECT 2: silence
+        ]
+    );
+    for (i, (title, detail)) in seen.iter().enumerate() {
+        let d = detail.as_deref().unwrap_or_else(|| panic!("{i} {title} carries a DETAIL"));
+        assert!(!d.contains("not yet ported"), "{i} {title}: {d}");
+        let head = match title.as_str() {
+            "parse tree:" => "{QUERY",
+            "rewritten parse tree:" => "(",
+            _ => "{PLANNEDSTMT",
+        };
+        assert!(d.trim_start().starts_with(head), "{i} {title} first line: {d:?}");
+        if (8..=12).contains(&i) {
+            // debug_pretty_print off: format_node_dump's 78-column wrap, no indent.
+            assert!(d.starts_with(head), "{i} {title} flat first char: {d:?}");
+            assert!(d.lines().all(|l| l.len() <= 78), "{i} {title} flat wrap: {d:?}");
+        } else {
+            assert!(d.lines().count() > 1, "{i} {title}: pretty dump spans lines: {d:?}");
+        }
+    }
+    // The SELECT count(*) trees carry the statement's operators.
+    assert!(seen[4].1.as_deref().unwrap().contains(":hasAggs true"));
+    let plan = seen[5].1.as_deref().unwrap();
+    assert!(plan.contains("{AGG") && plan.contains("{FUNCTIONSCAN"), "{plan}");
+}
+
 // Rows + completion tags pinned against live PG 18.3 (Homebrew) running the
 // identical script in one transaction. The FunctionScan cursor takes the
 // auto-SCROLL heuristic leg (ExecSupportsBackwardScan(FunctionScan) is true),
