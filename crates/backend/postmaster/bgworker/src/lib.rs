@@ -679,6 +679,13 @@ pub fn RegisterDynamicBackgroundWorker(
                         );
                     }
                     if pid != 0 {
+                        // Both are postmaster-side elogs in C (bgworker.c
+                        // BackgroundWorkerStateChange, postmaster.c
+                        // do_start_bgworker) and never reach a client; the
+                        // pool fast path raises them on the registering
+                        // backend's thread, so raise them as the postmaster
+                        // (DestNone, %b = postmaster).
+                        let server_only = elog::postmaster_context();
                         let _ = report(
                             DEBUG1,
                             format!("registering background worker \"{}\"", worker.bgw_name),
@@ -687,6 +694,7 @@ pub fn RegisterDynamicBackgroundWorker(
                             DEBUG1,
                             format!("starting background worker process \"{}\"", worker.bgw_name),
                         );
+                        drop(server_only);
                         let rw = RegisteredBgWorker {
                             worker: worker.clone(),
                             pid,

@@ -265,6 +265,20 @@ pub fn setup_parser_errposition_callback(_pstate: &ParseState<'_, '_>, _location
 
 pub fn cancel_parser_errposition_callback() {}
 
+// The emit-time half of setup_parser_errposition_callback: while the guard
+// lives, every non-ERROR report (a DEBUG1 under RVR_MISSING_OK, a WARNING
+// from a typinput) carries the location's cursor, as C's pcb_error_callback
+// gives it. Pair with `attach_parser_errposition` on the Err path.
+pub fn arm_parser_errposition<'p>(
+    pstate: &ParseState<'p, '_>,
+    location: i32,
+) -> Option<elog::ParserErrpositionScope<'p>> {
+    let source = pstate.p_sourcetext?;
+    Some(elog::arm_parser_errposition(source, location, |src, loc| {
+        parser_errposition_source(Some(src), loc, mbutils::GetDatabaseEncoding())
+    }))
+}
+
 // pcb_error_callback (parse_node.c:170-180): every error raised while the
 // callback is armed gets parser_errposition(pstate, location), except
 // ERRCODE_QUERY_CANCELED. Applied on the Err path of the guarded call.

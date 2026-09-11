@@ -10,7 +10,8 @@ use fmgr::FmgrInfo;
 use mcx::Mcx;
 use nodes_core::node_funcs::{expr_location, expr_type, expr_typmod};
 use parser_small1::{
-    parser_errposition, variable_coerce_param_hook, ParseRefHookState, ParseState,
+    arm_parser_errposition, parser_errposition, variable_coerce_param_hook, ParseRefHookState,
+    ParseState,
 };
 use types_core::primitive::FUNC_MAX_ARGS;
 use types_core::catalog::{
@@ -467,8 +468,13 @@ fn coerce_unknown_const<'mcx>(
     let constcollid = lsyscache::get_typcollation(baseTypeId)?;
 
     // C: setup_parser_errposition_callback(pcbstate, pstate, con->location)
-    // around stringTypeDatum; retired-callback pattern attaches on Err.
-    let constvalue = string_type_datum(mcx, &io, con.constvalue, inputTypeMod, con.constisnull)
+    // around stringTypeDatum: the Err path attaches on return, the armed
+    // scope decorates the non-ERROR reports typinput emits meanwhile (the
+    // DEBUG1 "relation ... does not exist" of a regclass literal).
+    let armed = arm_parser_errposition(pstate, con.location);
+    let constvalue = string_type_datum(mcx, &io, con.constvalue, inputTypeMod, con.constisnull);
+    drop(armed);
+    let constvalue = constvalue
         .map_err(|e| {
             if e.sqlstate() == ERRCODE_QUERY_CANCELED {
                 return e;

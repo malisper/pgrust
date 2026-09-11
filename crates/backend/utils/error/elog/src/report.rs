@@ -172,6 +172,9 @@ pub fn current_query_string() -> Option<String> {
 }
 
 pub fn get_backend_type_for_log() -> String {
+    if config::in_postmaster_context() {
+        return "postmaster".to_owned();
+    }
     sink::backend_log_context()
         .and_then(|c| c.backend_type())
         .unwrap_or_else(|| "not initialized".to_owned())

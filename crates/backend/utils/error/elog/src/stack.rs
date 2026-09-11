@@ -10,7 +10,8 @@ use std::io::Write;
 
 use ::types_dest::CommandDest;
 use ::types_error::{
-    ErrorField, ErrorLevel, ErrorLocation, PgError, PgResult, SqlState, ERROR, FATAL, PANIC,
+    ErrorField, ErrorLevel, ErrorLocation, PgError, PgResult, SqlState, ERRCODE_QUERY_CANCELED,
+    ERROR, FATAL, PANIC,
 };
 
 use crate::{config, errno, policy, report, sink};
@@ -93,6 +94,29 @@ fn run_emit_context_callbacks() {
     STACK.with(|s| {
         if let Some(f) = s.borrow_mut().frames.last_mut() {
             f.error = error;
+        }
+    });
+}
+
+/// pcb_error_callback over the in-flight (non-ERROR) report.
+fn apply_armed_parser_errposition() {
+    let Some(armed) = crate::errposition::armed() else {
+        return;
+    };
+    STACK.with(|s| {
+        let mut st = s.borrow_mut();
+        let Some(frame) = st.frames.last_mut() else {
+            return;
+        };
+        let error = &mut frame.error;
+        if error.cursor_position.is_some() || error.sqlstate() == ERRCODE_QUERY_CANCELED {
+            return;
+        }
+        // SAFETY: the guard borrows `source` for its whole life and restores
+        // the previous arming on drop, so an armed pointer is live.
+        let pos = armed.resolve();
+        if pos > 0 {
+            error.cursor_position = Some(pos);
         }
     });
 }
@@ -290,6 +314,7 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
         return Err(Box::new(error));
     }
 
+    apply_armed_parser_errposition();
     run_emit_context_callbacks();
 
     emit_top_frame();

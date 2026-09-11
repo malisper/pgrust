@@ -1258,7 +1258,21 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // callbacks under cfg(test) only; no production session state.
     // 603: catalog_namespace/tests.rs registered-cleanup CLEANUPS is a
     // cfg(test) callback recorder; no production session state.
-    assert_eq!(count_tree(crates), 604, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 604, 605: sitediff N-5 cosmetics (2026-09-10), two RAII-scoped elog
+    //   cells that are None/false outside the guarded call and restored by
+    //   the guard's Drop, so never live at a statement boundary — non-session
+    //   TLS, no SESSION_ENVELOPE_MANIFEST rows (same class as 61/90):
+    //   92. utils/error/elog/src/errposition.rs PARSER_ERRPOSITION —
+    //      Cell<Option<..>>, the port of parse_node.c
+    //      setup_parser_errposition_callback's armed location for the
+    //      non-ERROR reports errfinish emits inline (pcb_error_callback);
+    //      armed by coerce_unknown_const / parserOpenTable around one
+    //      callee, restored on drop.
+    //   93. utils/error/elog/src/config.rs POSTMASTER_CONTEXT — Cell<bool>,
+    //      "this thread is doing postmaster work" for the bgworker pool fast
+    //      path (whereToSendOutput = DestNone, %b = postmaster while the
+    //      guard lives); restored on drop.
+    assert_eq!(count_tree(crates), 606, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

@@ -7,6 +7,7 @@
 mod builder;
 pub mod config;
 pub mod errno;
+mod errposition;
 mod policy;
 mod report;
 pub mod sink;
@@ -31,12 +32,14 @@ pub use report::{
     send_message_to_frontend, send_message_to_server_log, set_backtrace, unpack_sql_state,
     vwrite_stderr, write_console, write_pipe_chunks, write_stderr, DebugFileOpen,
 };
+pub use config::{in_postmaster_context, postmaster_context, PostmasterContext};
 pub use sink::{
     backend_log_context, clear_retired_debug_query_string, debug_query_string_scope,
     set_backend_log_context, set_emit_log_hook,
     set_frontend_redirect, with_debug_query_string, BackendLogContext, DebugQueryStringScope,
     EmitLogHook, FrontendRedirect,
 };
+pub use errposition::{arm_parser_errposition, ParserErrpositionScope};
 pub use stack::{
     clear_emit_context_callbacks, emit_error_report_for, emit_unhandled_error_report, ereport_msg,
     err_generic_string, errbacktrace, errcode, errcode_for_file_access, errcode_for_socket_access,

@@ -622,6 +622,10 @@ fn write_opaque(page: &mut PageMut<'_>, opaque: &BTPageOpaqueData) {
 // _bt_allequalimage (nbtutils.c). `debugmessage` as in C: only the CREATE
 // INDEX build path (leafbuild, C _bt_leafbuild) reports the verdict.
 fn bt_allequalimage(rel: &Relation<'_>, debugmessage: bool) -> PgResult<bool> {
+    // INCLUDE indexes return before the debug message (nbtutils.c:4264).
+    if rel.indnatts() != rel.indnkeyatts() {
+        return Ok(false);
+    }
     let allequalimage = bt_allequalimage_check(rel)?;
     if debugmessage {
         // C nbtutils.c:4291-4299 (elog(DEBUG1, ...): not translated).

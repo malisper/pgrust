@@ -6,7 +6,8 @@ mod tests;
 use mcx::{Mcx, PgString, PgVec};
 use nodes_core::node_funcs;
 use parser_small1::{
-    parser_errposition, ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
+    arm_parser_errposition, parser_errposition, ParseExprKind, ParseNamespaceColumn,
+    ParseNamespaceItem, ParseState,
 };
 use types_core::catalog::{RECORDARRAYOID, RECORDOID};
 use types_core::{AttrNumber, Index, InvalidOid, Oid, OidIsValid, ParseLoc};
@@ -755,8 +756,10 @@ pub fn parserOpenTable<'mcx>(
     // parse_relation.c:1472 setup_parser_errposition_callback(relation->location)
     // around table_openrv_extended: "cannot open relation" (index, composite
     // type, ...) and schema lookup errors carry the RangeVar's cursor.
-    let opened = table::table_openrv_extended(mcx, &rv, lockmode, true)
-        .map_err(|e| attach_parser_errposition(pstate, relation.location, e))?;
+    let armed = arm_parser_errposition(pstate, relation.location);
+    let opened = table::table_openrv_extended(mcx, &rv, lockmode, true);
+    drop(armed);
+    let opened = opened.map_err(|e| attach_parser_errposition(pstate, relation.location, e))?;
     match opened {
         Some(rel) => Ok(rel),
         None => {

@@ -46,6 +46,38 @@ pub fn set_where_to_send_output(dest: CommandDest) {
     WHERE_TO_SEND_OUTPUT.with(|c| c.set(dest));
 }
 
+/// Run postmaster-side work on a session thread as the postmaster: reports
+/// raised while the guard lives go to the server log only, never to this
+/// backend's client (`whereToSendOutput = DestNone`; C's postmaster has no
+/// client), and the log line names backend type `postmaster` (sitediff
+/// N-5a). Restores the previous destination on drop.
+pub struct PostmasterContext {
+    prev_dest: CommandDest,
+    prev_flag: bool,
+}
+
+thread_local! { static POSTMASTER_CONTEXT: Cell<bool> = const { Cell::new(false) }; }
+
+/// True while a [`PostmasterContext`] guard lives on this thread.
+#[inline]
+pub fn in_postmaster_context() -> bool {
+    POSTMASTER_CONTEXT.with(Cell::get)
+}
+
+pub fn postmaster_context() -> PostmasterContext {
+    PostmasterContext {
+        prev_dest: WHERE_TO_SEND_OUTPUT.with(|c| c.replace(CommandDest::None)),
+        prev_flag: POSTMASTER_CONTEXT.with(|c| c.replace(true)),
+    }
+}
+
+impl Drop for PostmasterContext {
+    fn drop(&mut self) {
+        WHERE_TO_SEND_OUTPUT.with(|c| c.set(self.prev_dest));
+        POSTMASTER_CONTEXT.with(|c| c.set(self.prev_flag));
+    }
+}
+
 #[inline]
 pub fn client_auth_in_progress() -> bool {
     CLIENT_AUTH_IN_PROGRESS.with(Cell::get)

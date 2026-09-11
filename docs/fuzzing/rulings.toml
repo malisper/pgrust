@@ -343,3 +343,14 @@ owner = "L0.2 diff/canon lane"
 created = "2026-09-02"
 expires = "2026-10-17"
 hits = 0
+
+[[ruling]]
+id = "catcache-rehash-debug1"
+plane = "wire:N"
+field = "M"
+a = "^rehashing catalog cache id [0-9]+ for [a-z_]+; [0-9]+ tups, [0-9]+ buckets$"
+b = ".*"
+ref = "sitediff run 2 N-5b: catcache.c RehashCatCache's DEBUG1 fires on the C side only under client_min_messages = debug1; pgrust's catcache does not rehash (different implementation) and emits nothing in that slot, so the A-only notice (and the follow-up notice B shows in the same slot) is deliberate"
+owner = "sitediff N-5 cosmetics lane (2026-09-10)"
+created = "2026-09-10"
+hits = 0
