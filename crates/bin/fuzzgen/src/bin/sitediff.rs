@@ -26,11 +26,13 @@ use std::time::Duration;
 
 use fuzzgen::catalog::{fixture_ddl, fixture_seed_sql, CatalogSource, FixtureCatalog};
 use fuzzgen::client::ConnectOpts;
+use fuzzgen::compose::{self, Template};
+use fuzzgen::recipes::Bank;
 use fuzzgen::contracts::{self, Cell, ObservationRecord, Ordered, Side, StepKind, StepRecord, WireMsg};
 use fuzzgen::rng::Rng;
 use fuzzgen::rulings::{self, Ledger};
 use fuzzgen::runner::{
-    load_ledger, ClientObserver, Connector, Exchange, Fault, FileSink, Observer, SideRig, SiteConfig, SiteRunner,
+    load_ledger, ClientObserver, Connector, Exchange, Fault, FileSink, Observer, SideRig, Sink, SiteConfig, SiteRunner,
     SiteSummary,
 };
 use fuzzgen::session::{run_session, SessionConfig, Statement};
@@ -65,6 +67,31 @@ usage: sitediff <command> [options]
     --out <dir>          JSONL output dir (default: out/sitediff-<seed>)
     --dry-run            no servers: replay the contracts fixtures' wire
                          through a fixture Observer
+    --compose <p>        wrap each SELECT-shaped generated statement with
+                         probability p (0..1) in a composition shell
+                         (fuzzgen::compose: secdef-srf, plpgsql-record,
+                         cte, prepared, hold-cursor, agg-sublink,
+                         multi-statement); the step keeps its production
+                         tags and gains compose:<template>
+    --compose-templates <a,b,..>  restrict the shells (default: all)
+
+  recipes      run a recipe bank through the cell (same observer,
+               comparator, ledger and findings.jsonl as smoke)
+    --cell-env/--cell-json/--a/--b/--db/--user/--password/--rulings/--out
+                         as for smoke (default --out out/sitediff-recipes)
+    --bank <dir>         bank root (default: recipes/; RECIPES.md layout
+                         recipes/<subsystem>/<cfile-stem>/<id>.sql)
+    --filter <substr>    only recipes whose id contains <substr>
+                         (repeatable: any match)
+    --env <cell|all>     only recipes whose header env is <cell>
+                         (default: CELL_NAME from cell.env, else base)
+    --no-reset           keep objects between recipes (default: every
+                         recipe's sessions are dropped and every user
+                         schema / role / publication / event trigger is
+                         removed on both sides before the next recipe)
+    --dry-run            list the selected recipes and their steps only
+    --canonicalize       rewrite the selected files in canonical form
+                         (Recipe::render + recomputed ordered:), no run
 
   rulings audit  stale / expired verdict over the ledger
     --rulings <path>     ledger (default as above)
@@ -79,6 +106,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let r = match args.first().map(String::as_str) {
         Some("smoke") => smoke(&args[1..]),
+        Some("recipes") => recipes(&args[1..]),
         Some("rulings") if args.get(1).map(String::as_str) == Some("audit") => rulings_audit(&args[2..]),
         Some("version") => {
             println!("{}", version_banner());
@@ -132,6 +160,9 @@ struct SmokeArgs {
     rulings: Option<PathBuf>,
     out: Option<PathBuf>,
     dry_run: bool,
+    /// Composition probability per mille (0 = off).
+    compose: u64,
+    compose_templates: Vec<Template>,
 }
 
 fn parse_smoke(args: &[String]) -> Result<SmokeArgs, String> {
@@ -154,6 +185,8 @@ fn parse_smoke(args: &[String]) -> Result<SmokeArgs, String> {
         rulings: None,
         out: None,
         dry_run: false,
+        compose: 0,
+        compose_templates: Template::ALL.to_vec(),
     };
     let mut it = args.iter();
     while let Some(k) = it.next() {
@@ -177,6 +210,20 @@ fn parse_smoke(args: &[String]) -> Result<SmokeArgs, String> {
             "--rulings" => a.rulings = Some(PathBuf::from(value("--rulings")?)),
             "--out" => a.out = Some(PathBuf::from(value("--out")?)),
             "--dry-run" => a.dry_run = true,
+            "--compose" => {
+                let p: f64 = value("--compose")?.parse().map_err(|e| format!("bad --compose: {e}"))?;
+                if !(0.0..=1.0).contains(&p) {
+                    return Err("--compose expects a probability in 0..1".into());
+                }
+                a.compose = (p * 1000.0).round() as u64;
+            }
+            "--compose-templates" => {
+                a.compose_templates = value("--compose-templates")?
+                    .split(',')
+                    .filter(|t| !t.trim().is_empty())
+                    .map(|t| Template::parse(t.trim()).ok_or_else(|| format!("unknown compose template {t:?}")))
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
             other => return Err(format!("unknown smoke argument {other:?}\n{USAGE}")),
         }
     }
@@ -294,7 +341,7 @@ fn write_summary(out: &Path, summary: &SiteSummary, hits: &BTreeMap<String, u64>
 
 fn print_summary(out: &Path, s: &SiteSummary) {
     println!(
-        "sitediff smoke: {} steps, {} findings ({} divergences, {} ruled), crashes a={} b={}, hangs {}, panics {}, probe rounds {}, prefix violations {}, invariant rows {}, invariant rig errors {}, steps {} ms, probes {} ms ({})",
+        "sitediff: {} steps, {} findings ({} divergences, {} ruled), crashes a={} b={}, hangs {}, panics {}, probe rounds {}, prefix violations {}, invariant rows {}, invariant rig errors {}, steps {} ms, probes {} ms ({})",
         s.steps,
         s.findings,
         s.divergences,
@@ -311,7 +358,7 @@ fn print_summary(out: &Path, s: &SiteSummary) {
         s.probes_ms,
         s.deck_ms.iter().map(|(k, (ms, n))| format!("{k} {ms} ms/{n}")).collect::<Vec<_>>().join(", ")
     );
-    println!("sitediff smoke: wrote {}/{{steps,obs-a,obs-b,findings}}.jsonl + summary.json + rulings-hits.json", out.display());
+    println!("sitediff: wrote {}/{{steps,obs-a,obs-b,findings}}.jsonl + summary.json + rulings-hits.json", out.display());
 }
 
 fn smoke(args: &[String]) -> Result<(), String> {
@@ -327,7 +374,46 @@ fn smoke(args: &[String]) -> Result<(), String> {
 
 // ---- live ------------------------------------------------------------
 
-fn live(a: &SmokeArgs, out: &Path, ledger: Ledger) -> Result<(), String> {
+/// The cell half of a live command: cell.env / cell.json / --a / --b /
+/// --db / --user / --password, shared by `smoke` and `recipes`.
+struct CellArgs {
+    cell_env: Option<PathBuf>,
+    cell_json: Option<PathBuf>,
+    a: Option<String>,
+    b: Option<String>,
+    db: Option<String>,
+    user: Option<String>,
+    password: Option<String>,
+}
+
+impl CellArgs {
+    /// `true` when `k` (with its value, if any) was consumed.
+    fn parse_flag(&mut self, k: &str, it: &mut std::slice::Iter<'_, String>) -> Result<bool, String> {
+        let mut value = |name: &str| it.next().cloned().ok_or_else(|| format!("{name} requires a value"));
+        match k {
+            "--cell-env" => self.cell_env = Some(PathBuf::from(value("--cell-env")?)),
+            "--cell-json" => self.cell_json = Some(PathBuf::from(value("--cell-json")?)),
+            "--a" => self.a = Some(value("--a")?),
+            "--b" => self.b = Some(value("--b")?),
+            "--db" => self.db = Some(value("--db")?),
+            "--user" => self.user = Some(value("--user")?),
+            "--password" => self.password = Some(value("--password")?),
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+}
+
+/// A resolved cell: config, the two sides' connect options, B's server
+/// pid, and the factory's cell.env map.
+struct OpenCell {
+    cfg: SiteConfig,
+    opts_a: ConnectOpts,
+    opts_b: ConnectOpts,
+    srv_b: Option<i32>,
+}
+
+fn open_cell(a: &CellArgs, out: &Path) -> Result<OpenCell, String> {
     let env = match &a.cell_env {
         Some(p) => parse_env_file(p)?,
         None => BTreeMap::new(),
@@ -384,6 +470,20 @@ fn live(a: &SmokeArgs, out: &Path, ledger: Ledger) -> Result<(), String> {
     let opts_a = mk_opts(&ha, pa);
     let opts_b = mk_opts(&hb, pb);
     let srv_b: Option<i32> = env.get("SRV_B").and_then(|s| s.parse().ok());
+    Ok(OpenCell { cfg, opts_a, opts_b, srv_b })
+}
+
+fn live(a: &SmokeArgs, out: &Path, ledger: Ledger) -> Result<(), String> {
+    let cell_args = CellArgs {
+        cell_env: a.cell_env.clone(),
+        cell_json: a.cell_json.clone(),
+        a: a.a.clone(),
+        b: a.b.clone(),
+        db: a.db.clone(),
+        user: a.user.clone(),
+        password: a.password.clone(),
+    };
+    let OpenCell { cfg, opts_a, opts_b, srv_b } = open_cell(&cell_args, out)?;
 
     if a.setup {
         let catalog = FixtureCatalog.load_catalog()?;
@@ -399,10 +499,24 @@ fn live(a: &SmokeArgs, out: &Path, ledger: Ledger) -> Result<(), String> {
 
     let scenario = format!("seed-{}/cell-{}", a.seed, cfg.cell.conf_profile.clone().unwrap_or_else(|| "base".into()));
     let stmts = generate(a)?;
-    let steps: Vec<StepRecord> = stmts
+    let stream: Vec<(String, Vec<String>, Ordered)> =
+        stmts.iter().map(|s| (s.sql.clone(), s.productions.clone(), ordered_of(&s.productions))).collect();
+    let composed = if a.compose > 0 {
+        // A seed-derived stream distinct from the generator's so the
+        // wrap decisions never perturb the generated statements.
+        let mut rng = Rng::new(a.seed ^ 0x636f_6d70_6f73_6521);
+        compose::compose(&stream, a.compose, &a.compose_templates, &mut rng)
+    } else {
+        compose::compose(&stream, 0, &[], &mut Rng::new(0))
+    };
+    let wrapped = composed.iter().filter(|c| c.productions.iter().any(|p| p.starts_with("compose:"))).count();
+    if a.compose > 0 {
+        println!("sitediff smoke: --compose {}/1000: {} generated statements -> {} steps ({} composed)", a.compose, stmts.len(), composed.len(), wrapped);
+    }
+    let steps: Vec<StepRecord> = composed
         .iter()
         .enumerate()
-        .map(|(i, s)| step_of(&scenario, i as u64 + 1, &s.sql, s.productions.clone(), ordered_of(&s.productions)))
+        .map(|(i, c)| step_of(&scenario, i as u64 + 1, &c.sql, c.productions.clone(), c.ordered))
         .collect();
 
     let rig_a = SideRig::new(Side::A, &cfg, ClientObserver::connector(opts_a, None), None);
@@ -416,6 +530,325 @@ fn live(a: &SmokeArgs, out: &Path, ledger: Ledger) -> Result<(), String> {
     let summary = runner.run_stream(&steps, &mut sink);
     write_summary(out, &summary, &runner.ledger.hits())?;
     print_summary(out, &summary);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// recipes
+// ---------------------------------------------------------------------
+
+struct RecipesArgs {
+    cell: CellArgs,
+    bank: PathBuf,
+    filters: Vec<String>,
+    env: Option<String>,
+    reset: bool,
+    rulings: Option<PathBuf>,
+    out: Option<PathBuf>,
+    dry_run: bool,
+    canonicalize: bool,
+}
+
+fn parse_recipes(args: &[String]) -> Result<RecipesArgs, String> {
+    let mut a = RecipesArgs {
+        cell: CellArgs { cell_env: None, cell_json: None, a: None, b: None, db: None, user: None, password: std::env::var("PGPASSWORD").ok() },
+        bank: PathBuf::from("recipes"),
+        filters: Vec::new(),
+        env: None,
+        reset: true,
+        rulings: None,
+        out: None,
+        dry_run: false,
+        canonicalize: false,
+    };
+    let mut it = args.iter();
+    while let Some(k) = it.next() {
+        if a.cell.parse_flag(k, &mut it)? {
+            continue;
+        }
+        let mut value = |name: &str| it.next().cloned().ok_or_else(|| format!("{name} requires a value"));
+        match k.as_str() {
+            "--bank" => a.bank = PathBuf::from(value("--bank")?),
+            "--filter" => a.filters.push(value("--filter")?),
+            "--env" => a.env = Some(value("--env")?),
+            "--no-reset" => a.reset = false,
+            "--rulings" => a.rulings = Some(PathBuf::from(value("--rulings")?)),
+            "--out" => a.out = Some(PathBuf::from(value("--out")?)),
+            "--dry-run" => a.dry_run = true,
+            "--canonicalize" => a.canonicalize = true,
+            other => return Err(format!("unknown recipes argument {other:?}\n{USAGE}")),
+        }
+    }
+    Ok(a)
+}
+
+/// The between-recipes reset, one simple-query message on `s1` of both
+/// sides: drop every user schema (public is recreated with initdb's
+/// ownership and grants), event trigger, publication and role other
+/// than the connecting one, with notices muted so the reset itself
+/// carries no wire to compare beyond the tags.
+const RESET_SQL: &str = "SET client_min_messages = warning; \
+DO $fzr$ DECLARE r record; BEGIN \
+FOR r IN SELECT evtname FROM pg_event_trigger LOOP EXECUTE format('DROP EVENT TRIGGER %I', r.evtname); END LOOP; \
+FOR r IN SELECT pubname FROM pg_publication LOOP EXECUTE format('DROP PUBLICATION %I', r.pubname); END LOOP; \
+FOR r IN SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' LOOP EXECUTE format('DROP SCHEMA %I CASCADE', r.nspname); END LOOP; \
+FOR r IN SELECT rolname FROM pg_roles WHERE rolname NOT LIKE 'pg\\_%' AND rolname <> current_user LOOP EXECUTE format('DROP OWNED BY %I', r.rolname); EXECUTE format('DROP ROLE %I', r.rolname); END LOOP; \
+CREATE SCHEMA public AUTHORIZATION pg_database_owner; GRANT USAGE ON SCHEMA public TO PUBLIC; \
+END $fzr$; \
+RESET client_min_messages;";
+
+/// A `Sink` wrapper that checks each step's `expect_c` against A's wire
+/// (`E:<sqlstate>:<message>` / `N:<severity>:<message>` per RECIPES.md;
+/// the message part is a prefix match after `%s`-style placeholders are
+/// cut) and tallies findings per recipe.
+struct RecipeSink<S: Sink> {
+    inner: S,
+    expects: BTreeMap<u64, (String, String)>,
+    /// recipe id → (steps, findings)
+    per_recipe: BTreeMap<String, (u64, u64)>,
+    current_recipe: Option<String>,
+    misses: Vec<(String, u64, String, String)>,
+    hits: u64,
+}
+
+impl<S: Sink> RecipeSink<S> {
+    fn new(inner: S) -> RecipeSink<S> {
+        RecipeSink { inner, expects: BTreeMap::new(), per_recipe: BTreeMap::new(), current_recipe: None, misses: Vec::new(), hits: 0 }
+    }
+}
+
+/// `true` when A's wire carries the expectation.
+fn expect_matches(expect: &str, wire: &[WireMsg]) -> bool {
+    let mut parts = expect.splitn(3, ':');
+    let kind = parts.next().unwrap_or("");
+    let code = parts.next().unwrap_or("");
+    let msg = parts.next().unwrap_or("");
+    // Cut the template at the first placeholder.
+    let prefix = msg.split("%s").next().unwrap_or("").split("%d").next().unwrap_or("").trim_end();
+    let field = |f: &contracts::ErrFields, k: char| f.get(&k).and_then(|b| std::str::from_utf8(&b.0).ok()).unwrap_or("").to_string();
+    wire.iter().any(|m| match (kind, m) {
+        ("E", WireMsg::ErrorResponse(f)) => (code == "-" || field(f, 'C') == code) && field(f, 'M').starts_with(prefix),
+        ("N", WireMsg::NoticeResponse(f)) => (code.is_empty() || field(f, 'S') == code) && field(f, 'M').starts_with(prefix),
+        _ => false,
+    })
+}
+
+impl<S: Sink> Sink for RecipeSink<S> {
+    fn step(&mut self, rec: &StepRecord) {
+        self.current_recipe = rec.recipe.clone();
+        if let Some(r) = &rec.recipe {
+            self.per_recipe.entry(r.clone()).or_default().0 += 1;
+        }
+        if let (Some(e), Some(r)) = (&rec.expect_c, &rec.recipe) {
+            self.expects.insert(rec.seq, (r.clone(), e.clone()));
+        }
+        self.inner.step(rec);
+    }
+    fn observation(&mut self, rec: &ObservationRecord) {
+        if rec.side == Side::A {
+            if let Some((r, e)) = self.expects.remove(&rec.seq) {
+                if expect_matches(&e, &rec.wire) {
+                    self.hits += 1;
+                } else {
+                    let got = rec
+                        .wire
+                        .iter()
+                        .filter_map(|m| match m {
+                            WireMsg::ErrorResponse(f) | WireMsg::NoticeResponse(f) => {
+                                let g = |k: char| f.get(&k).and_then(|b| std::str::from_utf8(&b.0).ok()).unwrap_or("").to_string();
+                                Some(format!("{}:{}:{}", g('S'), g('C'), g('M')))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    self.misses.push((r, rec.seq, e, got));
+                }
+            }
+        }
+        self.inner.observation(rec);
+    }
+    fn finding(&mut self, f: &contracts::Finding) {
+        if let Some(r) = f.recipe.clone().or_else(|| self.current_recipe.clone()) {
+            self.per_recipe.entry(r).or_default().1 += 1;
+        }
+        self.inner.finding(f);
+    }
+    fn note(&mut self, v: &contracts::json::Value) {
+        self.inner.note(v);
+    }
+}
+
+fn recipes(args: &[String]) -> Result<(), String> {
+    let a = parse_recipes(args)?;
+    let out = a.out.clone().unwrap_or_else(|| PathBuf::from("out/sitediff-recipes"));
+    std::fs::create_dir_all(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
+    let ledger = ledger_for(a.rulings.as_deref())?;
+    let bank = Bank::load(&a.bank).map_err(|e| format!("bank {}: {e}", a.bank.display()))?;
+    for e in &bank.errors {
+        eprintln!("sitediff recipes: skipping {}: {}", e.rel_path, e.message);
+    }
+    let env_from_cell = a
+        .cell
+        .cell_env
+        .as_ref()
+        .and_then(|p| parse_env_file(p).ok())
+        .and_then(|m| m.get("CELL_NAME").cloned())
+        .unwrap_or_else(|| "base".into());
+    let env_filter = a.env.clone().unwrap_or(env_from_cell);
+    let selected: Vec<&fuzzgen::recipes::BankEntry> = bank
+        .recipes
+        .values()
+        .filter(|e| env_filter == "all" || e.recipe.header.env == env_filter)
+        .filter(|e| a.filters.is_empty() || a.filters.iter().any(|f| e.id().contains(f.as_str())))
+        .collect();
+    println!(
+        "sitediff recipes: bank {} has {} recipes ({} errors); {} selected (env {}{})",
+        a.bank.display(),
+        bank.len(),
+        bank.errors.len(),
+        selected.len(),
+        env_filter,
+        if a.filters.is_empty() { String::new() } else { format!(", filter {:?}", a.filters) }
+    );
+    if selected.is_empty() {
+        return Err("no recipes selected".into());
+    }
+    if a.canonicalize {
+        let mut changed = 0usize;
+        for e in &selected {
+            let mut r = e.recipe.clone();
+            r.header.ordered = r.ordered_summary();
+            let text = r.render();
+            let path = a.bank.join(&e.rel_path);
+            let old = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            if old != text {
+                std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+                changed += 1;
+            }
+        }
+        println!("sitediff recipes: canonicalized {} of {} files", changed, selected.len());
+        return Ok(());
+    }
+    let scenario = format!("recipes-{}/cell-{}", a.bank.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "bank".into()), env_filter);
+
+    // The stream: per recipe its steps (from RecipeHeader/body), then the
+    // teardown: a Disconnect per session the recipe used and the reset.
+    let mut steps: Vec<StepRecord> = Vec::new();
+    let mut skipped_non_wire = 0usize;
+    let mut seq = 1u64;
+    let mut order: Vec<String> = Vec::new();
+    for e in &selected {
+        order.push(e.id().to_string());
+        let mut sessions: Vec<String> = Vec::new();
+        for mut st in e.recipe.to_steps(&scenario, seq) {
+            if !sessions.contains(&st.session) {
+                sessions.push(st.session.clone());
+            }
+            match &st.kind {
+                StepKind::CopyIn => {
+                    // `COPY ... FROM STDIN;` + data lines + `\.` → the
+                    // statement on the wire and the data in the slot the
+                    // client observer reads.
+                    let text = st.sql.clone().unwrap_or_default();
+                    let mut lines = text.lines();
+                    let stmt = lines.next().unwrap_or("").to_string();
+                    let data: Vec<&str> = lines.take_while(|l| l.trim() != "\\.").collect();
+                    let mut d = data.join("\n");
+                    if !d.is_empty() {
+                        d.push('\n');
+                    }
+                    st.sql = Some(stmt);
+                    st.slots.insert("copy_data".into(), d);
+                }
+                StepKind::Env(op) if op == "psql" || op == "manual" => {
+                    // Not wire (RECIPES.md: run by stock psql / a harness);
+                    // recorded in steps.jsonl, exchanged as a no-op.
+                    skipped_non_wire += 1;
+                }
+                _ => {}
+            }
+            st.seq = seq;
+            seq += 1;
+            steps.push(st);
+        }
+        if a.reset {
+            for s in &sessions {
+                let mut d = step_of(&scenario, seq, "", vec!["recipe:teardown".into()], Ordered::None);
+                d.kind = StepKind::Disconnect;
+                d.sql = None;
+                d.session = s.clone();
+                d.recipe = Some(e.id().to_string());
+                seq += 1;
+                steps.push(d);
+            }
+            let mut r = step_of(&scenario, seq, RESET_SQL, vec!["recipe:reset".into()], Ordered::None);
+            r.recipe = Some(e.id().to_string());
+            seq += 1;
+            steps.push(r);
+        }
+    }
+    println!("sitediff recipes: {} steps ({} non-wire psql/manual steps exchanged as no-ops)", steps.len(), skipped_non_wire);
+    if a.dry_run {
+        for s in &steps {
+            println!("  {:>4} {:<4} {:<10} {} {}", s.seq, s.session, s.kind.to_string_key(), s.recipe.as_deref().unwrap_or("-"), s.sql.as_deref().unwrap_or("").lines().next().unwrap_or(""));
+        }
+        return Ok(());
+    }
+
+    let OpenCell { cfg, opts_a, opts_b, srv_b } = open_cell(&a.cell, &out)?;
+    let rig_a = SideRig::new(Side::A, &cfg, ClientObserver::connector(opts_a, None), None);
+    let rig_b = SideRig::new(Side::B, &cfg, ClientObserver::connector(opts_b, srv_b), None);
+    let mut runner = SiteRunner::new(cfg, &scenario, rig_a, rig_b).with_ledger(ledger);
+    let file_sink = FileSink::create(&out).map_err(|e| format!("open sinks under {}: {e}", out.display()))?;
+    let mut sink = RecipeSink::new(file_sink);
+    let summary = runner.run_stream(&steps, &mut sink);
+    write_summary(&out, &summary, &runner.ledger.hits())?;
+    print_summary(&out, &summary);
+
+    // Per-recipe report.
+    use contracts::json::Value;
+    let mut rows = Vec::new();
+    let mut with_findings = 0usize;
+    for id in &order {
+        let (n, f) = sink.per_recipe.get(id).copied().unwrap_or((0, 0));
+        if f > 0 {
+            with_findings += 1;
+        }
+        let misses: Vec<Value> = sink
+            .misses
+            .iter()
+            .filter(|m| &m.0 == id)
+            .map(|m| Value::obj().with("seq", Value::from(m.1)).with("expect", Value::Str(m.2.clone())).with("a_wire", Value::Str(m.3.clone())))
+            .collect();
+        rows.push(
+            Value::obj()
+                .with("id", Value::Str(id.clone()))
+                .with("steps", Value::from(n))
+                .with("findings", Value::from(f))
+                .with("expect_misses", Value::Arr(misses)),
+        );
+    }
+    let report = Value::obj()
+        .with("bank", Value::Str(a.bank.display().to_string()))
+        .with("env", Value::Str(env_filter.clone()))
+        .with("recipes", Value::from(order.len() as u64))
+        .with("recipes_with_findings", Value::from(with_findings as u64))
+        .with("expect_hits", Value::from(sink.hits))
+        .with("expect_misses", Value::from(sink.misses.len() as u64))
+        .with("per_recipe", Value::Arr(rows));
+    std::fs::write(out.join("recipes-report.json"), contracts::json::to_pretty(&report)?).map_err(|e| e.to_string())?;
+    println!(
+        "sitediff recipes: {} recipes, {} with findings; expect_c hits {} misses {}; wrote {}/recipes-report.json",
+        order.len(),
+        with_findings,
+        sink.hits,
+        sink.misses.len(),
+        out.display()
+    );
+    for m in &sink.misses {
+        println!("  expect miss {} seq {}: wanted {:?}, A sent {:?}", m.0, m.1, m.2, m.3);
+    }
     Ok(())
 }
 

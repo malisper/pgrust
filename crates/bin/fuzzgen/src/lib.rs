@@ -304,6 +304,7 @@ pub mod supervisor;
 pub mod probes;
 pub mod recipe;
 pub mod recipes;
+pub mod compose;
 pub mod scalartypes;
 pub mod scope;
 pub mod seqident;

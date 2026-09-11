@@ -83,6 +83,10 @@ pub enum Directive {
     Ordered(Ordered),
     /// `@expect <expectation>` — `expect_c` for the next statement.
     Expect(String),
+    /// `@batch <n>` — the next n statements go out in ONE simple-query
+    /// message (a multi-statement message; the step's `ordered` and
+    /// `expect_c` are those of its last statement).
+    Batch(u32),
 }
 
 /// How a `Psql` item was recognised.
@@ -394,6 +398,13 @@ impl Directive {
                 Ok(Directive::Pressure { mb: arg_u64(&m, "mb", "@pressure")?, queries: arg_u64(&m, "queries", "@pressure")? })
             }
             "ordered" => Ok(Directive::Ordered(Ordered::parse(&one_arg("value")?)?)),
+            "batch" => {
+                let n: u32 = one_arg("count")?.parse().map_err(|e| format!("@batch count: {}", e))?;
+                if n < 2 {
+                    return Err("@batch needs a count of at least 2".into());
+                }
+                Ok(Directive::Batch(n))
+            }
             "expect" => {
                 if args.is_empty() {
                     Err("@expect needs an expectation".into())
@@ -448,6 +459,7 @@ impl Directive {
             }
             Directive::Ordered(o) => format!("-- @ordered {}", o.as_str()),
             Directive::Expect(e) => format!("-- @expect {}", e),
+            Directive::Batch(n) => format!("-- @batch {}", n),
         }
     }
 }
@@ -1249,6 +1261,8 @@ impl Recipe {
         let has_expect_directive = self.items.iter().any(|it| matches!(it, Item::Directive(Directive::Expect(_))));
         let mut last_sql_step: Option<usize> = None;
         let sql_kind = if self.header.protocol == "extended" { StepKind::Xproto } else { StepKind::Sql };
+        let mut batch_remaining: u32 = 0;
+        let mut batch_buf: Vec<String> = Vec::new();
         for (idx, it) in self.items.iter().enumerate() {
             let mut step = RecipeStep {
                 item: idx,
@@ -1274,6 +1288,11 @@ impl Recipe {
                     }
                     Directive::Expect(e) => {
                         pending_expect = Some(e.clone());
+                        continue;
+                    }
+                    Directive::Batch(n) => {
+                        batch_remaining = *n;
+                        batch_buf.clear();
                         continue;
                     }
                     Directive::Connect(m) => {
@@ -1318,6 +1337,20 @@ impl Recipe {
                         }
                     }
                 },
+                Item::Stmt { text, .. } if batch_remaining > 0 => {
+                    batch_buf.push(text.clone());
+                    batch_remaining -= 1;
+                    if batch_remaining > 0 {
+                        continue;
+                    }
+                    let joined = batch_buf.join(" ");
+                    batch_buf.clear();
+                    step.kind = sql_kind.clone();
+                    step.ordered = pending_ordered.take().unwrap_or_else(|| infer_ordered(text));
+                    step.expect_c = pending_expect.take();
+                    step.sql = Some(joined);
+                    last_sql_step = Some(out.len());
+                }
                 Item::Stmt { text, .. } => {
                     let w = first_word(text);
                     if txn_open(&w) && !open_bracket.contains_key(&session) {
@@ -1358,6 +1391,23 @@ impl Recipe {
             }
         }
         out
+    }
+
+    /// `features=a,b,c` from the body's `-- note:` comment (the
+    /// composition bank records the features a recipe composes there).
+    pub fn note_features(&self) -> Vec<String> {
+        for it in &self.items {
+            if let Item::Comment(c) = it {
+                if let Some(rest) = c.strip_prefix("-- note:") {
+                    for tok in rest.split_whitespace() {
+                        if let Some(f) = tok.strip_prefix("features=") {
+                            return f.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect();
+                        }
+                    }
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// Emit `StepRecord`s for the stream: `scenario`, sequence numbers

@@ -335,10 +335,19 @@ mod tests {
             let again = Recipe::parse(&e.recipe.render()).unwrap();
             assert_eq!(again, e.recipe, "{} does not round-trip", e.rel_path);
             assert!(!e.recipe.to_steps("bank", 0).is_empty(), "{} has no steps", e.rel_path);
-            assert!(e.recipe.header.origin.starts_with("audit:"), "{} origin", e.rel_path);
+            let origin = &e.recipe.header.origin;
+            assert!(origin.starts_with("audit:") || origin.starts_with("author:"), "{} origin {:?}", e.rel_path, origin);
+            if e.subsystem == "composition" {
+                assert!(origin.starts_with("author:composition"), "{} origin {:?}", e.rel_path, origin);
+                assert!(e.recipe.note_features().len() >= 2, "{} composes fewer than two features", e.rel_path);
+            }
         }
         let mism = bank.ordered_mismatches();
         assert!(mism.is_empty(), "ordered mismatches: {:?}", mism);
-        assert_eq!(bank.regression_floor().len(), bank.len());
+        assert_eq!(bank.regression_floor().len(), bank.for_origin("audit").len());
+        assert!(bank.regression_floor().len() >= 90);
+        // The composition bank (RECIPES.md "Composition bank"): at least 40
+        // authored recipes, each composing two or more features.
+        assert!(bank.for_origin("author").len() >= 40, "composition bank has {} recipes", bank.for_origin("author").len());
     }
 }
