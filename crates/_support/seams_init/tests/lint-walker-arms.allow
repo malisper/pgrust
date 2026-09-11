@@ -1,0 +1,73 @@
+# lint-walker-arms allowlist — adjudicated output of tools/walker-arms/walker_arms.py
+# (seeded 2026-09-10 from origin/main; every row was read against the C body).
+#
+# Tab-separated: <key> <class> <reason>. key = <c_file>:<c_function>|<family>|<missing labels>.
+# A row also covers any strict subset of its label list (a fix that closes one
+# label keeps the rest allowed); a row whose gap is gone is a stale NOTE, delete it.
+#
+# Classes (the task's triage vocabulary):
+#   UNPORTED   the node type / feature is not constructed in pgrust (CustomScan
+#              providers are C extension hooks; postgres_fdw EPQ join alternatives
+#              are not generated; PARAM_MULTIEXPR deparse is unported)
+#   ELSEWHERE  handled by a different structure: a pre-dispatch check, a helper
+#              (strip_relabel, strip_assignment_indirection), a typed enum
+#              variant, a different owner (HashJoin owns its Hash child), or the
+#              same tag guarded by a field the C arm also tests
+#   NOOP       the C arms are `break` / Assert(false) / elog(ERROR) fallthroughs
+#              whose behaviour the Rust wildcard already reproduces
+#   UNREACHABLE the C arm cannot be reached from SQL in this tree (with the
+#              reason); a real divergence would need a new entry point first
+#
+# Add a row only after reading the C arm. Prefer porting the arm C-exactly.
+src/backend/utils/adt/ruleutils.c:get_name_for_var_field|RTEKind|RTE_FUNCTION,RTE_GROUP,RTE_NAMEDTUPLESTORE,RTE_RELATION,RTE_RESULT,RTE_TABLEFUNC,RTE_VALUES	NOOP	every missing C arm is a bare `break` (ruleutils.c get_name_for_var_field); Rust `_ => {}` is the same fallthrough
+src/backend/optimizer/prep/prepjointree.c:replace_vars_in_jointree|RTEKind|RTE_CTE,RTE_GROUP,RTE_JOIN,RTE_NAMEDTUPLESTORE,RTE_RESULT	NOOP	C arms are Assert(false) "these shouldn't be marked LATERAL"; Rust wildcard skips them the same way
+src/backend/parser/parse_target.c:FigureColnameInternal|SubLinkType|ALL_SUBLINK,ANY_SUBLINK,CTE_SUBLINK,MULTIEXPR_SUBLINK,ROWCOMPARE_SUBLINK	NOOP	C arms are `break` (unnamed sublink kinds); Rust `_ => 0`
+src/backend/executor/nodeAgg.c:ExecAgg|AggStrategy|AGG_MIXED,AGG_PLAIN	ELSEWHERE	exec_agg branches on gsets/perhash instead of aggstrategy: AGG_MIXED only arises with grouping sets (gsets::exec_agg_gsets), AGG_PLAIN/AGG_SORTED share the retrieve-direct tail
+src/backend/optimizer/prep/prepjointree.c:pull_up_simple_subquery|RTEKind|RTE_NAMEDTUPLESTORE	NOOP	C arm is `break` ("can't contain lateral references"); Rust `_ => {}`
+src/backend/optimizer/plan/createplan.c:create_plan_recurse|NodeTag|T_Agg,T_Append,T_BitmapHeapScan,T_CustomScan,T_ForeignScan,T_Gather,T_GatherMerge,T_Group,T_HashJoin,T_IncrementalSort,T_IndexOnlyScan,T_IndexScan,T_Limit,T_LockRows,T_Material,T_Memoize,T_MergeAppend,T_MergeJoin,T_ModifyTable,T_NestLoop,T_ProjectSet,T_RecursiveUnion,T_SetOp,T_Sort,T_SubqueryScan,T_TidRangeScan,T_TidScan,T_Unique,T_WindowAgg	ELSEWHERE	C switches on Path.pathtype (plan-node tags); Rust dispatches on the PathNode variant, which is a bijection onto the same arms (createplan.rs create_plan_recurse); CustomScan is UNPORTED
+src/backend/optimizer/plan/createplan.c:create_join_plan|NodeTag|T_HashJoin,T_MergeJoin,T_NestLoop	ELSEWHERE	C switches on pathtype T_HashJoin/T_MergeJoin/T_NestLoop; Rust dispatches on PathNode::HashPath/MergePath/NestPath
+src/backend/executor/execExpr.c:ExecInitExprRec|NodeTag|T_AggState,T_WindowAggState	ELSEWHERE	C tests IsA(state->parent, AggState/WindowAggState) to find the owning node; init_expr_rec receives the aggregate binding as the `agg: Option<Bind>` parameter (execexpr/compile.rs)
+src/backend/nodes/nodeFuncs.c:expression_tree_mutator_impl|NodeTag|T_IndexClause,T_PlaceHolderInfo	ELSEWHERE	IndexClause and PlaceHolderInfo are planner arena structs, not Node variants, in pgrust (nodes_core/src/lib.rs); their rinfo/indexquals/ph_var are walked by the owning planner code
+src/backend/nodes/nodeFuncs.c:expression_tree_walker_impl|NodeTag|T_IndexClause,T_PlaceHolderInfo	ELSEWHERE	IndexClause and PlaceHolderInfo are planner arena structs, not Node variants, in pgrust (nodes_core/src/lib.rs); their rinfo/indexquals/ph_var are walked by the owning planner code
+src/backend/optimizer/path/allpaths.c:set_rel_consider_parallel|RTEKind|RTE_GROUP,RTE_JOIN	NOOP	C arms are Assert(false) "shouldn't happen"; Rust wildcard panics the same way
+src/backend/executor/execAmi.c:ExecRestrPos|NodeTag|T_CustomScanState	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan/CustomScanState
+src/backend/optimizer/path/costsize.c:cost_qual_eval_walker|NodeTag|T_RestrictInfo	ELSEWHERE	RestrictInfo is not dispatched as a Node in pgrust: callers pass rinfo.clause and the eval_cost cache lives on the RestrictInfo (costsize/src/lib.rs cost_qual_eval)
+src/backend/optimizer/plan/createplan.c:create_scan_plan|NodeTag|T_CustomScan	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan
+src/backend/optimizer/plan/createplan.c:is_projection_capable_path|NodeTag|T_CustomScan	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan (T_Hash/T_ModifyTable arms ported C-exactly in this PR)
+src/backend/optimizer/plan/setrefs.c:set_plan_refs|NodeTag|T_CustomScan	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan
+src/backend/optimizer/plan/subselect.c:finalize_plan|NodeTag|T_CustomScan	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan
+src/backend/parser/parse_clause.c:transformFromClauseItem|NodeTag|T_JoinExpr	ELSEWHERE	pre-dispatch: parse_clause/src/lib.rs:169 routes JoinExpr to transformJoinExpr before transformFromClauseItem is entered
+src/backend/utils/adt/selfuncs.c:index_other_operands_eval_cost|NodeTag|T_RestrictInfo	ELSEWHERE	RestrictInfo is not dispatched as a Node in pgrust; index clauses carry rinfo.clause (selfuncs.rs index_other_operands_eval_cost)
+src/backend/commands/explain.c:ExplainTargetRel|NodeTag|T_BitmapHeapScan,T_CteScan,T_CustomScan,T_ForeignScan,T_FuncExpr,T_FunctionScan,T_IndexOnlyScan,T_IndexScan,T_ModifyTable,T_NamedTuplestoreScan,T_SampleScan,T_SeqScan,T_TableFuncScan,T_TidRangeScan,T_TidScan,T_ValuesScan,T_WorkTableScan	ELSEWHERE	C switches on the plan tag only to pick the RTE; explain/src/node.rs ExplainTargetRel takes the rti and dispatches on rte.rtekind directly
+src/backend/executor/execAmi.c:ExecSupportsMarkRestore|NodeTag|T_CustomScan,T_GroupResultPath,T_MinMaxAggPath	ELSEWHERE	C's T_Result arm returns false for MinMaxAggPath/GroupResultPath; costsize.rs exec_supports_mark_restore `_ => false` after the ProjectionPath check is the same; CustomScan UNPORTED
+src/backend/optimizer/path/costsize.c:has_indexed_join_quals|NodeTag|T_BitmapHeapScan,T_IndexOnlyScan,T_IndexScan	ELSEWHERE	C switches on pathtype; Rust matches PathNode::IndexPath (both T_IndexScan and T_IndexOnlyScan) and PathNode::BitmapHeapPath
+src/backend/optimizer/util/pathnode.c:path_is_reparameterizable_by_child|NodeTag|T_CustomPath,T_ForeignPath,T_GatherPath	UNREACHABLE	partial paths are never parameterized (pathnode.c:770 add_partial_path), so a GatherPath never needs child reparameterization; ForeignPath needs an FDW ReparameterizeForeignPathByChild hook (postgres_fdw has none); CustomPath UNPORTED
+src/backend/optimizer/util/pathnode.c:reparameterize_path_by_child|NodeTag|T_CustomPath,T_ForeignPath,T_GatherPath	UNREACHABLE	partial paths are never parameterized (pathnode.c:770 add_partial_path), so a GatherPath never needs child reparameterization; ForeignPath needs an FDW ReparameterizeForeignPathByChild hook (postgres_fdw has none); CustomPath UNPORTED
+src/backend/optimizer/util/plancat.c:build_physical_tlist|RTEKind|RTE_NAMEDTUPLESTORE,RTE_RELATION,RTE_RESULT	ELSEWHERE	RTE_RELATION is the fall-through tail of createplan.rs build_physical_tlist; RTE_RESULT/RTE_NAMEDTUPLESTORE never reach it because use_physical_tlist rejects those rtekinds first (both trees)
+src/backend/catalog/dependency.c:find_expr_references_walker|RTEKind|RTE_JOIN,RTE_NAMEDTUPLESTORE	UNREACHABLE	RTE_JOIN: the merged-column coercions C records from joinaliasvars are the same functions already recorded from the join quals (pg_depend byte-identical on `JOIN USING` across int/numeric, verified vs PG 18.6); RTE_NAMEDTUPLESTORE: the C error needs a persistent object built over a transition table, which no utility statement can see (ENRs are not passed to CREATE VIEW/RULE; both trees answer "relation does not exist")
+src/backend/commands/explain.c:ExplainNode|NodeTag|T_CustomScan,T_CustomScanState	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan
+src/backend/executor/execAmi.c:ExecReScan|NodeTag|T_CustomScanState,T_HashState	ELSEWHERE	HashJoin owns its Hash child in pgrust (no PlanStateNode::Hash variant; nodehashjoin rescans it); CustomScan UNPORTED
+src/backend/executor/execCurrent.c:search_plan_tree|NodeTag|T_CustomScanState,T_ForeignScanState	UNREACHABLE	WHERE CURRENT OF over a foreign scan errors in C too (the scan slot is virtual, slot_getsysattr has no ctid); only the error text differs; CustomScan UNPORTED
+src/backend/executor/execProcnode.c:ExecEndNode|NodeTag|T_CustomScanState,T_HashState	ELSEWHERE	HashJoin owns its Hash child in pgrust (no PlanStateNode::Hash variant; nodehashjoin ends it); CustomScan UNPORTED
+src/backend/executor/execProcnode.c:ExecShutdownNode_walker|NodeTag|T_CustomScanState,T_HashState	ELSEWHERE	HashJoin owns its Hash child in pgrust (no PlanStateNode::Hash variant); CustomScan UNPORTED
+contrib/pg_overexplain/pg_overexplain.c:overexplain_per_node_hook|NodeTag|T_CustomScan	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan
+src/backend/commands/explain.c:ExplainNode|CmdType|CMD_SELECT	NOOP	C's ModifyTable operation switch lists CMD_SELECT only to fall to the default "???"; a ModifyTable never carries CMD_SELECT
+src/backend/commands/explain.c:ExplainPreScanNode|NodeTag|T_CustomScan	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan
+src/backend/executor/execAmi.c:ExecMarkPos|NodeTag|T_CustomScanState	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan
+src/backend/parser/parse_clause.c:flatten_grouping_sets|NodeTag|T_List	ELSEWHERE	the C T_List arm is the list-recursion case; parse_clause.rs flatten_grouping_sets returns Flattened::Many via flatten_grouping_sets_list for lists
+src/backend/utils/adt/ruleutils.c:get_sublink_expr|SubLinkType|CTE_SUBLINK	NOOP	C arm is `/* shouldn't occur */ break`; Rust wildcard
+contrib/postgres_fdw/postgres_fdw.c:postgresGetForeignPlan|NodeTag|T_HashJoin,T_MergeJoin,T_NestLoop	UNPORTED	postgres_fdw never generates EPQ-capable join paths, so outer_plan is always None (postgres_fdw/src/plan.rs get_foreign_plan comment); the join-plan IsA chain guards that path
+src/backend/parser/analyze.c:transformInsertRow|NodeTag|T_CoerceToDomain,T_FieldStore,T_SubscriptingRef	ELSEWHERE	the C strip_indirection loop is the helper strip_assignment_indirection (parser_analyze/src/lib.rs), C-exact
+src/backend/optimizer/plan/createplan.c:use_physical_tlist|NodeTag|T_BitmapHeapPath,T_CustomPath	ELSEWHERE	the bitmap check is keyed on pathtype T_BitmapHeapScan in createplan.rs use_physical_tlist; CustomPath UNPORTED
+src/backend/rewrite/rewriteManip.c:ChangeVarNodes_walker|NodeTag|T_AppendRelInfo,T_PlanRowMark	ELSEWHERE	C reaches those arms only through ChangeVarNodesExtended (self-join elimination over root->rowMarks / append_rel_list); pgrust's SJE variant ChangeVarNodesExtendedSJE handles the planner-side structs, which are not Nodes
+src/backend/statistics/mcv.c:mcv_get_match_bitmap|NodeTag|T_RestrictInfo,T_Var	ELSEWHERE	RestrictInfo is not dispatched as a Node in pgrust (clauses arrive unwrapped); the bare boolean Var clause is handled at extended_stats.rs:910
+src/backend/commands/explain.c:plan_is_disabled|NodeTag|T_CustomScan	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan
+src/backend/optimizer/plan/setrefs.c:set_join_references|NodeTag|T_Var	NOOP	C's IsA(nlp->paramval, Var) is an elog(ERROR) sanity guard after fix_upper_expr; the Rust side types paramval as a Var
+src/backend/optimizer/prep/prepjointree.c:reduce_outer_joins_pass2|NodeTag|T_RangeTblRef	ELSEWHERE	C's RangeTblRef arm is "nothing to do"; Rust only recurses into children with sub.contains_outer, which a RangeTblRef never has (prepjointree.rs:3675)
+src/backend/parser/parse_relation.c:expandRTE|NodeTag|T_Var	ELSEWHERE	the C IsA(avar, Var) check in the RTE_JOIN arm is parse_relation.rs expandJoin (a simple-Var joinaliasvars entry is copied, else a join Var is made)
+src/backend/partitioning/partprune.c:gen_partprune_steps_internal|NodeTag|T_RestrictInfo	ELSEWHERE	RestrictInfo is not dispatched as a Node in pgrust; partprune receives rinfo.clause
+src/backend/partitioning/partprune.c:match_clause_to_partition_key|NodeTag|T_RelabelType	ELSEWHERE	the C `while IsA(op, RelabelType)` strip loops are the helper strip_relabel (partprune.rs:380)
+src/backend/rewrite/rewriteHandler.c:RewriteQuery|NodeTag|T_FromExpr	NOOP	C's IsA(pt->jointree, FromExpr) is part of the empty-jointree test for INSERT ... VALUES; rewrite_handler/src/lib.rs:185 reads the same FromExpr through `expect`
+src/backend/rewrite/rewriteManip.c:OffsetVarNodes_walker|NodeTag|T_AppendRelInfo	ELSEWHERE	the only C caller passing AppendRelInfos is pull_up_simple_subquery (prepjointree.c:1441); prepjointree.rs:1235-1252 offsets append_rel_list entries directly (planner arena structs, not Nodes)
+src/backend/utils/adt/ruleutils.c:get_update_query_targetlist_def|NodeTag|T_FieldStore	UNPORTED	the FieldStore descent only matters for a multi-assignment into a composite sub-field, and PARAM_MULTIEXPR deparse is itself unported (ruleutils get_parameter errors "PARAM_MULTIEXPR deparse unported" first, verified: CREATE RULE ... SET (c.a, x) = (SELECT ...) then pg_rules)
+src/backend/utils/adt/ruleutils.c:set_deparse_plan|NodeTag|T_CustomScan	UNPORTED	CustomScan providers are C extension hooks; pgrust never constructs a CustomScan
