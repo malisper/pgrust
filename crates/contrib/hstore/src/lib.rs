@@ -583,8 +583,12 @@ fn fc_hstore_delete_hstore(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     ret_hstore(fcinfo, &build_hstore(&pairs))
 }
 
-pub(crate) fn concat_pairs(s1: &HstoreView<'_>, s2: &HstoreView<'_>) -> Vec<Pair> {
-    let mut out: Vec<Pair> = Vec::with_capacity(s1.count() + s2.count());
+pub(crate) fn concat_pairs(s1: &HstoreView<'_>, s2: &HstoreView<'_>) -> PgResult<Vec<Pair>> {
+    // hstore_op.c: palloc(sizeof(Pairs) * (count1 + count2)) under MaxAllocSize.
+    let n = s1.count() + s2.count();
+    ::mcx::check_alloc_size(n.saturating_mul(core::mem::size_of::<Pair>()))?;
+    let mut out: Vec<Pair> = Vec::new();
+    out.try_reserve_exact(n).map_err(|_| ::mcx::oom_named("hstore", n))?;
     let (mut i, mut j) = (0usize, 0usize);
     while i < s1.count() || j < s2.count() {
         let diff = if i >= s1.count() {
@@ -614,14 +618,14 @@ pub(crate) fn concat_pairs(s1: &HstoreView<'_>, s2: &HstoreView<'_>) -> Vec<Pair
             i += 1;
         }
     }
-    out
+    Ok(out)
 }
 
 fn fc_hstore_concat(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null (strict fn).
     let s1 = unsafe { arg_hstore(fcinfo, 0)? };
     let s2 = unsafe { arg_hstore(fcinfo, 1)? };
-    let out = concat_pairs(&s1, &s2);
+    let out = concat_pairs(&s1, &s2)?;
     ret_hstore(fcinfo, &build_hstore(&out))
 }
 

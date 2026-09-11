@@ -470,6 +470,16 @@ impl QueryTaskBindingGuard {
         if let Some(issue) = session::SessionEnvelopeBoundaryIssue() {
             retain_first(&mut first, Err(prerequisite(issue)));
         }
+        if !commit {
+            // The Err this frame recovers escaped through LWLockAcquire's
+            // HoldInterrupts; C's errfinish zeroes the counters before any
+            // PG_CATCH runs, so the pool executor is not left uncancellable.
+            // Ordered after the boundary audit so a crit-section escape
+            // still retires the helper.
+            init_small::globals::SetInterruptHoldoffCount(0);
+            init_small::globals::SetQueryCancelHoldoffCount(0);
+            init_small::globals::SetCritSectionCount(0);
+        }
         match first {
             Some(error) => {
                 init_small::wretain::refuse_park();

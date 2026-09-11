@@ -104,6 +104,10 @@ thread_local! {
 
 struct SessionState {
     flags: i32,
+    // The opening estate's query context: only ExprStates allocated there are
+    // compiled, so a kernel is never owned (and freed) by an unrelated
+    // estate while a session-lifetime ExprState still holds its handle.
+    owner: usize,
     prev: Option<Box<SessionState>>,
     blocks: Vec<::jit_deform::CodeBlock>,
     instr: JitInstr,
@@ -116,7 +120,7 @@ struct SessionState {
 static OPEN_SESSIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Opens a compile window (nestable: SPI executors inside InitPlan).
-pub fn session_begin(flags: i32) {
+pub fn session_begin(flags: i32, owner: usize) {
     OPEN_SESSIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if log_enabled() {
         eprintln!("jitq session begin: flags={flags:#x}");
@@ -125,6 +129,7 @@ pub fn session_begin(flags: i32) {
         let prev = s.borrow_mut().take().map(Box::new);
         *s.borrow_mut() = Some(SessionState {
             flags,
+            owner,
             prev,
             blocks: Vec::new(),
             instr: JitInstr::default(),
@@ -176,6 +181,12 @@ pub(crate) fn try_compile(state: &mut ExprState<'_>) {
     }
     let flags = session_flags();
     if flags & PGJIT_PERFORM == 0 || flags & PGJIT_EXPR == 0 {
+        return;
+    }
+    let owner = SESSION.with(|s| s.borrow().as_ref().map_or(0, |c| c.owner));
+    let mine = state.steps.allocator().context() as *const ::mcx::MemoryContext as usize;
+    // owner 0 = no estate bound (unit tests): compile unconditionally.
+    if owner != 0 && owner != mine {
         return;
     }
     let t0 = std::time::Instant::now();

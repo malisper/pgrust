@@ -182,9 +182,10 @@ impl CallerWorker {
                 }
             }
             let epoch = rt.park_epoch();
-            rt.execution_permits().acquire();
-            let step = rt.sched.worker_step_pinned(&mut self.local, &rg.rg);
-            rt.execution_permits().release();
+            let step = {
+                let _permit = crate::PermitGuard::acquire(rt.execution_permits());
+                rt.sched.worker_step_pinned(&mut self.local, &rg.rg)
+            };
             match step {
                 Step::Ran => {}
                 // Loom-aware yield (WS-S wave-3: the caller loop is now

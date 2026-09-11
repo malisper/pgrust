@@ -2439,6 +2439,10 @@ impl<'mcx> ExprState<'mcx> {
     }
 
     /// Drops each frame's fn_extra; the program is then safe to forget.
+    /// Idempotent: also the Drop path, so every owner that drops (rather
+    /// than forgets) an ExprState releases the global-heap fn_extra memos —
+    /// C's per-query-context fn_extra dies with the query; here only this
+    /// release does.
     pub fn release_frames(&mut self) {
         for f in self.frames.iter_mut() {
             // SAFETY: frame-owned mcx-boxed FmgrInfo, sole reference here.
@@ -2452,5 +2456,11 @@ impl<'mcx> ExprState<'mcx> {
             self.kernel = Kernel::Program;
             crate::compile::fuse_program(self);
         }
+    }
+}
+
+impl Drop for ExprState<'_> {
+    fn drop(&mut self) {
+        self.release_frames();
     }
 }

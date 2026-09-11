@@ -210,7 +210,7 @@ fn kill9_sweep_over_parallel_session_exactly_old_or_new() {
             }
             Ok(part_nos) => {
                 let mut vfs_handle = pgrc2_write::par::SharedMemVfs::clone(&shared);
-                let m = pgrc2_write::publish::effective_manifest(&mut vfs_handle, DIR, &probe)
+                let m = pgrc2_write::publish::effective_manifest(&mut vfs_handle, DIR, &probe, None)
                     .expect("manifest readable")
                     .expect("acked generation visible");
                 assert_eq!(

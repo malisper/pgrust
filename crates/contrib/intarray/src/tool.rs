@@ -21,19 +21,30 @@ fn overhead_nonulls_words(ndim: usize) -> usize {
 
 impl IntArray {
     pub fn new(num: usize) -> IntArray {
+        IntArray::try_new(num).unwrap_or_else(|e| std::panic::panic_any(e))
+    }
+
+    /// C new_intArrayType: palloc0(nbytes) admits the size under
+    /// MaxAllocSize with a catchable ERROR; callers summing two operand
+    /// cardinalities (|, +) can exceed it.
+    pub fn try_new(num: usize) -> PgResult<IntArray> {
         if num == 0 {
-            return IntArray::empty();
+            return Ok(IntArray::empty());
         }
         let hdr = overhead_nonulls_words(1);
-        let nbytes = (hdr + num) * 4;
-        let mut w = vec![0i32; hdr + num];
+        let words = hdr.saturating_add(num);
+        let nbytes = words.saturating_mul(4);
+        ::mcx::check_alloc_size(nbytes)?;
+        let mut w: Vec<i32> = Vec::new();
+        w.try_reserve_exact(words).map_err(|_| ::mcx::oom_named("intarray", nbytes))?;
+        w.resize(words, 0);
         w[0] = varatt::set_varsize_4b_word(nbytes as u32) as i32;
         w[1] = 1;
         w[2] = 0;
         w[3] = INT4OID;
         w[4] = num as i32;
         w[5] = 1;
-        IntArray { w }
+        Ok(IntArray { w })
     }
 
     /// construct_empty_array(INT4OID): the zero-dimensional array.

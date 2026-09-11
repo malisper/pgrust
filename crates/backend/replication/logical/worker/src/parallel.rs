@@ -202,7 +202,7 @@ pub(crate) fn pa_set_fileset_state(
     inner.fileset_state = fileset_state;
     if fileset_state == PartialFileSetState::SerializeDone {
         debug_assert!(!am_parallel_apply_worker());
-        inner.fileset = Some(crate::stream_apply::stream_fileset_arc());
+        inner.fileset = crate::stream_apply::stream_fileset_arc().ok();
     }
 }
 

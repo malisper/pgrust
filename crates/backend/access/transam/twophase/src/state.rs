@@ -37,7 +37,7 @@ impl GidBuf {
     }
 
     pub fn set(&mut self, gid: &str) {
-        debug_assert!(gid.len() < GIDSIZE);
+        assert!(gid.len() < GIDSIZE, "gid longer than GIDSIZE");
         self.buf[..gid.len()].copy_from_slice(gid.as_bytes());
         self.len = gid.len() as u16;
     }

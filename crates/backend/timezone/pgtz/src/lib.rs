@@ -150,6 +150,22 @@ fn scan_directory_ci(dirname: &str, fname: &[u8]) -> PgResult<Option<String>> {
 // site) and the iteration order deterministic.
 static TIMEZONE_CACHE: Mutex<BTreeMap<Box<[u8]>, &'static PgTz>> = Mutex::new(BTreeMap::new());
 
+// Entries are permanent and process-wide (C's per-backend hash dies with the
+// backend). File-backed zones are a finite set; POSIX-spec names (any
+// "<abc>0"-style designator) are caller-invented, so they are capped.
+const MAX_PARSED_ZONES: usize = 4096;
+static PARSED_ZONES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cold]
+fn too_many_parsed_zones(name: &[u8]) -> Box<PgError> {
+    PgError::error(format!(
+        "too many distinct POSIX-style time zone specifications (limit {MAX_PARSED_ZONES}): \"{}\"",
+        String::from_utf8_lossy(name)
+    ))
+    .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+    .into()
+}
+
 /// Load a timezone from file or cache; does not verify acceptability. "GMT"
 /// always goes to tzparse(), never the filesystem, as in C. `Ok(None)` is
 /// C's NULL (unknown zone); `Err` is an ereport that unwound out of tzload
@@ -171,6 +187,7 @@ pub fn pg_tzset(tzname: &[u8]) -> PgResult<Option<&'static PgTz>> {
 
     let mut tzstate = Box::new(TzState::new());
     let mut canonname = [0u8; TZ_STRLEN_MAX + 1];
+    let mut parsed = false;
 
     if uppername == b"GMT" {
         if !tzparse(uppername, &mut tzstate, true) {
@@ -187,6 +204,7 @@ pub fn pg_tzset(tzname: &[u8]) -> PgResult<Option<&'static PgTz>> {
                     return Ok(None);
                 }
                 canonname[..uppername.len()].copy_from_slice(uppername);
+                parsed = true;
             }
         }
     }
@@ -195,7 +213,16 @@ pub fn pg_tzset(tzname: &[u8]) -> PgResult<Option<&'static PgTz>> {
     // insert wins and the loser's build is dropped, so every caller — and the
     // process-shared pointer caches downstream — sees ONE permanent entry.
     let mut map = TIMEZONE_CACHE.lock().unwrap();
+    if parsed
+        && !map.contains_key(uppername)
+        && PARSED_ZONES.load(std::sync::atomic::Ordering::Relaxed) >= MAX_PARSED_ZONES
+    {
+        return Err(too_many_parsed_zones(uppername));
+    }
     Ok(Some(*map.entry(uppername.into()).or_insert_with(|| {
+        if parsed {
+            PARSED_ZONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         Box::leak(Box::new(PgTz {
             tzname: canonname,
             state: *tzstate,

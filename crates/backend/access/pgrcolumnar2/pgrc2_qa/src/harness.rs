@@ -201,7 +201,7 @@ pub fn run_rounds(
     let clog = read_clog(vfs, base)?;
     let mut probe = probe_from_clog(&clog);
     recover_and_clean(vfs, &fx.dir, &probe)?;
-    let eff = effective_manifest(vfs, &fx.dir, &probe)?;
+    let eff = effective_manifest(vfs, &fx.dir, &probe, None)?;
     let total: u64 = eff
         .as_ref()
         .map(|m| m.parts.iter().map(|p| p.rows).sum())
@@ -287,7 +287,7 @@ pub fn check_dir(
     let probe = probe_from_clog(&clog);
 
     // Writer-side walk.
-    let eff = effective_manifest(vfs, &fx.dir, &probe).map_err(|e| format!("effective: {e}"))?;
+    let eff = effective_manifest(vfs, &fx.dir, &probe, None).map_err(|e| format!("effective: {e}"))?;
     // Reader-side walk over a snapshot of the same directory.
     let names = vfs.list_dir(&fx.dir).map_err(|e| format!("listdir: {e}"))?;
     let mut files = std::collections::BTreeMap::new();

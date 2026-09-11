@@ -226,6 +226,9 @@ pub fn ResetShmemAfterCrash() -> PgResult<()> {
 
     dsm_registry::DSMRegistryShmemResetAfterCrash();
 
+    xlogrecovery::XLogRecoveryResetAfterCrash();
+    walsender::WalSndShmemResetAfterCrash();
+    l2cache::bump_all_after_crash();
     varsup::VarsupShmemReset();
     transam_xlog::XLOGShmemResetAfterCrash();
     xlogprefetcher::XLogPrefetchShmemResetAfterCrash();

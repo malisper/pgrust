@@ -3529,12 +3529,18 @@ unsafe fn agg_plain_trans_byref(
         });
         let (new_val, isnull) = invoke(call)?;
         // NULL transvalues stay at word 0, so the raw compare is null-safe.
-        let new_val = if new_val.as_usize() != (*pg).trans_value.as_usize() {
-            if !isnull {
-                agg_datum_copy(byref.agg.as_ref().aggcontext(), new_val, byref.translen)?
+        let old = (*pg).trans_value;
+        let new_val = if new_val.as_usize() != old.as_usize() {
+            let aggcontext = byref.agg.as_ref().aggcontext();
+            let copied = if !isnull {
+                agg_datum_copy(aggcontext, new_val, byref.translen)?
             } else {
                 Datum::null()
+            };
+            if !(*pg).trans_value_is_null {
+                agg_datum_free(aggcontext, old, byref.translen);
             }
+            copied
         } else {
             new_val
         };
@@ -3546,6 +3552,34 @@ unsafe fn agg_plain_trans_byref(
 
 /// datumCopy (datum.c), by-ref arms, at palloc (max) alignment.
 /// # Safety: `value` is a non-null by-ref datum readable for its full size.
+/// C's pfree of a superseded transvalue (ExecAggCopyTransValue,
+/// execExprInterp.c:5772): the copy made by `agg_datum_copy`, same layout.
+/// # Safety: `value` was returned by `agg_datum_copy` into `mcx` and is
+/// referenced nowhere else.
+pub unsafe fn agg_datum_free(mcx: ::mcx::Mcx<'_>, value: Datum, typlen: i16) {
+    if value.as_usize() == 0 {
+        return;
+    }
+    let p = value.as_usize() as *const u8;
+    // SAFETY: forwarded caller contract; the image is a plain copy.
+    let size = unsafe {
+        match typlen {
+            -1 => ::types_tuple::varatt::varsize_any(p),
+            n if n > 0 => n as usize,
+            _ => {
+                let mut len = 0usize;
+                while *p.add(len) != 0 {
+                    len += 1;
+                }
+                len + 1
+            }
+        }
+    };
+    let layout = core::alloc::Layout::from_size_align(size, 8).expect("datumCopy layout");
+    // SAFETY: allocated by agg_datum_copy with exactly this layout.
+    unsafe { ::mcx::Allocator::deallocate(&mcx, core::ptr::NonNull::new_unchecked(p.cast_mut()), layout) };
+}
+
 pub unsafe fn agg_datum_copy(mcx: ::mcx::Mcx<'_>, value: Datum, typlen: i16) -> PgResult<Datum> {
     let p = value.as_usize() as *const u8;
     // SAFETY: forwarded caller contract.

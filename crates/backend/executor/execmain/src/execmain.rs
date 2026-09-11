@@ -94,7 +94,29 @@ mod exec_skeleton {
         pub eflags: i32,
         pub exec: Box<ExecutorHandle>,
         pub tup_desc: Rc<TupleDescData<'static>>,
+        // Catalog generation the compiled programs were built against: the
+        // expression compiler resolves composite-type tupdescs once (C's
+        // ExecutorStart re-resolves), so a relcache or pg_type invalidation
+        // since parking retires the skeleton instead of re-arming it.
+        pub gen: u64,
     }
+
+    static INVAL_GEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+    pub(crate) fn current_gen() -> u64 {
+        INVAL_GEN.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn relcache_inval(_arg: ::datum::Datum, _relid: types_core::Oid) {
+        INVAL_GEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn type_inval(_arg: ::datum::Datum, _cacheid: i32, _hash: u32) {
+        INVAL_GEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    // pg_type's cache id (cacheinfo.rs TYPEOID).
+    const TYPEOID_CACHE_ID: i32 = 82;
 
     thread_local! {
         // Raw pointer keeps the TLS payload !needs_drop (leak at backend
@@ -114,8 +136,12 @@ mod exec_skeleton {
         }
         // SAFETY: parked via Box::into_raw below; slot nulled before the box
         // leaves this module.
-        let matches =
-            unsafe { (*p).pstmt == pstmt && (*p).cplan == cplan && (*p).eflags == eflags };
+        let matches = unsafe {
+            (*p).pstmt == pstmt
+                && (*p).cplan == cplan
+                && (*p).eflags == eflags
+                && (*p).gen == current_gen()
+        };
         if !matches {
             return None;
         }
@@ -136,6 +162,15 @@ mod exec_skeleton {
                 const { core::cell::Cell::new(false) };
         }
         if !TEARDOWN_REGISTERED.replace(true) {
+            let _ = ::inval::invalidate::CacheRegisterRelcacheCallback(
+                relcache_inval,
+                ::datum::Datum::from_oid(types_core::InvalidOid),
+            );
+            let _ = ::inval::invalidate::CacheRegisterSyscacheCallback(
+                TYPEOID_CACHE_ID,
+                type_inval,
+                ::datum::Datum::from_oid(types_core::InvalidOid),
+            );
             ::mcx::register_session_cleanup(Box::new(|| {
                 let p = SLOT.with(|s| s.replace(core::ptr::null_mut()));
                 if !p.is_null() {
@@ -1027,7 +1062,10 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         let r = if pstmt.jitFlags == 0 {
             init_plan(data, pstmt, operation, eflags)
         } else {
-            ::execexpr::jit::session_begin(pstmt.jitFlags);
+            ::execexpr::jit::session_begin(
+                pstmt.jitFlags,
+                data.estate.es_query_cxt.context() as *const ::mcx::MemoryContext as usize,
+            );
             let r = init_plan(data, pstmt, operation, eflags);
             let jc = ::execexpr::jit::session_end();
             data.estate.es_jit_blocks = jc.blocks;
@@ -1719,6 +1757,7 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
             eflags,
             exec,
             tup_desc,
+                    gen: exec_skeleton::current_gen(),
         });
         return Ok(());
     }

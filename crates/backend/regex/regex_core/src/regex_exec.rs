@@ -175,11 +175,19 @@ fn small_ok(cnfa: &Cnfa) -> bool {
     (cnfa.nstates as usize) * 2 <= FEWSTATES && (cnfa.ncolors as usize) <= FEWCOLORS
 }
 
+// regcustom.h MALLOC -> palloc_extended: every array is admitted against
+// MaxAllocSize (C raises its alloc-size error; here the regex error that
+// surfaces as "regular expression is too complex") and allocated fallibly.
+const MAX_ALLOC_SIZE: usize = 0x3FFF_FFFF;
+
 fn zeroed_u32_vec(n: usize) -> RegResult<Vec<u32>> {
-    if usize::BITS < 64 && n > isize::MAX as usize / 4 {
-        return Err(RegError(REG_ESPACE));
+    if n.checked_mul(4).is_none_or(|b| b > MAX_ALLOC_SIZE) {
+        return Err(RegError(REG_ETOOBIG));
     }
-    Ok(alloc::vec![0u32; n])
+    let mut v: Vec<u32> = Vec::new();
+    v.try_reserve_exact(n)?;
+    v.resize(n, 0);
+    Ok(v)
 }
 
 pub struct HeapSpace {
@@ -484,6 +492,9 @@ pub fn newdfa<'s>(
 }
 
 fn fill_vec<T: Copy>(n: usize, val: T) -> RegResult<Vec<T>> {
+    if n.checked_mul(core::mem::size_of::<T>()).is_none_or(|b| b > MAX_ALLOC_SIZE) {
+        return Err(RegError(REG_ETOOBIG));
+    }
     let mut v: Vec<T> = Vec::new();
     v.try_reserve_exact(n)?;
     v.resize(n, val);

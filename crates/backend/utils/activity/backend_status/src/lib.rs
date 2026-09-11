@@ -456,6 +456,19 @@ fn read_ssl_status() -> PgResult<(bool, PgBackendSSLStatus)> {
     Ok((false, PgBackendSSLStatus::zeroed()))
 }
 
+/// A process-lifetime worker thread serving a new leader: its status row's
+/// principal must follow the engaging user (pg_stat_activity's per-row
+/// visibility), not the first connect's.
+pub fn pgstat_report_userid(userid: Oid) {
+    let beentry = my_beentry();
+    begin_write_activity(beentry);
+    // SAFETY: own-backend write / cross-backend read serialized by the st_changecount protocol
+    unsafe {
+        beentry.st_userid.set(userid);
+    }
+    end_write_activity(beentry);
+}
+
 pub fn pgstat_bestart_security() -> PgResult<()> {
     let beentry = my_beentry();
     assert!(g::HaveMyProcPort());

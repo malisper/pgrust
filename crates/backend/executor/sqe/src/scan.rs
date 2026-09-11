@@ -127,8 +127,22 @@ impl Scratch {
             match cur.decode_full(g, &mut out) {
                 Ok(_) => break,
                 Err(ReadError::Format(pgrc2_format::FormatError::ArenaExhausted { .. })) => {
-                    let n = self.arena.len() * 2;
-                    self.arena = vec![0u64; n];
+                    // A committed granule sizes this arena: cap it at C's
+                    // MaxAllocSize and grow fallibly, so table contents can
+                    // raise an ERROR but never abort the server.
+                    const MAX_ARENA_WORDS: usize = 0x3FFF_FFFF / 8;
+                    let n = self.arena.len().max(1) * 2;
+                    let mut grown: Vec<u64> = Vec::new();
+                    if n > MAX_ARENA_WORDS || grown.try_reserve_exact(n).is_err() {
+                        // A String payload is recovered as ERROR at the
+                        // statement boundary (types_error is feature-gated here).
+                        panic!(
+                            "pgrcolumnar2 granule decodes past the {} byte scratch ceiling",
+                            MAX_ARENA_WORDS * 8
+                        );
+                    }
+                    grown.resize(n, 0);
+                    self.arena = grown;
                 }
                 Err(e) => panic!("decode_full: {e:?}"),
             }
@@ -209,8 +223,22 @@ impl Scratch {
             match cur.decode_full(g, &mut out) {
                 Ok(_) => break,
                 Err(ReadError::Format(pgrc2_format::FormatError::ArenaExhausted { .. })) => {
-                    let n = self.arena.len() * 2;
-                    self.arena = vec![0u64; n];
+                    // A committed granule sizes this arena: cap it at C's
+                    // MaxAllocSize and grow fallibly, so table contents can
+                    // raise an ERROR but never abort the server.
+                    const MAX_ARENA_WORDS: usize = 0x3FFF_FFFF / 8;
+                    let n = self.arena.len().max(1) * 2;
+                    let mut grown: Vec<u64> = Vec::new();
+                    if n > MAX_ARENA_WORDS || grown.try_reserve_exact(n).is_err() {
+                        // A String payload is recovered as ERROR at the
+                        // statement boundary (types_error is feature-gated here).
+                        panic!(
+                            "pgrcolumnar2 granule decodes past the {} byte scratch ceiling",
+                            MAX_ARENA_WORDS * 8
+                        );
+                    }
+                    grown.resize(n, 0);
+                    self.arena = grown;
                 }
                 Err(e) => panic!("decode_full: {e:?}"),
             }

@@ -59,7 +59,18 @@ pub struct TSDictionaryCacheEntry {
     // (PgVec allocators).
     _dict_ctx: std::boxed::Box<MemoryContext>,
     pub dict_data: usize,
+    dict_drop: Option<ts_locale::dict_api::DictDropFn>,
     lexize: RefCell<FmgrInfo>,
+}
+
+impl Drop for TSDictionaryCacheEntry {
+    fn drop(&mut self) {
+        if let Some(f) = self.dict_drop {
+            // SAFETY: dict_data is the init method's state in _dict_ctx, which
+            // is still alive here (fields drop after this body).
+            unsafe { f(self.dict_data) }
+        }
+    }
 }
 
 impl TSDictionaryCacheEntry {
@@ -284,6 +295,7 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<Rc<TSDictionaryCacheE
     let root = with_state(|st| st.root);
     let ctx = std::boxed::Box::new(root.new_child("TS dictionary"));
     let (template_oid, init_oid, lexize_oid, dict_data);
+    let mut dict_drop = None;
     {
         // SAFETY: 'static stands for "as long as the Box in _dict_ctx lives";
         // the box pins the context address across the move into the entry.
@@ -320,15 +332,17 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<Rc<TSDictionaryCacheE
                     int_options.push(item.int_value);
                 }
             }
-            let init_data = DictInitData { mcx: dmcx, dict_options, int_options };
+            let init_data = DictInitData::new(dmcx, dict_options, int_options);
             let mut init_f = fmgr_seams::fmgr_info::call(init_oid)?;
-            function_call1_coll_in(
+            let data = function_call1_coll_in(
                 &mut init_f,
                 InvalidOid,
                 dmcx,
                 Datum::from_usize(&init_data as *const DictInitData<'_> as usize),
             )?
-            .as_usize()
+            .as_usize();
+            dict_drop = init_data.drop_fn.get();
+            data
         } else {
             0
         };
@@ -340,6 +354,7 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<Rc<TSDictionaryCacheE
         lexize_oid,
         _dict_ctx: ctx,
         dict_data,
+        dict_drop,
         lexize: RefCell::new(fmgr_seams::fmgr_info::call(lexize_oid)?),
     });
     with_state(|st| {

@@ -196,10 +196,10 @@ fn local_latch_home() {
     setup();
     let _g = LATCH_SLAB_LOCK.lock().unwrap();
     assert!(init_small::globals::MyLatch().is_none());
-    InitProcessLocalLatch();
+    InitProcessLocalLatch().expect("local latch");
     let first = init_small::globals::MyLatch().unwrap();
     // Re-init reuses the slot (C's file-scope LocalLatchData).
-    InitProcessLocalLatch();
+    InitProcessLocalLatch().expect("local latch");
     assert_eq!(init_small::globals::MyLatch(), Some(first));
     latch::SetLatch(first);
     assert!(latch::latch_ref(first).is_set());
@@ -215,7 +215,7 @@ fn local_latch_release_guard_recycles_slot() {
     let backend = || {
         std::thread::spawn(|| {
             let _release = LocalLatchReleaseGuard::new();
-            InitProcessLocalLatch();
+            InitProcessLocalLatch().expect("local latch");
             init_small::globals::MyLatch().unwrap()
         })
         .join()
@@ -230,7 +230,7 @@ fn local_latch_release_guard_recycles_slot() {
     let (tx, rx) = std::sync::mpsc::channel();
     let crashed = std::thread::spawn(move || {
         let _release = LocalLatchReleaseGuard::new();
-        InitProcessLocalLatch();
+        InitProcessLocalLatch().expect("local latch");
         tx.send(init_small::globals::MyLatch().unwrap()).unwrap();
         panic!("simulated backend crash");
     });

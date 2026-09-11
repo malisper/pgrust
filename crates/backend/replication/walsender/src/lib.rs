@@ -251,6 +251,28 @@ fn wal_snd_ctl_boot_image(max_wal_senders: i32) -> WalSndCtlData {
 /// status byte) fits inside C's 112-byte header, so the arena is C-sized
 /// even at max_wal_senders = 0. Called from CreateOrAttachShmemStructs
 /// (ipci.c:331) with the GUC value, like WalSndShmemSize.
+/// C re-creates shared memory after a crash (WalSndShmemInit's !found pass
+/// zeroes WalSndCtl); the in-process crash restart resets the live block in
+/// place so no dead walsender slot, sync-rep LSN or standby status survives.
+pub fn WalSndShmemResetAfterCrash() {
+    let Some(shared) = WAL_SND_CTL.get() else { return };
+    let c: &WalSndCtlData = shared.ctl;
+    for s in c.walsnds.iter() {
+        *s.lock().unwrap_or_else(|e| e.into_inner()) = walsnd_empty();
+    }
+    for l in &c.sync_rep_lsn {
+        l.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+    c.sync_standbys_status.store(0, std::sync::atomic::Ordering::SeqCst);
+    for q in &c.sync_rep_queue {
+        // SAFETY: crash restart, no walsender or backend thread is live.
+        unsafe { q.set(types_storage::storage::proclist_head::default()) };
+    }
+    for m in shared.uploaded_manifests.iter() {
+        *m.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 pub fn WalSndShmemInit(max_wal_senders: i32) -> PgResult<()> {
     const {
         assert!(core::mem::size_of::<WalSndCtlData>() <= C_OFFSETOF_WAL_SND_CTL_DATA_WALSNDS);

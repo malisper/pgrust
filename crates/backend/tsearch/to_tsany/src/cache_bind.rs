@@ -39,12 +39,8 @@ pub fn parser_fns(prs_oid: Oid) -> PgResult<ParserFns> {
     })
 }
 
-pub fn dict_carrier(dict: Oid) -> PgResult<(::datum::Datum, FmgrInfo)> {
-    let entry = ::ts_cache::lookup_ts_dictionary_cache(dict)?;
-    Ok((
-        ::datum::Datum::from_usize(entry.dict_data),
-        fmgr_seams::fmgr_info::call(entry.lexize_oid)?,
-    ))
+pub fn dict_carrier(dict: Oid) -> PgResult<::std::rc::Rc<::ts_cache::TSDictionaryCacheEntry>> {
+    ::ts_cache::lookup_ts_dictionary_cache(dict)
 }
 
 pub fn current_config() -> PgResult<Oid> {

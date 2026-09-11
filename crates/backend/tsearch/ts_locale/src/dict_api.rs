@@ -1,3 +1,5 @@
+use core::cell::Cell;
+
 use ::mcx::{Mcx, PgVec};
 use ::types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
 
@@ -12,6 +14,29 @@ pub struct DictInitData<'mcx> {
     pub mcx: Mcx<'mcx>,
     pub dict_options: PgVec<'mcx, (PgVec<'mcx, u8>, PgVec<'mcx, u8>)>,
     pub int_options: PgVec<'mcx, Option<i64>>,
+    // Set by the init method when its state owns anything outside `mcx`
+    // (compiled regexes, Rc handles, stemmer envs). The entry owner runs it on
+    // the state pointer before bulk-freeing the dictionary context, which is
+    // what C's palloc-into-dictCtx achieves for free.
+    pub drop_fn: Cell<Option<DictDropFn>>,
+}
+
+pub type DictDropFn = unsafe fn(usize);
+
+impl<'mcx> DictInitData<'mcx> {
+    pub fn new(
+        mcx: Mcx<'mcx>,
+        dict_options: PgVec<'mcx, (PgVec<'mcx, u8>, PgVec<'mcx, u8>)>,
+        int_options: PgVec<'mcx, Option<i64>>,
+    ) -> Self {
+        DictInitData { mcx, dict_options, int_options, drop_fn: Cell::new(None) }
+    }
+}
+
+// SAFETY: `p` is the init method's state pointer of type T, allocated in the
+// dictionary context, and is dropped exactly once by the entry owner.
+pub unsafe fn drop_dict_state<T>(p: usize) {
+    unsafe { core::ptr::drop_in_place(p as *mut T) }
 }
 
 pub struct LexizeResult<'mcx>(pub PgVec<'mcx, TsLexeme<'mcx>>);

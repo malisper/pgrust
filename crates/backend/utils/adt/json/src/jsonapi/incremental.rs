@@ -216,6 +216,32 @@ pub struct JsonLexIncremental {
 const JS_STACK_CHUNK_SIZE: usize = 64;
 
 impl JsonLexIncremental {
+    // C keeps partial_token in a StringInfo: enlargeStringInfo's MaxAllocSize
+    // ceiling and its ERROR apply, never an infallible growth.
+    fn admit(&mut self, more: usize) -> PgResult<()> {
+        let len = self.partial_token.len();
+        if len.saturating_add(more) > mcx::MAX_ALLOC_SIZE {
+            return Err(types_error::PgError::error(format!(
+                "string buffer exceeds maximum allowed length ({} bytes)",
+                mcx::MAX_ALLOC_SIZE
+            ))
+            .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .with_detail(format!(
+                "Cannot enlarge string buffer containing {len} bytes by {more} more bytes."
+            ))
+            .into());
+        }
+        self.partial_token
+            .try_reserve(more)
+            .map_err(|_| mcx::oom_named("JSON incremental lexer", more).into())
+    }
+
+    fn stash(&mut self, bytes: &[u8]) -> PgResult<()> {
+        self.admit(bytes.len())?;
+        self.partial_token.extend_from_slice(bytes);
+        Ok(())
+    }
+
     /// C: makeJsonLexContextIncremental(lex, encoding, need_escapes) +
     /// allocate_incremental_state.
     pub fn new(encoding: i32, need_escapes: bool) -> Self {
@@ -468,7 +494,7 @@ impl<'src, 'mcx> JsonIncrementalChunk<'_, 'src, 'mcx> {
                         && !is_last
                     {
                         let start = self.lex.lex.token_start.expect("string token start");
-                        self.st.partial_token.extend_from_slice(&input[start..end]);
+                        self.st.stash(&input[start..end])?;
                         return Ok(JsonError::Incomplete);
                     }
                     if r != JsonError::Success {
@@ -483,9 +509,7 @@ impl<'src, 'mcx> JsonIncrementalChunk<'_, 'src, 'mcx> {
                     // C: json_lex_number (jsonapi.c:2387) — the number ran to
                     // the end of the chunk: stash it, error flag and all.
                     if !is_last && self.lex.lex.token_terminator >= end {
-                        self.st
-                            .partial_token
-                            .extend_from_slice(&input[s..self.lex.lex.token_terminator]);
+                        self.st.stash(&input[s..self.lex.lex.token_terminator])?;
                         return Ok(JsonError::Incomplete);
                     }
                     if r != JsonError::Success {
@@ -519,7 +543,7 @@ impl<'src, 'mcx> JsonIncrementalChunk<'_, 'src, 'mcx> {
                     }
 
                     if !is_last && p == end {
-                        self.st.partial_token.extend_from_slice(&input[s..end]);
+                        self.st.stash(&input[s..end])?;
                         return Ok(JsonError::Incomplete);
                     }
 
@@ -551,6 +575,8 @@ impl<'src, 'mcx> JsonIncrementalChunk<'_, 'src, 'mcx> {
         let input = self.lex.lex.input;
         let input_length = input.len();
         let is_last = self.st.is_last_chunk;
+        // Every push below adds at most one byte per input byte.
+        self.st.admit(input_length)?;
         let ptok = &mut self.st.partial_token;
         let mut added: usize = 0;
         let mut tok_done = false;

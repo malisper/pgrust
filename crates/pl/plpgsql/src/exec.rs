@@ -477,6 +477,9 @@ struct SimpleExpr {
     psrc: plancache::CachedPlanSourceHandle,
     rettype: Oid,
     rettypmod: i32,
+    // The compiled ExprState carries init_func's EXECUTE ACL verdicts for
+    // this user; C rebuilds per transaction so a role change re-checks.
+    userid: Oid,
     // C expr_simple_mutable (exec_save_simple_expr, pl_exec.c:8349): only
     // expressions containing mutable functions need the CCI + fresh-snapshot
     // ceremony per evaluation (pl_exec.c:6198-6204).
@@ -1775,6 +1778,14 @@ impl<'a> Estate<'a> {
             SimpleTake::Skip | SimpleTake::Build { .. } => return Ok(None),
         };
         let se = simple_expr_portal_snapshot(expr.expr_id, se)?;
+        // A different effective user must not ride the compiling user's
+        // function EXECUTE decisions: fall to the slow path, which rebuilds.
+        if se.userid != miscinit_seams::get_user_id::call() {
+            let plan = se.plan;
+            drop(se);
+            put_simple(expr.expr_id, plan, SimpleState::Unknown);
+            return Ok(None);
+        }
         // Every exit below must restore the InUse slot (an error leaving it
         // InUse would silently demote this expression to SPI forever).
         match plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan) {
@@ -1929,6 +1940,7 @@ impl<'a> Estate<'a> {
                 cplan,
                 psrc,
                 rettype: plan_expr.1,
+                userid: miscinit_seams::get_user_id::call(),
                 rettypmod: plan_expr.2,
                 mutable,
                 ctx,
@@ -2497,7 +2509,12 @@ impl<'a> Estate<'a> {
 
     fn exec_stmt(&mut self, stmt: &'a PlStmt) -> PgResult<i32> {
         match stmt {
-            PlStmt::Block(b) => self.exec_stmt_block(b),
+            PlStmt::Block(b) => {
+                // pl_exec.c exec_stmt_block recursion is bounded by the
+                // statement nesting; guard it like the core executor does.
+                stack_depth_core::check_stack_depth()?;
+                self.exec_stmt_block(b)
+            }
             PlStmt::Assign { varno, expr, .. } => {
                 self.exec_assign_expr(*varno, expr)?;
                 Ok(RC_OK)
@@ -3058,6 +3075,13 @@ impl<'a> Estate<'a> {
                     resowner::SetCurrentResourceOwner(save_owner);
                     return Err(e);
                 }
+                // C errfinish zeroes the holdoff/crit-section counters before
+                // longjmp to PG_CATCH and promotes an in-crit-section ERROR to
+                // PANIC; the catching frame owns both here (tcop precedent).
+                ::elog::panic_on_crit_section_escape(&e);
+                init_small::globals::SetInterruptHoldoffCount(0);
+                init_small::globals::SetQueryCancelHoldoffCount(0);
+                init_small::globals::SetCritSectionCount(0);
                 // Bake this frame's context with the throw-time stmt/text
                 // before the cleanup markers overwrite them (C's callback ran
                 // at errfinish).

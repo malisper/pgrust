@@ -171,3 +171,13 @@ fn opcode_constants_match_nbtxlog_h() {
     assert_eq!(SizeOfBtreeOpaque, 16);
     assert_eq!(MaxIndexTuplesPerPage, 408);
 }
+
+#[test]
+fn posting_extent_must_lie_inside_item_and_page() {
+    use super::check_posting_extent;
+    let hdr = super::SizeOfPageHeaderData;
+    assert!(check_posting_extent(hdr, 64, 64, "t").is_ok());
+    assert!(check_posting_extent(hdr - 1, 64, 8, "t").is_err(), "inside the header");
+    assert!(check_posting_extent(hdr, 16, 24, "t").is_err(), "size past lp_len");
+    assert!(check_posting_extent(super::BLCKSZ - 8, 64, 16, "t").is_err(), "past the page");
+}

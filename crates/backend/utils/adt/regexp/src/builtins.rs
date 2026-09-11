@@ -579,11 +579,23 @@ fn collect_matches(fcinfo: &Fcinfo, with_flags: bool) -> PgResult<SrfRows> {
         flags.as_ref().map(|f| f.data()),
         fcinfo.get_collation(),
     )?;
-    let mut rows: Vec<Vec<Option<Vec<u8>>>> = Vec::with_capacity(ctx.nmatches.max(0) as usize);
+    let nm = ctx.nmatches.max(0) as usize;
+    ::mcx::check_alloc_size(nm.saturating_mul(24))?;
+    let mut rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
+    rows.try_reserve_exact(nm).map_err(|_| ::mcx::oom_named("regexp_matches", nm))?;
     while ctx.next_match < ctx.nmatches {
         let mut row: Vec<Option<Vec<u8>>> = Vec::with_capacity(ctx.npatterns as usize);
         crate::matches::build_regexp_match_result(&ctx, |e| {
-            row.push(e.map(|v| v.as_slice().to_vec()));
+            let e = match e {
+                Some(v) => {
+                    let mut o = Vec::new();
+                    o.try_reserve_exact(v.len()).map_err(|_| ::mcx::oom_named("regexp_matches", v.len()))?;
+                    o.extend_from_slice(v.as_slice());
+                    Some(o)
+                }
+                None => None,
+            };
+            row.push(e);
             Ok(())
         })?;
         rows.push(row);
@@ -610,9 +622,16 @@ fn collect_split(fcinfo: &Fcinfo, with_flags: bool) -> PgResult<SrfRows> {
         fcinfo.get_collation(),
         "regexp_split_to_table()",
     )?;
-    let mut rows = Vec::with_capacity((ctx.nmatches + 1).max(1) as usize);
+    let ns = (ctx.nmatches + 1).max(1) as usize;
+    ::mcx::check_alloc_size(ns.saturating_mul(24))?;
+    let mut rows: Vec<Vec<u8>> = Vec::new();
+    rows.try_reserve_exact(ns).map_err(|_| ::mcx::oom_named("regexp_split_to_table", ns))?;
     while ctx.next_match <= ctx.nmatches {
-        rows.push(crate::matches::build_regexp_split_result(&ctx)?.as_slice().to_vec());
+        let piece = crate::matches::build_regexp_split_result(&ctx)?;
+        let mut o = Vec::new();
+        o.try_reserve_exact(piece.len()).map_err(|_| ::mcx::oom_named("regexp_split_to_table", piece.len()))?;
+        o.extend_from_slice(piece.as_slice());
+        rows.push(o);
         ctx.next_match += 1;
     }
     Ok(SrfRows::Texts(rows))

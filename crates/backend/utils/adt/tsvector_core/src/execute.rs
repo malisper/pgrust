@@ -360,12 +360,12 @@ pub fn ts_execute_locations<'mcx>(
     mcx: Mcx<'mcx>,
     q: TsQueryRef<'_>,
     chkcond: ChkCond<'_, 'mcx>,
-) -> PgResult<Vec<ExecPhraseData<'mcx>>> {
-    let mut locations = Vec::new();
+) -> PgResult<PgVec<'mcx, ExecPhraseData<'mcx>>> {
+    let mut locations = PgVec::new_in(mcx);
     if ts_execute_locations_recurse(mcx, q, 0, chkcond, &mut locations)? {
         Ok(locations)
     } else {
-        Ok(Vec::new())
+        Ok(PgVec::new_in(mcx))
     }
 }
 
@@ -374,7 +374,7 @@ fn ts_execute_locations_recurse<'mcx>(
     q: TsQueryRef<'_>,
     idx: usize,
     chkcond: ChkCond<'_, 'mcx>,
-    locations: &mut Vec<ExecPhraseData<'mcx>>,
+    locations: &mut PgVec<'mcx, ExecPhraseData<'mcx>>,
 ) -> PgResult<bool> {
     // C tsvector_op.c TS_execute_locations_recurse(): check_stack_depth() + CHECK_FOR_INTERRUPTS()
     // (one frame per tree level; phrase matching can burn CPU for a long time,
@@ -394,12 +394,12 @@ fn ts_execute_locations_recurse<'mcx>(
         Item::ValStop => panic!("TS_execute_locations: QI_VALSTOP in stored tsquery"),
         Item::Opr(opr) => match opr.oper {
             OP_NOT => {
-                let mut l = Vec::new();
+                let mut l = PgVec::new_in(mcx);
                 // A failed NOT-arm matches; we pass back no locations.
                 Ok(!ts_execute_locations_recurse(mcx, q, idx + 1, chkcond, &mut l)?)
             }
             OP_AND => {
-                let mut l = Vec::new();
+                let mut l = PgVec::new_in(mcx);
                 if !ts_execute_locations_recurse(
                     mcx,
                     q,
@@ -409,7 +409,7 @@ fn ts_execute_locations_recurse<'mcx>(
                 )? {
                     return Ok(false);
                 }
-                let mut r = Vec::new();
+                let mut r = PgVec::new_in(mcx);
                 if !ts_execute_locations_recurse(mcx, q, idx + 1, chkcond, &mut r)? {
                     return Ok(false);
                 }
@@ -418,8 +418,8 @@ fn ts_execute_locations_recurse<'mcx>(
                 Ok(true)
             }
             OP_OR => {
-                let mut l = Vec::new();
-                let mut r = Vec::new();
+                let mut l = PgVec::new_in(mcx);
+                let mut r = PgVec::new_in(mcx);
                 let lmatch =
                     ts_execute_locations_recurse(mcx, q, idx + opr.left as usize, chkcond, &mut l)?;
                 let rmatch = ts_execute_locations_recurse(mcx, q, idx + 1, chkcond, &mut r)?;

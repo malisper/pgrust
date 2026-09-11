@@ -8,6 +8,26 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::build::item_to_jsonb_image;
+
+// jsonfuncs.c materialises through a tuplestore: rows are admitted under
+// MaxAllocSize and every growth is fallible, so an oversized set is an ERROR.
+fn admit<T>(rows: &mut Vec<T>) {
+    let n = rows.len() + 1;
+    if ::mcx::check_alloc_size(n.saturating_mul(core::mem::size_of::<T>().max(16))).is_err()
+        || rows.try_reserve(1).is_err()
+    {
+        std::panic::panic_any(::mcx::oom_named("jsonb SRF", core::mem::size_of::<T>()));
+    }
+}
+
+fn owned(b: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    if v.try_reserve_exact(b.len()).is_err() {
+        std::panic::panic_any(::mcx::oom_named("jsonb SRF", b.len()));
+    }
+    v.extend_from_slice(b);
+    v
+}
 use crate::container::*;
 use crate::getfield::value_as_text;
 use crate::iter::{JsonbIterator, WjbToken};
@@ -118,7 +138,8 @@ pub fn fc_jsonb_object_keys(
                     let JsonbItem::String(s) = v else {
                         panic!("object key is not a string")
                     };
-                    keys.push(Some(s.to_vec()));
+                    admit(&mut keys);
+                    keys.push(Some(owned(s)));
                 }
                 _ => {}
             }
@@ -155,7 +176,10 @@ pub fn fc_jsonb_array_elements(
             let (tok, v) = it.next(true);
             match tok {
                 WjbToken::Done => break,
-                WjbToken::Elem => rows.push(item_to_jsonb_image(mcx, v)?[..].to_vec()),
+                WjbToken::Elem => {
+                    admit(&mut rows);
+                    rows.push(owned(&item_to_jsonb_image(mcx, v)?[..]))
+                }
                 _ => {}
             }
         }
@@ -178,7 +202,10 @@ pub fn fc_jsonb_array_elements_text(
             let (tok, v) = it.next(true);
             match tok {
                 WjbToken::Done => break,
-                WjbToken::Elem => rows.push(text_row(mcx, &v)?),
+                WjbToken::Elem => {
+                    admit(&mut rows);
+                    rows.push(text_row(mcx, &v)?)
+                }
                 _ => {}
             }
         }
@@ -252,7 +279,8 @@ fn each_rows(fcinfo: &Fcinfo, as_text: bool, name: &str) -> PgResult<SrfRows> {
                     &[key_datum, val_datum],
                     &[false, val_null],
                 )?;
-                rows.push(tuple.image().to_vec());
+                admit(&mut rows);
+                rows.push(owned(tuple.image()));
             }
             _ => {}
         }

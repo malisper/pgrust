@@ -2544,8 +2544,16 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, d: Datum, typbyval: bool, typlen: i16) ->
     if typbyval {
         return Ok(d);
     }
-    let len = if typlen > 0 { typlen as usize } else { varlena_stored_size(d) };
     let p = d.as_usize() as *const u8;
+    // datum.c datumGetSize: typlen > 0 fixed, -1 varlena, -2 cstring.
+    let len = if typlen > 0 {
+        typlen as usize
+    } else if typlen == -1 {
+        varlena_stored_size(d)
+    } else {
+        // SAFETY: a cstring datum is NUL-terminated.
+        unsafe { core::ffi::CStr::from_ptr(p.cast()) }.to_bytes_with_nul().len()
+    };
     // SAFETY: byref datum addresses `len` live bytes.
     let src = unsafe { core::slice::from_raw_parts(p, len) };
     let copy = mcx::slice_borrow_in(mcx, src)?;

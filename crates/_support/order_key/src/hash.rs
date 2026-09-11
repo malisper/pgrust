@@ -120,3 +120,30 @@ mod tests {
         assert_eq!(c.finish(), 0x15b5_df2e_7d16_b100);
     }
 }
+
+// Open-addressing tables keyed on meta_hash128 (dict builder, NDV sketch)
+// index slots through this mix: the hash is unseeded and invertible (its
+// value is part of the on-disk format), so raw `h1 & mask` lets a client
+// craft colliding values and drive linear probing quadratic. The mix folds
+// in a per-process random seed the client cannot observe.
+static SLOT_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cold]
+fn init_slot_seed() -> u64 {
+    use std::hash::BuildHasher;
+    use std::sync::atomic::Ordering::Relaxed;
+    let fresh = std::collections::hash_map::RandomState::new().hash_one(0x5eed_u64) | 1;
+    match SLOT_SEED.compare_exchange(0, fresh, Relaxed, Relaxed) {
+        Ok(_) => fresh,
+        Err(existing) => existing,
+    }
+}
+
+#[inline]
+pub fn slot_index(h1: u64, mask: usize) -> usize {
+    let seed = match SLOT_SEED.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => init_slot_seed(),
+        s => s,
+    };
+    ((h1 ^ seed).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_right(29) as usize) & mask
+}

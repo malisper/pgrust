@@ -88,7 +88,7 @@ fn regress_issue_462_recovery_repoints_current() {
     assert_eq!(cp.manifest_len, mb.len() as u64);
     assert_eq!(cp.manifest_crc, crc32c(&mb[..mb.len() - 4]));
     // Writer walk: gen1 straight from the hint (no scan needed).
-    let eff = effective_manifest(&mut vfs, &fx.dir, &probe)
+    let eff = effective_manifest(&mut vfs, &fx.dir, &probe, None)
         .expect("effective")
         .expect("gen1");
     assert_eq!(eff.header.gen, 1);
@@ -130,7 +130,7 @@ fn regress_issue_462_empty_table_unlinks_current() {
         "CURRENT survived on an empty table"
     );
     // Both walks agree on EMPTY.
-    assert!(effective_manifest(&mut vfs, &fx.dir, &probe).expect("effective").is_none());
+    assert!(effective_manifest(&mut vfs, &fx.dir, &probe, None).expect("effective").is_none());
     let files = vfs.snapshot_dir(&fx.dir);
     let rdir = memdir_of(&files);
     match resolve_effective(&rdir, &probe, &TableExpect::default()) {

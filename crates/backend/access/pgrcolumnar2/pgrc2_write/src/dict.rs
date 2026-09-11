@@ -258,7 +258,7 @@ impl DictBuilder {
                 }
                 let (h1, h2) = meta_hash128(payload);
                 let mask = slots.len() - 1;
-                let mut i = (h1 as usize) & mask;
+                let mut i = pgrc2_meta::hash::slot_index(h1, mask);
                 loop {
                     let s = slots[i];
                     if s == 0 {
@@ -353,7 +353,7 @@ fn grow(slots: &mut Vec<u32>, entries: &[HashEntry]) {
     let mask = ncap - 1;
     let mut ns = vec![0u32; ncap];
     for (idx, e) in entries.iter().enumerate() {
-        let mut i = (e.h1 as usize) & mask;
+        let mut i = pgrc2_meta::hash::slot_index(e.h1, mask);
         while ns[i] != 0 {
             i = (i + 1) & mask;
         }

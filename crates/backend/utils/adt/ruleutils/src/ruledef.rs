@@ -216,5 +216,5 @@ pub(crate) fn make_ruledef(mcx: Mcx<'_>, rule: &PgRewriteRow, pretty_flags: i32)
         ctx.buf.push(';');
     }
     ev_relation.close(AccessShareLock)?;
-    Ok(ctx.buf)
+    Ok(ctx.buf.into_inner())
 }

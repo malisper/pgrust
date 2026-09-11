@@ -334,10 +334,18 @@ fn invalid_multibyte_for_locale() -> Box<::types_error::PgError> {
 
 // char2wchar with C's NULL pg_locale_t: plain mbstowcs in the current locale.
 fn char2wchar_default(head: &[u8]) -> PgResult<Vec<u32>> {
-    let mut nul = Vec::with_capacity(head.len() + 1);
+    // wparser_def.c TParserInit: palloc(sizeof(wchar_t) * (lenstr + 1)),
+    // admitted under MaxAllocSize; char2wchar's pnstrdup copy likewise.
+    let n1 = head.len().saturating_add(1);
+    ::mcx::check_alloc_size(n1)?;
+    ::mcx::check_alloc_size(n1.saturating_mul(core::mem::size_of::<libc::wchar_t>()))?;
+    let mut nul = Vec::new();
+    nul.try_reserve_exact(n1).map_err(|_| ::mcx::oom_named("char2wchar", n1))?;
     nul.extend_from_slice(head);
     nul.push(0);
-    let mut out: Vec<libc::wchar_t> = vec![0; head.len() + 1];
+    let mut out: Vec<libc::wchar_t> = Vec::new();
+    out.try_reserve_exact(n1).map_err(|_| ::mcx::oom_named("char2wchar", n1 * 4))?;
+    out.resize(n1, 0);
     // SAFETY: nul is NUL-terminated; at most out.len() wchars written.
     let n = unsafe {
         mbstowcs(

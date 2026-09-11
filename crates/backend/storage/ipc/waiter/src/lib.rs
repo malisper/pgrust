@@ -407,32 +407,49 @@ mod global {
             const { std::cell::RefCell::new(None) };
     }
 
-    fn allocate_slot() -> usize {
+    // None when the slab is exhausted: the population claiming slots
+    // (every postmaster child, dead-end connections included) is set by
+    // network peers, so exhaustion must be a refusable condition at
+    // InitPostmasterChild, not an assert on the child thread.
+    fn try_allocate_slot() -> Option<usize> {
         let recycled = SLOT_FREE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .pop();
-        let idx = recycled.unwrap_or_else(|| {
-            let mut next = SLOT_NEXT.lock().unwrap_or_else(|e| e.into_inner());
-            let idx = *next;
-            assert!(idx < WAITER_CAP, "waiter slot slab exhausted");
-            *next += 1;
-            idx
-        });
+        let idx = match recycled {
+            Some(i) => i,
+            None => {
+                let mut next = SLOT_NEXT.lock().unwrap_or_else(|e| e.into_inner());
+                let idx = *next;
+                if idx >= WAITER_CAP {
+                    return None;
+                }
+                *next += 1;
+                idx
+            }
+        };
         slot(idx).issue_token();
-        idx
+        Some(idx)
+    }
+
+    fn allocate_slot() -> usize {
+        try_allocate_slot().expect("waiter slot slab exhausted")
     }
 
     /// This thread's waiter slot, created on first use.
     pub(super) fn current_slot() -> usize {
+        try_current_slot().expect("waiter slot slab exhausted")
+    }
+
+    pub(super) fn try_current_slot() -> Option<usize> {
         CURRENT.with(|c| {
             let mut c = c.borrow_mut();
             if let Some(g) = c.as_ref() {
-                return g.slot;
+                return Some(g.slot);
             }
-            let idx = allocate_slot();
+            let idx = try_allocate_slot()?;
             *c = Some(WaiterGuard { slot: idx });
-            idx
+            Some(idx)
         })
     }
 
@@ -590,7 +607,7 @@ mod global {
 
     #[cfg(not(target_family = "wasm"))]
     pub fn ensure_wake_pipe() -> Result<i32, i32> {
-        let idx = current_slot();
+        let idx = try_current_slot().ok_or(libc::EAGAIN)?;
         let s = slot(idx);
         let mut g = s.lock();
         if g.wake_rfd >= 0 {

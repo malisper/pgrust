@@ -681,6 +681,15 @@ fn copy_block_by_range(
                 0,
             )
         };
+        if wb == 0 {
+            // reconstruct.c: copy_file_range returned 0 before BLCKSZ bytes —
+            // the source is truncated; spinning here would never end.
+            pg_fatal!(
+                "could not copy file range from \"{}\" to \"{}\": source file is truncated",
+                input_filename.display(),
+                output_filename.display()
+            );
+        }
         if wb < 0 {
             let e = std::io::Error::last_os_error();
             pg_fatal!(

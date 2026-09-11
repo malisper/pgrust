@@ -496,10 +496,20 @@ fn yystype_from(v: CoreYYSTYPE<'_>) -> YYSTYPE<'_> {
         CoreVal::Ival(i) => YYSTYPE::Ival(i),
         CoreVal::Str(bytes) => {
             // Input is &str and the scanner's utf8_pin rejects escape-built
-            // literals no &str can carry, so values are valid UTF-8.
-            debug_assert!(core::str::from_utf8(bytes).is_ok());
-            // SAFETY: see above.
-            YYSTYPE::Str(unsafe { core::str::from_utf8_unchecked(bytes) })
+            // literals no &str can carry, so values are valid UTF-8 — except
+            // a SQL_ASCII identifier clipped inside a multibyte sequence,
+            // which is refused like the scanner's own non-ASCII arm instead
+            // of minting a &str that violates the invariant.
+            match core::str::from_utf8(bytes) {
+                Ok(s) => YYSTYPE::Str(s),
+                Err(_) => std::panic::panic_any(Box::new(
+                    ::types_error::PgError::error(
+                        "query strings with non-ASCII characters are not supported yet in databases with encoding \"SQL_ASCII\"",
+                    )
+                    .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_hint("Use a database with encoding \"UTF8\"."),
+                )),
+            }
         }
         CoreVal::Keyword(kw) => YYSTYPE::Keyword(kw),
     }

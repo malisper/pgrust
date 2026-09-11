@@ -14,15 +14,24 @@ use crate::run::PlannerRun;
 const DBL_MAX: Cost = f64::MAX;
 
 // Each tour gets string_length + 1 genes (C's +1 slack).
-pub(super) fn alloc_pool(pool_size: i32, string_length: i32) -> Pool {
-    let mut data = Vec::with_capacity(pool_size as usize);
-    for _ in 0..pool_size {
-        data.push(Chromosome {
-            string: vec![0 as super::Gene; (string_length + 1) as usize],
-            worth: 0.0,
-        });
+pub(super) fn alloc_pool(pool_size: i32, string_length: i32) -> PgResult<Pool> {
+    // geqo_pool.c alloc_pool: palloc(pool_size * sizeof(Chromosome)) then
+    // one palloc per tour, each admitted under MaxAllocSize (geqo_pool_size
+    // is USERSET up to i32::MAX).
+    let n = pool_size.max(0) as usize;
+    let genes = (string_length + 1) as usize;
+    let bytes = n.saturating_mul(core::mem::size_of::<Chromosome>());
+    ::mcx::check_alloc_size(bytes)?;
+    ::mcx::check_alloc_size(n.saturating_mul(genes).saturating_mul(core::mem::size_of::<super::Gene>()))?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(n).map_err(|_| ::mcx::oom_named("GEQO pool", bytes))?;
+    for _ in 0..n {
+        let mut string = Vec::new();
+        string.try_reserve_exact(genes).map_err(|_| ::mcx::oom_named("GEQO pool", genes))?;
+        string.resize(genes, 0 as super::Gene);
+        data.push(Chromosome { string, worth: 0.0 });
     }
-    Pool { data, size: pool_size, string_length }
+    Ok(Pool { data, size: pool_size, string_length })
 }
 
 pub(super) fn alloc_chromo(string_length: i32) -> Chromosome {

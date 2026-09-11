@@ -123,8 +123,25 @@ pub fn SetDatabasePath(path: &str) {
 const SERIALIZED_HEADER_LEN: usize = 8;
 
 pub fn set_client_connection_info(authn_id: Option<&str>, auth_method: UserAuth) {
-    CLIENT_AUTHN_ID.set(authn_id.map(|s| &*String::from(s).leak()));
+    CLIENT_AUTHN_ID.set(authn_id.map(intern_static));
     CLIENT_AUTH_METHOD.set(auth_method);
+}
+
+// C's per-backend statics die with the process; these thread-locals hand
+// out &'static str on process-lifetime worker threads that re-run the
+// initialization per task, so the storage is interned per distinct value
+// (bounded by the number of distinct identities) instead of leaked per call.
+static INTERNED: pgsync::Mutex<std::collections::BTreeSet<&'static str>> =
+    pgsync::Mutex::new(std::collections::BTreeSet::new());
+
+pub(crate) fn intern_static(s: &str) -> &'static str {
+    let mut set = INTERNED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = set.get(s) {
+        return existing;
+    }
+    let leaked: &'static str = String::from(s).leak();
+    set.insert(leaked);
+    leaked
 }
 
 pub fn client_connection_info() -> (Option<&'static str>, UserAuth) {

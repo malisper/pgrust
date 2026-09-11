@@ -2448,7 +2448,7 @@ pub(crate) fn process_implied_equality<'mcx>(
     // C copyObject's both items; the arena share is our copy model.
     let mut clause = crate::like_support::make_opclause(mcx, opno, item1, item2, collation)?;
     if both_const {
-        clause = clauses::fold::eval_const_expressions(mcx, clause)?;
+        clause = crate::setrefs::fold_with_deps(run, clause)?;
         if let Some(c) = clause.as_const() {
             debug_assert_eq!(c.consttype, 16);
             if !c.constisnull && c.constvalue.as_bool() {

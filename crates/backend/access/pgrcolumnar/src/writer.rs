@@ -641,6 +641,8 @@ pub struct CbWriter {
     coltypes: Vec<ColType>,
     builders: Vec<ColBuilder>,
     nbuf: usize,
+    // PART_WRITERS claim released by Drop (InvalidOid = unclaimed, tests).
+    lock_oid: Oid,
     // Committed footer chain state.
     write_off: u64,
     rgs: Vec<FooterRg>,
@@ -732,7 +734,49 @@ pub fn coltypes_of(rel: &::types_rel::Relation<'_>) -> PgResult<Vec<ColType>> {
         .collect()
 }
 
+/// Buffered bytes at which a row group seals before RG_ROWS.
+const RG_BYTE_BUDGET: usize = 256 << 20;
+
+// One part file, one publisher: writers derive their append offset from the
+// committed footer at open and pwrite at that private offset, so two
+// concurrent writers on the same relation would overlay each other's row
+// groups and the last footer would drop the other's. The claim lives for the
+// writer's lifetime (released by Drop on publish, eviction or clear).
+static PART_WRITERS: pgsync::Mutex<std::collections::BTreeSet<Oid>> =
+    pgsync::Mutex::new(std::collections::BTreeSet::new());
+
+struct ReleaseOnError(Oid);
+
+impl Drop for ReleaseOnError {
+    fn drop(&mut self) {
+        PART_WRITERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+fn claim_part_writer(oid: Oid) -> PgResult<()> {
+    let mut busy = PART_WRITERS.lock().unwrap_or_else(|e| e.into_inner());
+    if !busy.insert(oid) {
+        return Err(Box::new(
+            ::types_error::PgError::error(format!(
+                "could not obtain the pgrcolumnar part writer of relation {oid}: another session is inserting into it"
+            ))
+            .with_sqlstate(::types_error::ERRCODE_LOCK_NOT_AVAILABLE),
+        ));
+    }
+    Ok(())
+}
+
+impl Drop for CbWriter {
+    fn drop(&mut self) {
+        if self.lock_oid != ::types_core::InvalidOid {
+            PART_WRITERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.lock_oid);
+        }
+    }
+}
+
 fn open_writer(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
+    claim_part_writer(rel.rd_id)?;
+    let released_on_error = ReleaseOnError(rel.rd_id);
     let coltypes = coltypes_of(rel)?;
     let opts = writer_opts_of(rel, &coltypes)?;
     let path = crate::rel_main_path(rel);
@@ -764,6 +808,8 @@ fn open_writer(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
     );
     let cid = xact_seams::get_current_command_id::call(false)?;
     let mut w = open_writer_inner(file, xid, cid, frozen_ok, coltypes, fingerprint, opts)?;
+    w.lock_oid = rel.rd_id;
+    std::mem::forget(released_on_error);
     if !w.opts.cluster_key.is_empty() || !w.opts.presort_key.is_empty() {
         // presort_key is only resolved when no cluster_key is declared
         // (apply_presort_env), so exactly one of the two is non-empty here.
@@ -818,6 +864,7 @@ fn open_writer_inner(
         coltypes,
         builders: Vec::new(),
         nbuf: 0,
+        lock_oid: ::types_core::InvalidOid,
         write_off: CB_HEADER_LEN,
         rgs: Vec::new(),
         fingerprint,
@@ -965,7 +1012,11 @@ impl CbWriter {
         )?;
         self.has_prev = true;
         self.nbuf += 1;
-        if self.nbuf == RG_ROWS {
+        // Row-count seals alone let wide text rows buffer without bound; a
+        // byte budget (checked every 64 rows) seals early instead.
+        if self.nbuf == RG_ROWS
+            || (self.nbuf & 63 == 0 && self.buffered_bytes() >= RG_BYTE_BUDGET)
+        {
             self.seal_rg()?;
         }
         Ok(())
@@ -1040,6 +1091,16 @@ impl CbWriter {
 
     /// pub for the test-support writer (`open_writer_at`).
     #[doc(hidden)]
+    fn buffered_bytes(&self) -> usize {
+        self.builders
+            .iter()
+            .map(|b| match b {
+                ColBuilder::Int(b) => b.vals.len() * 8,
+                ColBuilder::Text(b) => b.blob.len() + b.offs.len() * 8,
+            })
+            .sum()
+    }
+
     pub fn finish(&mut self) -> PgResult<()> {
         // Cluster-key drain: sort the buffered ingest and feed it through the
         // ordinary append path (NDV/sorted trackers and RG seals see rows in

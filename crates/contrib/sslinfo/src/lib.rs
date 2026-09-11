@@ -238,7 +238,10 @@ fn whole_dn(fcinfo: &mut Fcinfo, name: Option<Vec<u8>>) -> PgResult<Datum> {
         // C: `if (!*subject) PG_RETURN_NULL();`
         return null(fcinfo);
     };
-    let b = &name[..name.len().min(NAMEDATALEN - 1)];
+    // C strlcpy's byte cut can split a multibyte character; text must stay
+    // valid in the server encoding, so clip at a character boundary.
+    let n = mbutils::pg_mbcliplen(&name, name.len() as i32, (NAMEDATALEN - 1) as i32) as usize;
+    let b = &name[..n];
     text_datum(fcinfo.result_mcx(), b)
 }
 

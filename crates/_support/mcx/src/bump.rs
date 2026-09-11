@@ -342,6 +342,7 @@ mod tests {
             live_chunk_bytes: Cell::new(0),
             free_chunks: Cell::new(0),
             is_bump: true,
+            wholesale_reset: Cell::new(false),
             kind: "Bump",
             parent: None,
             children: RefCell::new(alloc::vec::Vec::new()),

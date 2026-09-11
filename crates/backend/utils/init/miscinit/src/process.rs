@@ -3,7 +3,10 @@ use std::cell::Cell;
 use elog::ereport;
 use init_small::globals as g;
 use types_core::INVALID_PROC_NUMBER;
-use types_error::{ErrorLocation, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
+use types_error::{
+    ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_TOO_MANY_CONNECTIONS,
+    FATAL,
+};
 use types_storage::latch::LatchHandle;
 
 use crate::{MISCINIT_C, PG_VERSION};
@@ -13,13 +16,18 @@ thread_local! {
     static LOCAL_LATCH: Cell<Option<LatchHandle>> = const { Cell::new(None) };
 }
 
-fn local_latch() -> LatchHandle {
+fn try_local_latch() -> Option<LatchHandle> {
     if let Some(h) = LOCAL_LATCH.get() {
-        return h;
+        return Some(h);
     }
-    let h = latch::allocate_local_latch();
+    let h = latch::try_allocate_local_latch()?;
     LOCAL_LATCH.set(Some(h));
-    h
+    Some(h)
+}
+
+// Post-init users: InitProcessLocalLatch already claimed the slot.
+fn local_latch() -> LatchHandle {
+    try_local_latch().expect("local latch claimed at InitProcessLocalLatch")
 }
 
 // fork's pid channel is a parameter; identity is never the thread id (M5).
@@ -65,7 +73,7 @@ pub fn InitStandaloneProcess(argv0: &str) -> PgResult<()> {
 
     /* Initialize process-local latch support */
     waiteventset::InitializeWaitEventSupport()?;
-    InitProcessLocalLatch();
+    InitProcessLocalLatch()?;
     latch::InitializeLatchWaitSet()?;
 
     libpq_pqsignal::pqinitmask();
@@ -120,7 +128,7 @@ pub fn InitPostmasterChild(my_proc_pid: i32) -> PgResult<()> {
     libpq_pqsignal::pqinitmask();
 
     waiteventset::InitializeWaitEventSupport()?;
-    InitProcessLocalLatch();
+    InitProcessLocalLatch()?;
     latch::InitializeLatchWaitSet()?;
 
     // wasm32: the wasi libc crate exposes no SIG* names; 3 is SIGQUIT in the
@@ -134,10 +142,19 @@ pub fn InitPostmasterChild(my_proc_pid: i32) -> PgResult<()> {
     Ok(())
 }
 
-pub fn InitProcessLocalLatch() {
-    let l = local_latch();
+pub fn InitProcessLocalLatch() -> PgResult<()> {
+    // Slab exhaustion (a flood of dead-end connections) is refused like
+    // "too many clients"; the child exits through the ordinary FATAL path.
+    let Some(l) = try_local_latch() else {
+        return Err(Box::new(
+            PgError::new(FATAL, "sorry, too many clients already")
+                .with_sqlstate(ERRCODE_TOO_MANY_CONNECTIONS)
+                .with_detail("The local latch slab is exhausted."),
+        ));
+    };
     g::SetMyLatch(Some(l));
     latch::InitLatch(l);
+    Ok(())
 }
 
 // C's LocalLatchData dies with the process; a backend THREAD must hand its

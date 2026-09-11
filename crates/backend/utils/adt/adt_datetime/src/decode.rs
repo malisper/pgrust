@@ -2613,8 +2613,13 @@ fn token_true_value_below_dblmin(token: &[u8], is_hex: bool) -> bool {
         msb <= -1023
     } else {
         // decimal: exact big-integer compare of D*10^exp against 2^-1022,
-        // i.e. D * 2^1022 vs 10^k (k = -exp). D has <= ~200 digits.
+        // i.e. D * 2^1022 vs 10^k (k = -exp). Leading zeros are not stored
+        // and D is cut to MAX_SIG significant digits: 2^-1022 has 715
+        // significant decimal digits, so digits beyond that cannot move the
+        // comparison, and the buffer stays bounded whatever the input length.
+        const MAX_SIG: usize = 1200;
         let mut digs: Vec<u32> = Vec::new();
+        let mut dropped = 0i64;
         let mut frac = 0i64;
         let mut in_frac = false;
         let mut exp10: i64 = 0;
@@ -2636,7 +2641,14 @@ fn token_true_value_below_dblmin(token: &[u8], is_hex: bool) -> bool {
                     break;
                 }
                 c => {
-                    digs.push((c - b'0') as u32);
+                    let g = (c - b'0') as u32;
+                    if digs.is_empty() && g == 0 {
+                        // leading zero: contributes to `frac` only
+                    } else if digs.len() < MAX_SIG {
+                        digs.push(g);
+                    } else {
+                        dropped += 1;
+                    }
                     if in_frac {
                         frac += 1;
                     }
@@ -2644,17 +2656,25 @@ fn token_true_value_below_dblmin(token: &[u8], is_hex: bool) -> bool {
             }
             i += 1;
         }
-        let exp = exp10 - frac;
-        if digs.iter().all(|&d| d == 0) {
+        let exp = exp10 - frac + dropped;
+        if digs.is_empty() {
             return false;
         }
         if exp >= 0 {
             return false; /* an integer >= 1 */
         }
-        let k = (-exp) as u32;
-        if k > 500 {
-            return true; /* way below (caller already knows it rounded to DBL_MIN, but harmless) */
+        // D has n digits: 10^(n-1) <= D < 10^n, so D*10^exp is below
+        // 10^-310 < DBL_MIN when n + exp <= -310 and at least 10^-307 >
+        // DBL_MIN when n - 1 + exp >= -307; only the band between needs the
+        // exact compare.
+        let n = digs.len() as i64;
+        if n + exp <= -310 {
+            return true;
         }
+        if n - 1 + exp >= -307 {
+            return false;
+        }
+        let k = (-exp) as u32;
         // bignum in u64 limbs (little-endian base 2^64)
         fn mul_small(a: &mut Vec<u64>, m: u64) {
             let mut carry: u128 = 0;
@@ -3029,5 +3049,28 @@ mod atoi_tests {
         ] {
             assert_eq!(atoi(input.as_bytes()), want, "atoi({input})");
         }
+    }
+}
+
+#[cfg(test)]
+mod dblmin_tests {
+    use super::token_true_value_below_dblmin;
+
+    #[test]
+    fn long_tokens_stay_bounded_and_exact() {
+        // DBL_MIN = 2.2250738585072013830902...e-308; this decimal is above it.
+        assert!(!token_true_value_below_dblmin(b"2.2250738585072014e-308", false));
+        assert!(token_true_value_below_dblmin(b"2.2250738585072013e-308", false));
+        // Leading zeros are not stored: 1e-308 and 3e-308 through 100k zeros.
+        let z = "0.".to_string() + &"0".repeat(100_000);
+        assert!(token_true_value_below_dblmin(format!("{z}1e+99693").as_bytes(), false));
+        assert!(!token_true_value_below_dblmin(format!("{z}3e+99693").as_bytes(), false));
+        // Significant digits past the cut cannot flip the verdict.
+        let ones = "1".repeat(5000);
+        // 5000 digits: 1.1...e-308 is below DBL_MIN, 3.3...e-308 is above.
+        assert!(token_true_value_below_dblmin(format!("{ones}e-5307").as_bytes(), false));
+        let threes = "3".repeat(5000);
+        assert!(!token_true_value_below_dblmin(format!("{threes}e-5307").as_bytes(), false));
+        assert!(!token_true_value_below_dblmin(b"0.000", false));
     }
 }

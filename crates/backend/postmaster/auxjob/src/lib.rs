@@ -465,7 +465,7 @@ impl<D: AuxDaemon> BgJob for AuxJob<D> {
                 // thread's (shared, allocate-once) local latch —
                 // SwitchToSharedLatch inside the aux prelude asserts it is
                 // current.
-                miscinit::InitProcessLocalLatch();
+                miscinit::InitProcessLocalLatch()?;
             }
         }
         g::SetMyPMChildSlot(self.child_slot);

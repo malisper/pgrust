@@ -107,20 +107,25 @@ fn local_latch_ext() -> (*mut Latch, usize) {
 }
 
 pub fn allocate_local_latch() -> LatchHandle {
+    try_allocate_local_latch().expect("local latch slab exhausted")
+}
+
+/// None when the slab is exhausted (a connection-time refusal for the
+/// caller, never an assert on the child thread).
+pub fn try_allocate_local_latch() -> Option<LatchHandle> {
     let recycled = LOCAL_LATCH_FREE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .pop();
     if let Some(id) = recycled {
-        return LatchHandle::new(id);
+        return Some(LatchHandle::new(id));
     }
-    let id = LOCAL_LATCH_NEXT.fetch_add(1, Relaxed);
     let (_, ext_len) = local_latch_ext();
-    assert!(
-        id < LOCAL_LATCH_CAP + ext_len,
-        "local latch slab exhausted ({LOCAL_LATCH_CAP} boot + {ext_len} configured slots)"
-    );
-    LatchHandle::new(id + 1)
+    let id = LOCAL_LATCH_NEXT.fetch_add(1, Relaxed);
+    if id >= LOCAL_LATCH_CAP + ext_len {
+        return None;
+    }
+    Some(LatchHandle::new(id + 1))
 }
 
 pub fn free_local_latch(latch: LatchHandle) {

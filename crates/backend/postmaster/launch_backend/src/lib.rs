@@ -209,6 +209,17 @@ fn pid_is_live(pid: pid_t) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .any(|(p, _)| *p == pid)
+        || RESERVED_PIDS.lock().unwrap_or_else(|e| e.into_inner()).contains(&pid)
+}
+
+// Populations that never enter CHILD_THREADS (rtgang, rtpool, bgjobs) still
+// hold their pids: every reservation is recorded here and released only by
+// the reaper/rekey paths, so a counter wrap can never alias a live thread.
+static RESERVED_PIDS: pgsync::Mutex<std::collections::BTreeSet<pid_t>> =
+    pgsync::Mutex::new(std::collections::BTreeSet::new());
+
+fn release_reserved_pid(pid: pid_t) {
+    RESERVED_PIDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&pid);
 }
 
 /// Reserve a synthetic child pid. Guarantees the returned value is (a)
@@ -269,6 +280,7 @@ fn reserve_child_pid() -> Option<pid_t> {
         if candidate == postmaster_pid || pid_is_live(candidate) {
             continue;
         }
+        RESERVED_PIDS.lock().unwrap_or_else(|e| e.into_inner()).insert(candidate);
         return Some(candidate);
     }
     None
@@ -298,6 +310,7 @@ pub fn join_announced_child(pid: pid_t) {
     let handle = {
         let mut t = CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(idx) = t.iter().position(|(p, _)| *p == pid) else { return };
+        release_reserved_pid(pid);
         t.swap_remove(idx).1
     };
     // NB-2 (permit-s2 review, closed at permit-s5): under the permit
@@ -1393,6 +1406,7 @@ pub mod wpool {
                         super::CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(i) = t.iter().position(|(p, _)| *p == thread_key) {
                         t.swap_remove(i);
+                        super::release_reserved_pid(thread_key);
                     }
                     break;
                 }
@@ -1605,6 +1619,7 @@ pub mod wpool {
         let mut t = super::CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = t.iter_mut().find(|(p, _)| *p == old_pid) {
             entry.0 = new_pid;
+            super::release_reserved_pid(old_pid);
         }
     }
 }

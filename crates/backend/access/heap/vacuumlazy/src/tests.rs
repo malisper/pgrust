@@ -479,7 +479,7 @@ fn lazy_scan_noprune_counts_and_collects() {
     assert_eq!(vr.folds.counters.missed_dead_pages, 1);
     assert_eq!(vr.folds.counters.lpdead_items, 1);
     assert_eq!(vr.folds.counters.lpdead_item_pages, 1);
-    let dead_tids = collect_dead_tids(&vr);
+    let dead_tids = collect_dead_tids(&vr).unwrap();
     assert_eq!(dead_tids.len(), 1);
     assert_eq!(::types_tuple::ItemPointerGetBlockNumberNoCheck(&dead_tids[0]), 3);
     assert_eq!(::types_tuple::ItemPointerGetOffsetNumberNoCheck(&dead_tids[0]), 2);

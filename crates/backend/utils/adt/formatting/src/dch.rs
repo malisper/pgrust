@@ -166,7 +166,13 @@ pub fn dch_to_char<'mcx>(
 ) -> PgResult<Vec<u8>> {
     // C: cache localized days and months (formatting.c:2529).
     let localized = pg_locale::cache_locale_time(mcx)?;
+    // formatting.c:4075 palloc(fmt_len * DCH_MAX_ITEM_SIZ + 1): every node
+    // emits at most DCH_MAX_ITEM_SIZ bytes, so the whole output is admitted
+    // (or refused with C's error) before rendering.
+    let budget = nodes.len().saturating_mul(DCH_MAX_ITEM_SIZ).saturating_add(1);
+    ::mcx::check_alloc_size(budget)?;
     let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(budget).map_err(|_| mcx.oom(budget))?;
     let tm = &in_.tm;
 
     for n in nodes.iter() {

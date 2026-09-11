@@ -18,6 +18,8 @@ name = "sqe"
 path = "src/lib.rs"
 
 [dependencies]
+stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
+pgsync = { path = "../../../_support/pgsync" }
 # [heap rung 3] entry_ref on the byte-keyed grouped arm (one hash+probe
 # per row; std HashMap has no borrowed-key entry) — version pinned to the
 # workspace lock.

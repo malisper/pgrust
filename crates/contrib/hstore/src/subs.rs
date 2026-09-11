@@ -60,7 +60,7 @@ pub(crate) fn assign<'m>(
         let hs = hstore_view(mcx, source.value)?;
         let one = build_hstore(&[p]);
         let s2 = HstoreView::from_vardata(&one[4..]);
-        build_hstore(&crate::concat_pairs(&hs, &s2))
+        build_hstore(&crate::concat_pairs(&hs, &s2)?)
     };
     let mut out: mcx::PgVec<'m, u8> = mcx::vec_with_capacity_in(mcx, img.len())?;
     mcx::vec_append_bytes(&mut out, &img)?;

@@ -617,7 +617,7 @@ fn install_fixtures() {
     }
     if !THREAD_UP.get() {
         init_small::globals::SetMyProcPid(778);
-        miscinit::InitProcessLocalLatch();
+        miscinit::InitProcessLocalLatch().expect("local latch");
         lmgr_proc::InitProcess(types_core::BackendType::Backend).expect("InitProcess");
         procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).expect("ProcArrayAdd");
         portalmem::EnablePortalManager();

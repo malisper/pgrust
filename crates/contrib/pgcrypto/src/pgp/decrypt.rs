@@ -181,13 +181,9 @@ fn decrypt_data_packet(
         md.update(&plain[..mdc_off + 2]);
         let want = md.finish();
         if want != plain[mdc_off + 2..mdc_off + 2 + MDC_DIGEST_LEN] {
-            if !corrupt_prefix {
-                // C mdc_finish/mdcbuf_finish return the generic
-                // PXE_PGP_CORRUPT_DATA ("Wrong key or corrupt data") on MDC
-                // mismatch. Using a distinct message here would reinstate the
-                // Mister-Zuccherato CFB quick-check oracle.
-                return Err(CORRUPT_DATA.to_string());
-            }
+            // Upstream keeps the work independent of the quick-check bit: the
+            // inner stream is parsed either way and the generic
+            // PXE_PGP_CORRUPT_DATA surfaces at finish (Mister-Zuccherato).
             ctx.pending_bad_mdc = true;
             return Ok((inner, true));
         }

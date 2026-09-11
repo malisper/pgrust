@@ -963,7 +963,7 @@ fn enter_backend_world(actor: u32) {
     // nothing (found the hard way: 18/18 sync acks lost at the first
     // quiescence cut).
     transam_xlog::stamp_wal_sync_method(transam_xlog::WAL_SYNC_METHOD_FDATASYNC);
-    miscinit::InitProcessLocalLatch();
+    miscinit::InitProcessLocalLatch().expect("local latch");
     lmgr_proc::InitProcess(BackendType::Backend).unwrap();
     aio_core::pgaio_init_backend().expect("pgaio_init_backend");
     procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
@@ -1651,7 +1651,7 @@ fn flushsim_recover_child() {
     install_real();
     // Recovery + the verifier walk run on this thread: give it a PGPROC
     // (buffer pins are proc-numbered).
-    miscinit::InitProcessLocalLatch();
+    miscinit::InitProcessLocalLatch().expect("local latch");
     lmgr_proc::InitProcess(BackendType::Backend).unwrap();
     aio_core::pgaio_init_backend().expect("pgaio_init_backend");
     procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();

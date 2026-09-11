@@ -184,7 +184,13 @@ pub fn parse_format(
     flags: u32,
     num: Option<&mut NUMDesc>,
 ) -> PgResult<Vec<FormatNode>> {
+    // formatting.c parse_format: palloc((len + 1) * sizeof(FormatNode)),
+    // admitted under MaxAllocSize before any node is built.
+    let n = str.len().saturating_add(1);
+    let bytes = n.saturating_mul(core::mem::size_of::<FormatNode>());
+    ::mcx::check_alloc_size(bytes)?;
     let mut nodes: Vec<FormatNode> = Vec::new();
+    nodes.try_reserve_exact(n).map_err(|_| ::mcx::oom_named("parse_format", bytes))?;
     let mut num = num;
     let mut pos = 0usize;
 

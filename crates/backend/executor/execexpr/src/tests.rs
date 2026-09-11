@@ -3954,7 +3954,7 @@ fn jit_parity_fuzz() {
                 .unwrap()
                 .unwrap();
             interp.arm_result_mcx(mcx);
-            crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR);
+            crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR, 0);
             let mut jit = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
                 .unwrap()
                 .unwrap();
@@ -4055,7 +4055,7 @@ fn jit_parity_qual_lists() {
             let mut interp = exec_init_qual(mcx, &qual, ParamBind::NONE)
                 .unwrap()
                 .unwrap();
-            crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR);
+            crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR, 0);
             let mut jit = exec_init_qual(mcx, &qual, ParamBind::NONE)
                 .unwrap()
                 .unwrap();
@@ -5159,7 +5159,7 @@ fn jit_parity_censusgaps_inline_ops() {
                 .unwrap()
                 .unwrap();
             interp.arm_result_mcx(mcx);
-            crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR);
+            crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR, 0);
             let mut jit = exec_init_expr(mcx, Some(expr), ParamBind::NONE)
                 .unwrap()
                 .unwrap();

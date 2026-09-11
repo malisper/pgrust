@@ -253,7 +253,12 @@ fn calc_multirangesel<'mcx>(
             | OID_MULTIRANGE_CONTAINS_MULTIRANGE_OP
             | OID_MULTIRANGE_GREATER_EQUAL_OP => 1.0,
             OID_MULTIRANGE_GREATER_OP => 1.0 - empty_frac as f64,
-            _ => panic!("unexpected operator {operator}"),
+            // multirangetypes_selfuncs.c:402 elog(ERROR), a catchable XX000.
+            _ => {
+                return Err(Box::new(types_error::PgError::error(format!(
+                    "unexpected operator {operator}"
+                ))))
+            }
         };
     } else {
         let mut hist_selec = calc_hist_selectivity(run, ctx, vardata, constval, operator)?;
@@ -424,7 +429,12 @@ fn calc_hist_selectivity<'mcx>(
                 )?
             }
         }
-        _ => panic!("unknown multirange operator {operator}"),
+        // multirangetypes_selfuncs.c:690 elog(ERROR), a catchable XX000.
+        _ => {
+            return Err(Box::new(types_error::PgError::error(format!(
+                "unknown multirange operator {operator}"
+            ))))
+        }
     };
 
     Ok(hist_selec)

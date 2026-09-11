@@ -34,14 +34,19 @@ pub struct PartitionDescData {
     pub last_found_datum_index: Cell<i32>,
     pub last_found_part_index: Cell<i32>,
     pub last_found_count: Cell<i32>,
+    // C rd_pdcxt: bounds, datum copies and oid arrays die with the
+    // descriptor. Declared last so the arena outlives the fields' drops.
+    _ctx: std::boxed::Box<MemoryContext>,
 }
 
 struct PartDescState {
+    root: &'static MemoryContext,
     mcx: Mcx<'static>,
     descs: PgHashMap<'static, Oid, Rc<PartitionDescData>>,
     descs_nodetached: PgHashMap<'static, Oid, (Rc<PartitionDescData>, TransactionId)>,
-    // C rd_partcheck: cached partition constraint per partition relid.
-    quals: PgHashMap<'static, Oid, NodeList<'static>>,
+    // C rd_partcheck + rd_partcheckcxt: cached partition constraint per
+    // partition relid, owned by its own context.
+    quals: PgHashMap<'static, Oid, (NodeList<'static>, std::boxed::Box<MemoryContext>)>,
     callbacks_registered: bool,
 }
 
@@ -53,8 +58,10 @@ fn with_state<R>(f: impl FnOnce(&mut PartDescState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("PartDescContext").mcx();
+            let root = ::mcx::session_root("PartDescContext");
+            let mcx = root.mcx();
             ManuallyDrop::new(PartDescState {
+                root,
                 mcx,
                 descs: PgHashMap::with_capacity_in(8, mcx),
                 descs_nodetached: PgHashMap::with_capacity_in(8, mcx),
@@ -322,7 +329,10 @@ fn RelationBuildPartitionDesc(
     let nparts = inhoids.len();
     let oids = inhoids;
 
-    let cmcx = with_state(|st| st.mcx);
+    let ctx = std::boxed::Box::new(with_state(|st| st.root).new_child("partition descriptor"));
+    // SAFETY: 'static stands for "as long as the Box in _ctx lives"; the box
+    // pins the context address across the move into the descriptor.
+    let cmcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
     let desc = if nparts > 0 {
         let key = partcache::RelationGetPartitionKey(rel)?;
         let (boundinfo, mapping) = partbounds::partition_bounds_create(cmcx, &boundspecs, &key)?;
@@ -344,6 +354,7 @@ fn RelationBuildPartitionDesc(
             last_found_datum_index: Cell::new(-1),
             last_found_part_index: Cell::new(-1),
             last_found_count: Cell::new(0),
+            _ctx: ctx,
         }
     } else {
         PartitionDescData {
@@ -355,6 +366,7 @@ fn RelationBuildPartitionDesc(
             last_found_datum_index: Cell::new(-1),
             last_found_part_index: Cell::new(-1),
             last_found_count: Cell::new(0),
+            _ctx: ctx,
         }
     };
 
@@ -425,23 +437,25 @@ pub fn RelationGetPartitionQual<'mcx>(
     if !rel.rd_rel.relispartition {
         return Ok(NodeList::nil());
     }
-    let q = generate_partition_qual(rel)?;
-    // SAFETY: the cached qual lives in the leaked (never-freed)
-    // PartDescContext, so shortening 'static to 'mcx only narrows the view.
-    let q = unsafe { core::mem::transmute::<NodeList<'static>, NodeList<'mcx>>(q) };
-    // C copyObject at every exit (partcache.c:352-353, 420): callers scribble
-    // varnos in place (plancat's ChangeVarNodes); a shallow clone lets that
-    // corrupt the cache, and map_partition_varattnos then skips the
-    // non-varno-1 ancestor Vars of every descendant's qual generated later.
-    rewrite_manip::copy_node_list(mcx, &q)
+    generate_partition_qual(mcx, rel)
 }
 
-fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'static>> {
+// C copyObject at every exit (partcache.c:352-353, 420): callers scribble
+// varnos in place (plancat's ChangeVarNodes); a shallow clone lets that
+// corrupt the cache, and map_partition_varattnos then skips the non-varno-1
+// ancestor Vars of every descendant's qual generated later.
+fn copy_cached_qual<'mcx>(mcx: Mcx<'mcx>, q: &NodeList<'static>) -> PgResult<NodeList<'mcx>> {
+    // SAFETY: the cached qual lives in its entry's context, alive for the
+    // duration of this deep copy; 'static -> 'mcx only narrows the view.
+    let q: &NodeList<'mcx> = unsafe { core::mem::transmute::<&NodeList<'static>, &NodeList<'mcx>>(q) };
+    rewrite_manip::copy_node_list(mcx, q)
+}
+
+fn generate_partition_qual<'mcx, 'r>(mcx: Mcx<'mcx>, rel: &Relation<'r>) -> PgResult<NodeList<'mcx>> {
     // C partcache.c:349: recurses up the partition parent chain.
     stack_depth_core::check_stack_depth()?;
     let relid = rel.rd_id;
-    let cmcx0 = with_state(|st| st.mcx);
-    if let Some(q) = with_state(|st| st.quals.get(&relid).map(|q| q.clone_in(cmcx0))) {
+    if let Some(q) = with_state(|st| st.quals.get(&relid).map(|(q, _)| copy_cached_qual(mcx, q))) {
         return q;
     }
     if !with_state(|st| st.callbacks_registered) {
@@ -451,7 +465,11 @@ fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'sta
         )?;
         with_state(|st| st.callbacks_registered = true);
     }
-    let cmcx = with_state(|st| st.mcx);
+    // partcache.c:368 rd_partcheckcxt: the qual and its build scratch are
+    // owned by a context freed with the cache entry.
+    let qctx = std::boxed::Box::new(with_state(|st| st.root).new_child("partition constraint"));
+    // SAFETY: as for the descriptor context above.
+    let cmcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(qctx.mcx()) };
     let parent_oid = pg_inherits::get_partition_parent(cmcx, relid, true)?;
     // C relation_open (index partitions reach here too); their relpartbound
     // is NULL and their parent is a partitioned index with no partition key.
@@ -473,7 +491,7 @@ fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'sta
     };
     let mut result = NodeList::nil();
     if parent.rd_rel.relispartition {
-        for q in generate_partition_qual(&parent)?.iter() {
+        for q in generate_partition_qual(cmcx, &parent)?.iter() {
             result.lappend(cmcx, q)?;
         }
     }
@@ -482,8 +500,8 @@ fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'sta
     }
     let result = partbounds::map_partition_varattnos(cmcx, result, 1, rel, &parent)?;
     parent.close(types_rel::NoLock)?;
-    let out = result.clone_in(cmcx)?;
-    with_state(|st| st.quals.insert(relid, result));
+    let out = copy_cached_qual(mcx, &result)?;
+    with_state(|st| st.quals.insert(relid, (result, qctx)));
     Ok(out)
 }
 

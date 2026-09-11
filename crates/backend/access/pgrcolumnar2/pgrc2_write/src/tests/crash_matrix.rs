@@ -94,7 +94,7 @@ fn publish_window_crash_sweep() {
         let probe = Probe::new(TxnVerdict::Aborted).set(100, TxnVerdict::Committed);
 
         // OLD state exactly: gen 1 effective, acked bytes intact.
-        let eff = effective_manifest(&mut s.vfs, DIR, &probe)
+        let eff = effective_manifest(&mut s.vfs, DIR, &probe, None)
             .expect("recovery must never error")
             .expect("gen 1 must stay effective");
         assert_eq!(eff.header.gen, 1, "crash at op {k}");
@@ -149,7 +149,7 @@ fn publish_window_crash_sweep() {
         append_int8_rows(&mut w3, &mut s.vfs, &mut kit, 500, |i| Some(i as i64 * 5));
         let out = finish_and_publish(&mut w3, &mut s.vfs, &mut kit, &probe_retry);
         assert_eq!(out.gen, 2, "retry after crash at op {k}");
-        let eff2 = effective_manifest(&mut s.vfs, DIR, &probe_retry)
+        let eff2 = effective_manifest(&mut s.vfs, DIR, &probe_retry, None)
             .expect("eff")
             .expect("gen 2 effective");
         assert_eq!(eff2.parts.iter().map(|p| p.rows).sum::<u64>(), 1500);
@@ -167,7 +167,7 @@ fn acked_publish_survives_crash() {
     let probe = Probe::new(TxnVerdict::Aborted)
         .set(100, TxnVerdict::Committed)
         .set(200, TxnVerdict::Committed); // 200's commit record made it
-    let eff = effective_manifest(&mut s.vfs, DIR, &probe)
+    let eff = effective_manifest(&mut s.vfs, DIR, &probe, None)
         .expect("eff")
         .expect("gen 2 effective");
     assert_eq!(eff.header.gen, 2);
@@ -206,7 +206,7 @@ fn uncommitted_completed_publish_is_invisible_and_residue_reclaims() {
             .expect("stat"),
         "dead gen-2 residue should be durable in this window"
     );
-    let eff = effective_manifest(&mut s.vfs, DIR, &probe)
+    let eff = effective_manifest(&mut s.vfs, DIR, &probe, None)
         .expect("eff")
         .expect("gen 1 effective");
     assert_eq!(eff.header.gen, 1, "aborted publish structurally invisible");
@@ -223,7 +223,7 @@ fn uncommitted_completed_publish_is_invisible_and_residue_reclaims() {
     let out = finish_and_publish(&mut w3, &mut s.vfs, &mut kit, &probe_retry);
     assert_eq!(out.gen, 2);
     assert_eq!(out.part_nos, vec![1]);
-    let eff2 = effective_manifest(&mut s.vfs, DIR, &probe_retry)
+    let eff2 = effective_manifest(&mut s.vfs, DIR, &probe_retry, None)
         .expect("eff")
         .expect("gen 2");
     assert_eq!(eff2.header.publisher_fxid, 300, "residue reclaimed");

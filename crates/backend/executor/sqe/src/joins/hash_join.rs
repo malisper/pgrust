@@ -313,7 +313,9 @@ fn pred_select(
 /// of its column (3VL: a NULL row is never TRUE).
 fn case_row(t: &CaseTest, face: Face, w: u64, ok: bool) -> bool {
     match t {
-        CaseTest::Word(pt) | CaseTest::Packed(pt, _) => pt.eval_v(face.word_key(w), ok),
+        // The face embed may dereference the word (PackedNumeric): NULL rows
+        // never reach it.
+        CaseTest::Word(pt) | CaseTest::Packed(pt, _) => ok && pt.eval_v(face.word_key(w), true),
         CaseTest::Bytes(vt) => ok && vt.eval(unsafe { varlena_payload(w) }),
         CaseTest::InWords(ws) => ok && ws.binary_search(&face.word_key(w)).is_ok(),
         CaseTest::And(ts) => ts.iter().all(|t| case_row(t, face, w, ok)),
@@ -1285,6 +1287,9 @@ trait Sink: Send {
     fn unit_end(&mut self, _cx: &RowCx<'_, '_>) {}
 }
 
+/// Joined rows one sink may materialize before the run is refused.
+const ROW_OUTPUT_BUDGET: u64 = 1 << 26;
+
 /// Row goal: buffer joined rows per unit (concatenated in unit order).
 /// `row` only stages (survivor, entry) triples; `unit_end` emits
 /// COLUMN-MAJOR — one OutRef/OutB match per (granule, out column), then
@@ -1296,6 +1301,11 @@ struct RowEmit<'a> {
     /// Staged (si, part, entry) — `part == NO_ENTRY` is the entry-less
     /// emit (LEFT null-extension, SEMI/ANTI).
     pend: Vec<(u32, u32, u32)>,
+    /// Joined rows staged by this sink; past ROW_OUTPUT_BUDGET the sink
+    /// stops staging and the run is refused (the build/pair budgets do not
+    /// cover a keyed join's probe-side output).
+    staged: u64,
+    overflow: bool,
 }
 
 impl Sink for RowEmit<'_> {
@@ -1304,6 +1314,11 @@ impl Sink for RowEmit<'_> {
     }
 
     fn row(&mut self, _cx: &RowCx<'_, '_>, si: usize, entry: Option<(usize, usize)>) {
+        self.staged += 1;
+        if self.overflow || self.staged > ROW_OUTPUT_BUDGET {
+            self.overflow = true;
+            return;
+        }
         let (part, ei) = match entry {
             Some((part, e)) => (part as u32, e as u32),
             None => (NO_ENTRY, 0),
@@ -3142,7 +3157,15 @@ pub fn run_hash_join_flt(
         node,
         units: Vec::new(),
         pend: Vec::new(),
+        staged: 0,
+        overflow: false,
     })?;
+    if sinks.iter().any(|s| s.overflow) {
+        return Err(JoinRefuse::ProductExceedsBudget {
+            est_pairs: sinks.iter().map(|s| s.staged).sum(),
+            budget: ROW_OUTPUT_BUDGET,
+        });
+    }
     if sinks.is_empty() {
         return Ok(AnswerSet::empty(node.out_tys.clone()));
     }

@@ -139,7 +139,7 @@ fn full_ipci_bringup() -> &'static str {
     guc_tables::vars::remove_temp_files_after_crash.write(false);
 
     waiteventset::InitializeWaitEventSupport().unwrap();
-    miscinit::InitProcessLocalLatch();
+    miscinit::InitProcessLocalLatch().expect("local latch");
     dir
 }
 

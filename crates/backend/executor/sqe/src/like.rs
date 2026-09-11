@@ -116,6 +116,9 @@ fn match_text(mut t: &[u8], mut p: &[u8]) -> i8 {
     if p.len() == 1 && p[0] == b'%' {
         return LIKE_TRUE;
     }
+    // like_match.c:89 check_stack_depth(): one recursion per '%' group; the
+    // ERROR unwinds through the kernel to the statement boundary.
+    ::stack_depth_core::check_stack_depth_or_panic();
     while !t.is_empty() && !p.is_empty() {
         if p[0] == b'%' {
             // Collapse the wildcard run: N `_`s and one-or-more `%`s ==

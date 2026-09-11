@@ -62,19 +62,27 @@ pub fn dense_int_entrylen(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
     }
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    static PREP: OnceLock<Mutex<HashMap<u32, (u64, Arc<Prep>)>>> = OnceLock::new();
+    static PREP: OnceLock<Mutex<HashMap<(crate::bank::BankIdent, u32), (u64, Arc<Prep>)>>> =
+        OnceLock::new();
     // [ruling] per-query-run: a generation bump (clear_prep) invalidates.
     let gen = PREP_GEN.load(std::sync::atomic::Ordering::Relaxed);
     let prep = {
         let memo = PREP.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut m = memo.lock().unwrap();
-        // [persist-rehome] eager purge: stale-generation entries used to
-        // linger until their own q was re-hit (an unbounded leak across
-        // queries); the per-query-run ruling now evicts them all here.
-        m.retain(|_, e| e.0 == gen);
-        m.entry(node.q)
-            .or_insert_with(|| {
-                (gen, {
+        // The lock is never held across the cancellable pool run below: an
+        // unwind there would poison this process-global memo for every
+        // later query of the shape.
+        let hit = {
+            let mut m = memo.lock().unwrap_or_else(|e| e.into_inner());
+            // [persist-rehome] eager purge: stale-generation entries used to
+            // linger until their own q was re-hit (an unbounded leak across
+            // queries); the per-query-run ruling now evicts them all here.
+            m.retain(|_, e| e.0 == gen);
+            m.get(&(bank.ident(), node.q)).map(|e| e.1.clone())
+        };
+        match hit {
+            Some(p) => p,
+            None => {
+                let built = {
                 let lens_states = pool.run(
                     bank.parts.len(),
                     |_| Vec::new(),
@@ -113,10 +121,11 @@ pub fn dense_int_entrylen(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                     })
                     .collect();
                 Arc::new(Prep { lens, zc, dlo, dn })
-                })
-            })
-            .1
-            .clone()
+                };
+                let mut m = memo.lock().unwrap_or_else(|e| e.into_inner());
+                m.entry((bank.ident(), node.q)).or_insert_with(|| (gen, built)).1.clone()
+            }
+        }
     };
     let (dlo, dn) = (prep.dlo, prep.dn);
     assert!(dn != 0, "dense_int code_agg needs stats-elected dense bounds");

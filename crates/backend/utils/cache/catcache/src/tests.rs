@@ -436,9 +436,17 @@ fn l2_shared_entry_survives_l1_eviction_while_pinned_elsewhere() {
 #[test]
 fn payload_alloc_failure_is_a_catchable_error() {
     let cx = mcx::MemoryContext::new("t");
-    // Over C's MaxAllocSize: the allocator refuses it deterministically.
-    let err = crate::payload_alloc(cx.mcx(), 1usize << 31).err().expect("must not panic");
-    assert!(err.message().contains("out of memory"), "{}", err.message());
+    // Over C's MaxAllocSize: the allocator refuses it deterministically with
+    // mcxt.c's ERROR (an unwind recovered at the statement boundary).
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::payload_alloc(cx.mcx(), 1usize << 31).map(|_| ())
+    }));
+    let payload = r.expect_err("over-ceiling request must unwind");
+    let msg = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()).unwrap_or_default());
+    assert!(msg.contains("invalid memory alloc request size"), "{msg}");
 }
 
 // C SearchCatCacheMiss copies the caller's raw NAME datum into the scan key

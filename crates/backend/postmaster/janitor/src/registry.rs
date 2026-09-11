@@ -334,7 +334,7 @@ struct RegistryState {
     /// caller's raw argument: builtins.rs resolves before pinning, because a
     /// longer-than-datname argument would find the database through the
     /// truncating scan key yet never match the reap loop's comparison.
-    pins: Vec<String>,
+    pins: Vec<(String, Oid)>,
     /// D2 mint requests (bounded by `ensure_capacity()`).
     ensures: Vec<EnsureEntry>,
     next_ensure_gen: u64,
@@ -452,10 +452,28 @@ fn with_registry<R>(f: impl FnOnce(&mut RegistryState) -> R) -> R {
 /// is honored up to the final pre-drop re-check; a pin that lands after the
 /// janitor has already begun dropping that database cannot save it. Callers
 /// must pin BEFORE abandoning a database they want kept.
+/// The pin table is one process-wide resource shared by every role: each
+/// pin records its owner and a role may hold at most MAX_PINS_PER_ROLE of
+/// them, so no single principal can exhaust the reap exemption for others.
+pub const MAX_PINS_PER_ROLE: usize = 8;
+
 pub fn pin(name: &str) -> PgResult<bool> {
+    let owner = miscinit::CurrentUserIdOrInvalid();
     with_registry(|r| {
-        if r.pins.iter().any(|p| p == name) {
+        if r.pins.iter().any(|(p, _)| p == name) {
             return Ok(false);
+        }
+        // InvalidOid = no session principal (startup, tests): the shared
+        // MAX_PINS bound alone applies.
+        if owner != InvalidOid
+            && r.pins.iter().filter(|(_, o)| *o == owner).count() >= MAX_PINS_PER_ROLE
+        {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "cannot pin database \"{name}\": this role already holds {MAX_PINS_PER_ROLE} pins"
+                ))
+                .with_sqlstate(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
+            ));
         }
         if r.pins.len() >= MAX_PINS {
             return Err(Box::new(
@@ -465,7 +483,7 @@ pub fn pin(name: &str) -> PgResult<bool> {
                 .with_sqlstate(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
             ));
         }
-        r.pins.push(name.to_string());
+        r.pins.push((name.to_string(), owner));
         Ok(true)
     })
 }
@@ -474,18 +492,18 @@ pub fn pin(name: &str) -> PgResult<bool> {
 pub fn unpin(name: &str) -> bool {
     with_registry(|r| {
         let before = r.pins.len();
-        r.pins.retain(|p| p != name);
+        r.pins.retain(|(p, _)| p != name);
         r.pins.len() != before
     })
 }
 
 pub fn is_pinned(name: &str) -> bool {
-    with_registry(|r| r.pins.iter().any(|p| p == name))
+    with_registry(|r| r.pins.iter().any(|(p, _)| p == name))
 }
 
 /// Snapshot of the pinned names (logging/tests).
 pub fn pinned_names() -> Vec<String> {
-    with_registry(|r| r.pins.clone())
+    with_registry(|r| r.pins.iter().map(|(p, _)| p.clone()).collect())
 }
 
 /// Is a janitor currently registered? Waiter-side belt-and-suspenders

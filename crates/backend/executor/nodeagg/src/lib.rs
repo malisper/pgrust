@@ -616,6 +616,9 @@ pub(crate) struct TransTyp {
 struct PerSortData<'mcx> {
     first_slot: SlotData<'mcx>,
     pending_slot: SlotData<'mcx>,
+    // C keeps one owned grp_firstTuple (ExecForceStoreHeapTuple pfrees the
+    // previous group's); a freeing context makes that hold in the arena.
+    slot_mcx: ::mcx::Mcx<'mcx>,
     // None when numCols == 0 (all keys constant): no boundary, one group.
     eq: Option<PgBox<'mcx, ExprState<'mcx>>>,
     have_pending: bool,
@@ -707,6 +710,21 @@ struct PerAggData<'mcx> {
     // finalfn owns this arena frame of the C maximum.
     wide_fcinfo: Option<NonNull<LocalFcinfo<FUNC_MAX_ARGS>>>,
     direct_args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
+}
+
+// A droppy MemoryContext pinned in the no-drop query arena; the arena's
+// reset callback is its destructor (docs/no-drop.md guard rule).
+fn make_owned_context<'mcx>(mcx: ::mcx::Mcx<'mcx>, ctx: MemoryContext) -> PgResult<::mcx::Mcx<'mcx>> {
+    let layout = core::alloc::Layout::new::<MemoryContext>();
+    let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<MemoryContext> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout; the callback fires exactly
+    // once, before the arena bytes are reclaimed.
+    unsafe { p.write(ctx) };
+    mcx.context()
+        .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+    // SAFETY: the context lives in the query arena for 'mcx.
+    Ok(unsafe { p.as_ref() }.mcx())
 }
 
 fn make_agg_state_node<'mcx>(
@@ -1078,7 +1096,10 @@ pub fn exec_init_agg<'mcx>(
             work_mem_block_size(init_small::globals::work_mem()),
         )
     } else {
-        mcx.context().new_child_bump(agg_ctx_name)
+        // C's aggcontext is an AllocSet (nodeAgg.c:3394): superseded by-ref
+        // transvalues are pfree'd per row, so it must be able to free; its
+        // per-group reset drops whatever transition states left behind.
+        mcx.context().new_child_wholesale(agg_ctx_name)
     };
     let agg_node = make_agg_state_node(mcx, aggcontext)?;
     let fm_agg_node: FmNodePtr = Some(agg_node.cast());
@@ -1653,7 +1674,8 @@ fn init_persort<'mcx>(
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc.clone()));
     let pending_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc));
-    Ok(PerSortData { first_slot, pending_slot, eq, have_pending: false })
+    let slot_mcx = make_owned_context(mcx, mcx.context().new_child("Agg Sorted Group Slots"))?;
+    Ok(PerSortData { first_slot, pending_slot, slot_mcx, eq, have_pending: false })
 }
 
 // find_cols (nodeAgg.c): outer columns referenced outside aggregate args.
@@ -3283,12 +3305,18 @@ fn advance_transition_function(
         fcinfo.isnull = false;
         let result = transfn.invoke(fcinfo)?;
         let isnull = fcinfo.isnull;
-        let new_val = if !typ.byval && result.as_usize() != (*pg).trans_value.as_usize() {
-            if !isnull {
-                ::execexpr::agg_datum_copy(agg_node.as_ref().aggcontext(), result, typ.len)?
+        let old = (*pg).trans_value;
+        let new_val = if !typ.byval && result.as_usize() != old.as_usize() {
+            let aggcontext = agg_node.as_ref().aggcontext();
+            let copied = if !isnull {
+                ::execexpr::agg_datum_copy(aggcontext, result, typ.len)?
             } else {
                 Datum::null()
+            };
+            if !(*pg).trans_value_is_null {
+                ::execexpr::agg_datum_free(aggcontext, old, typ.len);
             }
+            copied
         } else {
             result
         };
@@ -4668,7 +4696,7 @@ pub fn agg_sorted_save_pending<'mcx>(
     let AggStateData { persort, .. } = node;
     let ps = persort.as_mut().expect("sorted Agg has persort");
     let outer_slot = estate.slot_mut(outer_id);
-    exectuples::exec_copy_slot(&mut ps.pending_slot, outer_slot, mcx, mcx)?;
+    exectuples::exec_copy_slot(&mut ps.pending_slot, outer_slot, ps.slot_mcx, mcx)?;
     ps.have_pending = true;
     Ok(())
 }
@@ -5130,7 +5158,7 @@ where
                 match fetch_outer(estate)? {
                     Some(outer_id) => {
                         let outer_slot = estate.slot_mut(outer_id);
-                        exectuples::exec_copy_slot(&mut ps.first_slot, outer_slot, mcx, mcx)?;
+                        exectuples::exec_copy_slot(&mut ps.first_slot, outer_slot, ps.slot_mcx, mcx)?;
                     }
                     None => {
                         node.agg_done = true;
@@ -5182,7 +5210,7 @@ where
                 None => true,
             };
             if !same_group {
-                exectuples::exec_copy_slot(&mut ps.pending_slot, outer_slot, mcx, mcx)?;
+                exectuples::exec_copy_slot(&mut ps.pending_slot, outer_slot, ps.slot_mcx, mcx)?;
                 ps.have_pending = true;
                 break;
             }
@@ -5670,7 +5698,7 @@ mcx::forget_safe_struct!(
     PerAggData<'_> { transno, aggref, trans_shared, num_final_args,
         agg_collation, resulttype_len, wide_fcinfo;
         finalfn, serialfn, direct_args },
-    PerSortData<'_> { have_pending; first_slot, pending_slot, eq },
+    PerSortData<'_> { have_pending, slot_mcx; first_slot, pending_slot, eq },
     HashSpillState<'_> { mode, ever_spilled, batches, all_cols_needed,
         max_colno_needed, colnos_needed, read_buf, input_card, used_bits,
         hashentrysize;

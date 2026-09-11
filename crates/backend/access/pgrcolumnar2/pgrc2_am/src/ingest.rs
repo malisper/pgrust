@@ -221,7 +221,12 @@ fn open_writer(rel: &Relation<'_>, stamp: TxnStamp) -> PgResult<TableWriter> {
     // publish lock — recover_and_clean's no-concurrent-publisher
     // precondition, which the old per-open direct call here violated).
     if crate::dirpath::mkdir_if_absent(&dir)? {
-        session::schedule_dir_delete_at_abort(dir.clone());
+        // The directory is the committed relation's shared storage: only a
+        // relation (or relfilelocator) born in this transaction may take it
+        // down at abort; a foreign session's later publish must survive.
+        if rel.rd_createSubid.get() != 0 || rel.rd_newRelfilelocatorSubid.get() != 0 {
+            session::schedule_dir_delete_at_abort(dir.clone());
+        }
         // Born clean: created THIS lifetime, nothing to recover.
         crate::inval::mark_dir_recovered(&dir);
     } else {

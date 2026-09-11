@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+inval = { path = "../../utils/cache/inval" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 stack_depth_core = { path = "../../utils/misc/stack_depth_core" }
 # [heap rung 3] inline pglz decompression on the heap text byte lanes
@@ -186,7 +187,6 @@ subtrans = { path = "../../access/transam/subtrans" }
 transam = { path = "../../access/transam/transam" }
 varsup = { path = "../../access/transam/varsup" }
 procarray = { path = "../../storage/ipc/procarray" }
-inval = { path = "../../utils/cache/inval" }
 pgstat = { path = "../../utils/activity/pgstat" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }
 latch = { path = "../../storage/ipc/latch" }

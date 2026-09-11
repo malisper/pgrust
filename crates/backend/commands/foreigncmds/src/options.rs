@@ -73,8 +73,14 @@ pub fn untransform_options<'mcx>(
         let elem_img = detoast::detoast_attr(mcx, varlena_image(*elem))?;
         let body = text_body(&elem_img);
         let s = mcx::slice_borrow_in(mcx, body)?;
-        // SAFETY: catalog text in server encoding; written by this module.
-        let s = unsafe { core::str::from_utf8_unchecked(s) };
+        // The same array reaches the PUBLIC-executable FDW validators from
+        // SQL (SQL_ASCII databases carry arbitrary bytes): validate.
+        let s = core::str::from_utf8(s).map_err(|_| {
+            Box::new(
+                types_error::PgError::error("invalid byte sequence in foreign-data option")
+                    .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+            )
+        })?;
         // C (reloptions.c untransformRelOptions): text without '=' becomes a
         // DefElem with the whole string as name and a NULL value.
         match s.split_once('=') {

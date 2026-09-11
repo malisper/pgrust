@@ -192,7 +192,8 @@ fn swar_elected(lane_bytes: Option<u32>, survivor_frac_est: f64) -> bool {
 /// Payload-packing election from the stats plane: the (sum, avg) pair
 /// packs into one u32 iff the sum column is a 0/1 flag and the avg column
 /// fits 31 bits, both proven by part records over EVERY part.
-static PACKABLE_MEMO: std::sync::Mutex<Option<HashMap<(u32, u32), bool>>> = std::sync::Mutex::new(None);
+static PACKABLE_MEMO: pgsync::Mutex<Option<HashMap<(crate::bank::BankIdent, u32, u32), bool>>> =
+    pgsync::Mutex::new(None);
 
 /// [ruling] per-query-run.
 pub fn clear_memo() {
@@ -205,14 +206,17 @@ fn payload_packable(bank: &Bank, sum_col: u32, avg_col: u32) -> bool {
     // [sqe-m2] Memoized within a query run: the per-part stats sweep (511
     // parts x 2 columns) was a measured ~2.8ms of prep INSIDE the timed
     // region on every rep. [ruling] cleared per query run.
-    if let Some(&v) = PACKABLE_MEMO.lock().unwrap().as_ref().and_then(|m| m.get(&(sum_col, avg_col))) {
+    // The proof is a per-part stats property of ONE bank: keyed by its
+    // identity so a concurrent session's relation never answers for this one.
+    let key = (bank.ident(), sum_col, avg_col);
+    if let Some(&v) = PACKABLE_MEMO.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&key)) {
         return v;
     }
     let v = payload_packable_uncached(bank, sum_col, avg_col);
     PACKABLE_MEMO.lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
-        .insert((sum_col, avg_col), v);
+        .insert(key, v);
     v
 }
 

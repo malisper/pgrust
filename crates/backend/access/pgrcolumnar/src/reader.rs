@@ -19,18 +19,29 @@ use crate::writer::FooterRg;
 // the output), and (b) every byte handed to the decoder is initialized.
 // Base stays 8-aligned for the varlena images.
 fn arena_frame(arena: &mut Vec<u64>, raw_len: usize) -> &mut [u8] {
-    let words = (raw_len + crate::lz4dec::OUT_PAD).div_ceil(8);
+    try_arena_frame(arena, raw_len).unwrap_or_else(|e| std::panic::panic_any(e))
+}
+
+// raw_len is an on-file u32: admitted under MaxAllocSize (C palloc) and
+// reserved fallibly so a corrupt or hostile part cannot abort the server.
+fn try_arena_frame<'a>(arena: &'a mut Vec<u64>, raw_len: usize) -> PgResult<&'a mut [u8]> {
+    let bytes = raw_len.saturating_add(crate::lz4dec::OUT_PAD);
+    ::mcx::check_alloc_size(bytes)?;
+    let words = bytes.div_ceil(8);
     if arena.len() < words {
+        arena
+            .try_reserve_exact(words - arena.len())
+            .map_err(|_| ::mcx::oom_named("pgrcolumnar decode arena", bytes))?;
         arena.resize(words, 0);
     }
     // SAFETY: u64 backing reinterpreted as raw_len + OUT_PAD initialized
     // bytes (len >= words holds by the resize above).
-    unsafe {
+    Ok(unsafe {
         std::slice::from_raw_parts_mut(
             arena.as_mut_ptr().cast::<u8>(),
             raw_len + crate::lz4dec::OUT_PAD,
         )
-    }
+    })
 }
 
 #[cold]
@@ -47,6 +58,35 @@ fn corrupt_code(code: u32, ndict: u32, enc: crate::format::Encoding, g: usize) -
 
 #[cold]
 #[inline(never)]
+// dict_off entries are on-file u32s: each must address a varlena image that
+// lies entirely inside the dictionary blob before its pointer is published.
+fn check_dict_off(base: usize, len: usize, o: usize) {
+    let ok = o.checked_add(4).is_some_and(|e| e <= len) && {
+        // SAFETY: o + 4 <= len bytes of the blob at `base` are readable.
+        let sz = unsafe { ::types_tuple::varatt::varsize_any((base + o) as *const u8) };
+        o.checked_add(sz).is_some_and(|e| e <= len)
+    };
+    if !ok {
+        std::panic::panic_any(Box::new(
+            PgError::error(format!(
+                "pgrcolumnar: dictionary offset {o} addresses an image outside the {len}-byte dictionary blob"
+            ))
+            .with_sqlstate(::types_error::ERRCODE_DATA_CORRUPTED),
+        ));
+    }
+}
+
+fn check_dict_off_range(len: usize, o: usize) {
+    if o.checked_add(4).is_none_or(|e| e > len) {
+        std::panic::panic_any(Box::new(
+            PgError::error(format!(
+                "pgrcolumnar: dictionary offset {o} lies outside the {len}-byte dictionary image"
+            ))
+            .with_sqlstate(::types_error::ERRCODE_DATA_CORRUPTED),
+        ));
+    }
+}
+
 fn corrupt_framed_dict(detail: &str, blob_len: usize) -> Box<PgError> {
     Box::new(
         PgError::error(format!(
@@ -1588,9 +1628,11 @@ impl<'a> ChunkView<'a> {
         } else {
             blob.as_ptr() as usize
         };
+        let blob_len = if blob_base == blob.as_ptr() as usize { blob.len() } else { arena.len() * 8 };
         dict.reserve(ndv);
         for c in off_tab.chunks_exact(4) {
             let o = u32::from_le_bytes(c.try_into().unwrap()) as usize;
+            check_dict_off(blob_base, blob_len, o);
             dict.push(Datum::from_usize(blob_base + o));
         }
     }
@@ -1654,6 +1696,7 @@ impl<'a> ChunkView<'a> {
         dict.reserve(ndv);
         for c in off_tab.chunks_exact(4) {
             let o = u32::from_le_bytes(c.try_into().unwrap()) as usize;
+            check_dict_off_range(total, o);
             dict.push(Datum::from_usize(base + o));
         }
         *lazy = Some(dl);

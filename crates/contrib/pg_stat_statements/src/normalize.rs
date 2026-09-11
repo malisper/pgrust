@@ -47,7 +47,16 @@ pub(crate) fn generate_normalized_query(
             continue; // duplicate or bogus location
         }
         let off = (l.location - query_loc) as usize;
-        let len_to_wrt = off - last_off - last_tok_len;
+        // Overlapping or out-of-range spans (C: appendBinaryStringInfo's
+        // negative length ERROR) end substitution; the rest of the text is
+        // copied verbatim below.
+        let Some(len_to_wrt) = off
+            .checked_sub(last_off)
+            .and_then(|v| v.checked_sub(last_tok_len))
+            .filter(|&n| quer_loc + n <= qbytes.len() && off + l.length as usize <= qbytes.len())
+        else {
+            break;
+        };
         norm.push_str(core::str::from_utf8(&qbytes[quer_loc..quer_loc + len_to_wrt]).unwrap());
         norm.push('$');
         norm.push_str(

@@ -327,7 +327,7 @@ fn leader_thread_boot() {
         thread_guc_boot();
         fd::InitFileAccess();
         waiteventset::InitializeWaitEventSupport().unwrap();
-        miscinit::InitProcessLocalLatch();
+        miscinit::InitProcessLocalLatch().expect("local latch");
         lmgr_proc::InitProcess(types_core::BackendType::Backend).unwrap();
         procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
         latch::InitializeLatchWaitSet().unwrap();
@@ -754,7 +754,7 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                     .unwrap();
                 // fd::InitFileAccess is BaseInit's job inside BackgroundWorkerMain.
                 waiteventset::InitializeWaitEventSupport().unwrap();
-                miscinit::InitProcessLocalLatch();
+                miscinit::InitProcessLocalLatch().expect("local latch");
                 latch::InitializeLatchWaitSet().unwrap();
                 let sd = StartupData::BgWorker(types_startup::BgWorkerStartupData {
                     slot,

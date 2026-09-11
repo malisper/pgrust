@@ -304,7 +304,7 @@ fn leader_thread_boot() {
         g::SetMyProcPid(NEXT_PID.fetch_add(1, Relaxed));
         fd::InitFileAccess();
         waiteventset::InitializeWaitEventSupport().unwrap();
-        miscinit::InitProcessLocalLatch();
+        miscinit::InitProcessLocalLatch().expect("local latch");
         lmgr_proc::InitProcess(types_core::BackendType::Backend).unwrap();
         procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
         // Before InitializeLatchWaitSet so the cached set reserves the inert
@@ -404,7 +404,7 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                     .unwrap();
                 thread_globals();
                 waiteventset::InitializeWaitEventSupport().unwrap();
-                miscinit::InitProcessLocalLatch();
+                miscinit::InitProcessLocalLatch().expect("local latch");
                 latch::InitializeLatchWaitSet().unwrap();
                 let sd =
                     StartupData::BgWorker(types_startup::BgWorkerStartupData { slot, generation });

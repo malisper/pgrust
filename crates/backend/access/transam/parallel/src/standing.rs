@@ -1055,6 +1055,16 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
                 return;
             }
             in_procarray = true;
+            // Published as a pg_signal_backend target from here on: stamp
+            // the engaging leader's principal, not the connect-time one the
+            // last finish restored (the binder installs the full identity
+            // later).
+            if let Some(procno) = lmgr_proc::MyProc() {
+                lmgr_proc::GetPGProcByNumber(procno)
+                    .roleId
+                    .store(shared.authenticated_user_id, SeqCst);
+            }
+            backend_status::pgstat_report_userid(shared.authenticated_user_id);
             // No-callback variant: the connect-time init registered the
             // exit callback once; re-registering per engagement would grow
             // the exit-callback stack unboundedly.

@@ -65,8 +65,8 @@ fn move_right_if_needed(
 }
 
 /// scanPostingTree: decode the whole posting tree into the match bitmap.
-fn scan_posting_tree<'scan>(
-    mcx: Mcx<'scan>,
+fn scan_posting_tree<'scan, 'tmp>(
+    mcx: Mcx<'tmp>,
     rel: &Relation<'_>,
     entry: &mut GinScanEntryData<'scan>,
     root: BlockNumber,
@@ -121,10 +121,15 @@ fn collect_match_bitmap<'scan>(
     let attnum = entry.attnum;
     predicate_lock_page(rel, bm::buffer_get_block_number::call(stack.top().buffer), snapshot)?;
 
+    // C's per-entry temporaries are pfree'd or live in a per-call context;
+    // the scan key context frees nothing, so per-tuple work is reset here.
+    let mut scratch = MemoryContext::new("GIN match bitmap scratch");
     loop {
         if !move_right_if_needed(rel, stack, snapshot)? {
             return Ok(true);
         }
+        scratch.reset();
+        let smcx = scratch.mcx();
         let buffer = stack.top().buffer;
         let off = stack.top().off;
         // SAFETY: pin + share lock held.
@@ -142,7 +147,7 @@ fn collect_match_bitmap<'scan>(
 
         let mut icategory = GIN_CAT_NORM_KEY;
         // SAFETY: live tuple under the lock.
-        let idatum = unsafe { gintuple_get_key(kcx, rel, state, itup, &mut icategory)? };
+        let idatum = unsafe { gintuple_get_key(smcx, rel, state, itup, &mut icategory)? };
 
         if entry.isPartialMatch {
             // Partial matches stop at any null (including placeholders).
@@ -173,14 +178,14 @@ fn collect_match_bitmap<'scan>(
 
             // Save the key value to re-find our position after re-locking.
             let saved = if icategory == GIN_CAT_NORM_KEY {
-                Some(datum_copy_key(kcx, state.col(attnum), idatum)?)
+                Some(datum_copy_key(smcx, state.col(attnum), idatum)?)
             } else {
                 None
             };
 
             bm::lock_buffer::call(buffer, GIN_UNLOCK)?;
             predicate_lock_page(rel, root, snapshot)?;
-            scan_posting_tree(kcx, rel, entry, root)?;
+            scan_posting_tree(smcx, rel, entry, root)?;
             bm::lock_buffer::call(buffer, GIN_SHARE)?;
             // SAFETY: pin + share lock held.
             if !GinPageIsLeaf(&page_opaque(&unsafe { page_ref(buffer) })) {
@@ -208,7 +213,7 @@ fn collect_match_bitmap<'scan>(
                     let mut newcat = GIN_CAT_NORM_KEY;
                     // SAFETY: as above.
                     let newdatum =
-                        unsafe { gintuple_get_key(kcx, rel, state, itup, &mut newcat)? };
+                        unsafe { gintuple_get_key(smcx, rel, state, itup, &mut newcat)? };
                     let cmpto = saved.unwrap_or(idatum);
                     if ginCompareEntries(state, attnum, newdatum, newcat, cmpto, icategory) == 0 {
                         break;
@@ -217,9 +222,9 @@ fn collect_match_bitmap<'scan>(
                 stack.top_mut().off += 1;
             }
         } else {
-            let mut items = mcx::vec_new_in(kcx);
+            let mut items = mcx::vec_new_in(smcx);
             // SAFETY: as above.
-            unsafe { ginReadTuple(kcx, itup, &mut items)? };
+            unsafe { ginReadTuple(smcx, itup, &mut items)? };
             entry
                 .matchBitmap
                 .as_mut()

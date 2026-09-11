@@ -499,8 +499,11 @@ fn wchareq(p1: &[u8], p2: &[u8]) -> PgResult<bool> {
 
 fn do_like_escape<E: EscMode>(pat: &[u8], esc: &[u8], r: &mut Vec<u8>) -> PgResult<()> {
     let mut p = pat;
-    // C: palloc(plen * 2 + VARHDRSZ) — worst-case growth is 2x.
-    r.reserve(pat.len().saturating_mul(2));
+    // C: palloc(plen * 2 + VARHDRSZ) — worst-case growth is 2x, admitted
+    // under MaxAllocSize and reserved fallibly.
+    let need = pat.len().saturating_mul(2).saturating_add(4);
+    ::mcx::check_alloc_size(need)?;
+    r.try_reserve(need).map_err(|_| ::mcx::oom_named("like_escape", need))?;
 
     if esc.is_empty() {
         // No escape character wanted: double backslashes so they act literal.

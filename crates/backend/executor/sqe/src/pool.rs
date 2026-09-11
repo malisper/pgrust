@@ -256,6 +256,25 @@ impl Drop for FeedGen<'_> {
 }
 
 impl Pool {
+    /// One generation at a time per pool; a driver waiting for a busy pool
+    /// must stay cancellable (pg_cancel_backend / statement_timeout), so the
+    /// wait polls the statement cancel token instead of parking in lock().
+    fn acquire_run_lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        loop {
+            match self.run_lock.try_lock() {
+                Ok(g) => return g,
+                Err(std::sync::TryLockError::Poisoned(e)) => return e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    crate::cancel::poll_now();
+                    for _ in 0..64 {
+                        std::hint::spin_loop();
+                    }
+                }
+            }
+        }
+    }
+
+
     pub fn new(threads: usize) -> Pool {
         let shared = Arc::new(Shared {
             m: Mutex::new(State {
@@ -352,7 +371,7 @@ impl Pool {
         // FeedGen retires this generation, so no other driver can observe
         // or clobber this generation's shared state slot. Acquired BEFORE
         // the state mutex — the single lock order across all run paths.
-        let gen = self.run_lock.lock().unwrap();
+        let gen = self.acquire_run_lock();
         let job: Arc<dyn Fn(usize) + Send + Sync + 'a> = Arc::new(job);
         // SAFETY: lifetime erasure as in `run` — the guard's join blocks
         // until every engaged worker reports done, and callers bind the
@@ -464,7 +483,7 @@ impl Pool {
         // lock order across all run paths. Explicitly dropped after the
         // generation is retired and before any re-raise (below), so a
         // re-raised worker panic never poisons the run lock.
-        let gen = self.run_lock.lock().unwrap();
+        let gen = self.acquire_run_lock();
         // Claim-depth guard [RULED 2026-08-18] applied AT the capped
         // participation width: full cap iff n >= 4·width, else
         // max(1, n/4) — the ticket count enforces both bounds (workers

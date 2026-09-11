@@ -12,6 +12,7 @@ pub fn fc_dispell_init(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     let init = unsafe { &*(fcinfo.arg(0).as_usize() as *const DictInitData<'static>) };
     let d = dispell_init(init)?;
     let (ptr, _) = ::mcx::PgBox::into_raw_with_allocator(alloc_in(init.mcx, d)?);
+    init.drop_fn.set(Some(::ts_locale::dict_api::drop_dict_state::<DictISpell>));
     Ok(Datum::from_usize(ptr as usize))
 }
 

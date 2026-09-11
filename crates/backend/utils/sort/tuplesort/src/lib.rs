@@ -65,15 +65,25 @@ pub fn init_seams() {
             }
             ts.performsort()?;
             let byref = ts.datum_sort_is_byref();
+            let typlen = if byref { ts.datum_byref_typlen() } else { 0 };
             let mut out: PgVec<'_, NullableDatum> = mcx::vec_with_capacity_in(mcx, values.len())?;
             while let Some(mut nd) = ts.getdatum(true)? {
                 if byref && !nd.isnull {
                     let p = nd.value.as_usize() as *const u8;
-                    // SAFETY: by-ref sorted datum points at a live plain image
-                    // owned by the tuplesort, copied out before ts drops.
-                    let bytes = unsafe {
-                        core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+                    // datum.c datumGetSize: fixed typlen, -1 varlena, -2 cstring.
+                    let len = if typlen > 0 {
+                        typlen as usize
+                    } else if typlen == -1 {
+                        // SAFETY: by-ref varlena image owned by the tuplesort.
+                        unsafe { ::types_tuple::varatt::varsize_any(p) }
+                    } else {
+                        // SAFETY: cstring datums are NUL-terminated.
+                        unsafe { core::ffi::CStr::from_ptr(p.cast()) }.to_bytes_with_nul().len()
                     };
+                    // SAFETY: by-ref sorted datum points at a live image of
+                    // `len` bytes owned by the tuplesort, copied out before ts
+                    // drops.
+                    let bytes = unsafe { core::slice::from_raw_parts(p, len) };
                     nd.value = Datum::from_usize(mcx::slice_borrow_in(mcx, bytes)?.as_ptr() as usize);
                 }
                 out.push(nd);

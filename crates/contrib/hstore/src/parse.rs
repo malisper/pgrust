@@ -141,6 +141,8 @@ pub fn parse_hstore(input: &[u8]) -> PgResult<Vec<Pair>> {
                     check_val_len(word.len())?;
                     let isnull =
                         word.len() == 4 && !escaped && word.eq_ignore_ascii_case(b"null");
+                    crate::check_pair_count(pairs.len() + 1)?;
+                    pairs.try_reserve(1).map_err(|_| ::mcx::oom_named("hstore_in", 56))?;
                     pairs.push(Pair {
                         key: cur_key.take().expect("key set before value"),
                         val: (!isnull).then_some(word),

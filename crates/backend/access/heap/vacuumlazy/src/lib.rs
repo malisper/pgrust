@@ -1053,9 +1053,14 @@ fn dead_items_reset(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
 // TidStoreIsMember. One Arc snapshot per pass: the serial arm reads the
 // slice, the parallel arm shares the SAME allocation with its workers
 // (vacuumparallel stores an Arc clone, never a re-copy).
-fn collect_dead_tids(vacrel: &LVRelState<'_, '_>) -> std::sync::Arc<[ItemPointerData]> {
-    let mut tids: Vec<ItemPointerData> =
-        Vec::with_capacity(vacrel.dead_items_info.num_items as usize);
+fn collect_dead_tids(vacrel: &LVRelState<'_, '_>) -> PgResult<std::sync::Arc<[ItemPointerData]>> {
+    let n = vacrel.dead_items_info.num_items.max(0) as usize;
+    let bytes = n.saturating_mul(core::mem::size_of::<ItemPointerData>());
+    // Sized by the round's dead-item count: admit it and allocate fallibly
+    // so exhaustion is an ERROR for this VACUUM, not a server abort.
+    ::mcx::check_alloc_size(bytes)?;
+    let mut tids: Vec<ItemPointerData> = Vec::new();
+    tids.try_reserve_exact(n).map_err(|_| ::mcx::oom_named("VACUUM dead TIDs", bytes))?;
     let mut iter = vacrel.dead_items.as_ref().unwrap().begin_iterate();
     let mut offsets = [InvalidOffsetNumber; MaxOffsetNumber as usize];
     while let Some(res) = iter.next() {
@@ -1066,7 +1071,7 @@ fn collect_dead_tids(vacrel: &LVRelState<'_, '_>) -> std::sync::Arc<[ItemPointer
         }
     }
     debug_assert_eq!(tids.len() as i64, vacrel.dead_items_info.num_items);
-    tids.into()
+    Ok(tids.into())
 }
 
 fn heap_vacuum_eager_scan_setup(
@@ -1914,7 +1919,7 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
         &[PROGRESS_VACUUM_PHASE_VACUUM_INDEX, vacrel.nindexes as i64],
     );
 
-    let dead_tids = collect_dead_tids(vacrel);
+    let dead_tids = collect_dead_tids(vacrel)?;
 
     // W1 forensics (trace-gated): the snapshot the index-side reap-membership
     // binary search (nbtree tid_is_member) consumes MUST be strictly

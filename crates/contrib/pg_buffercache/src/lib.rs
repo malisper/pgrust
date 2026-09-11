@@ -97,6 +97,23 @@ fn fc_pg_buffercache_pages(
     if !(NUM_BUFFERCACHE_PAGES_MIN_ELEM..=NUM_BUFFERCACHE_PAGES_ELEM).contains(&natts) {
         return Err(Box::new(PgError::error("incorrect number of output arguments")));
     }
+    // C builds its own fixed-type tupdesc and the executor's tupledesc_match
+    // rejects a disagreeing column definition list; forming rows of these
+    // by-value datums under a caller-declared by-ref type would fault.
+    const COLTYPES: [types_core::Oid; NUM_BUFFERCACHE_PAGES_ELEM as usize] = [
+        types_core::INT4OID, types_core::OIDOID, types_core::OIDOID, types_core::OIDOID,
+        types_core::INT2OID, types_core::INT8OID, types_core::BOOLOID, types_core::INT2OID,
+        types_core::INT4OID,
+    ];
+    for i in 0..natts as usize {
+        if srf.tupdesc.attr(i).atttypid != COLTYPES[i] {
+            return Err(Box::new(
+                PgError::error("function return row and query-specified return row do not match")
+                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .with_detail(format!("Returned type does not match expected type in column {}.", i + 1)),
+            ));
+        }
+    }
 
     for id in 0..bufmgr::NBuffersInited() {
         postgres_seams::check_for_interrupts::call()?;

@@ -95,6 +95,16 @@ impl<'mcx> LexizeData<'mcx> {
     }
 
     fn add_lemm(&mut self, typ: i32, off: u32, len: u32) {
+        // C frees consumed tokens (moveToWaste + pfree in setCorrLex); keep
+        // the queue bounded by the live lookahead, not the whole document.
+        if self.head >= 1024 && self.head * 2 >= self.queue.len() {
+            let n = self.head;
+            self.queue.drain(..n);
+            self.head = 0;
+            if self.tmp_res.is_some() {
+                self.last_res -= n;
+            }
+        }
         self.queue.push(PLex { typ, off, len });
         self.cur_sub = self.queue.len() - 1;
     }
@@ -106,9 +116,12 @@ impl<'mcx> LexizeData<'mcx> {
 
     // moveToWaste(ld, stop): heads through `stop` inclusive leave towork.
     fn move_to_waste(&mut self, stop: usize) {
-        self.head = stop + 1;
+        // C moveToWaste pops towork until it meets `stop`; a stale stop
+        // (already retired) drains the whole list and never rewinds head.
+        let new_head = if stop + 1 < self.head { self.queue.len() } else { stop + 1 };
+        self.head = new_head;
         self.pos_dict = 0;
-        self.cur_sub = stop + 1;
+        self.cur_sub = new_head;
     }
 
     // Headline consumers read which queue entries a lexize_exec call retired.
@@ -118,6 +131,11 @@ impl<'mcx> LexizeData<'mcx> {
 
     pub(crate) fn consumed_since(&self, prev_head: usize) -> Vec<PLex> {
         self.queue[prev_head..self.head].to_vec()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_len(&self) -> usize {
+        self.queue.len()
     }
 
     pub(crate) fn add_lemm_pub(&mut self, typ: i32, off: u32, len: u32) {

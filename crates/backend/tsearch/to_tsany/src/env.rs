@@ -4,10 +4,9 @@ use ::ts_locale::{DictSubState, TsLexeme};
 use ::types_core::primitive::InvalidOid;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_fmgr::{
-    function_call1_coll, function_call2_coll_in, function_call3_coll, function_call4_coll_in,
-    FmgrInfo,
-};
+use ::std::rc::Rc;
+use ::ts_cache::TSDictionaryCacheEntry;
+use ::types_fmgr::{function_call1_coll, function_call2_coll_in, function_call3_coll};
 
 use crate::cache_bind::{self, ConfigMap, ParserFns};
 
@@ -22,7 +21,10 @@ pub struct CacheEnv<'mcx> {
     loaded: Option<(ConfigMap<'mcx>, ParserFns)>,
     prsdata: Datum,
     buf: (*const u8, usize),
-    dicts: PgVec<'mcx, (Oid, Datum, FmgrInfo)>,
+    // Retained Rc: the entry (and the dictCtx owning dict_data) cannot be freed
+    // by a mid-statement cache rebuild while this statement still uses it.
+    // isvalid is rechecked per lexize, as C's LexizeExec re-looks-up per call.
+    dicts: PgVec<'mcx, (Oid, Rc<TSDictionaryCacheEntry>)>,
 }
 
 impl<'mcx> CacheEnv<'mcx> {
@@ -49,10 +51,13 @@ impl<'mcx> CacheEnv<'mcx> {
 
     fn dict_at(&mut self, dict: Oid) -> PgResult<usize> {
         if let Some(i) = self.dicts.iter().position(|d| d.0 == dict) {
+            if !self.dicts[i].1.isvalid.get() {
+                self.dicts[i].1 = cache_bind::dict_carrier(dict)?;
+            }
             return Ok(i);
         }
-        let (data, lexize) = cache_bind::dict_carrier(dict)?;
-        self.dicts.push((dict, data, lexize));
+        let entry = cache_bind::dict_carrier(dict)?;
+        self.dicts.push((dict, entry));
         Ok(self.dicts.len() - 1)
     }
 }
@@ -128,20 +133,11 @@ impl<'mcx> ::ts_parse::TsParseEnv<'mcx> for CacheEnv<'mcx> {
     ) -> PgResult<Option<PgVec<'mcx, TsLexeme<'mcx>>>> {
         let i = self.dict_at(dict)?;
         let mcx = self.mcx;
-        let (_, data, fi) = &mut self.dicts[i];
-        let d = function_call4_coll_in(
-            fi,
-            InvalidOid,
-            mcx,
-            *data,
-            Datum::from_usize(token.as_ptr() as usize),
-            Datum::from_i32(token.len() as i32),
-            Datum::from_usize(core::ptr::from_mut(state) as usize),
-        )?;
-        if d.as_usize() == 0 {
+        let d = self.dicts[i].1.call_lexize(mcx, token, Some(state))?;
+        if d == 0 {
             return Ok(None);
         }
-        let ptr = d.as_usize() as *mut ::ts_locale::dict_api::LexizeResult<'mcx>;
+        let ptr = d as *mut ::ts_locale::dict_api::LexizeResult<'mcx>;
         // SAFETY: dict_api contract — the lexize builtin allocated a
         // LexizeResult in the armed mcx (`self.mcx`); ownership moves out
         // exactly once, the shell stays behind in the arena.

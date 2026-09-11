@@ -45,6 +45,7 @@ pub(crate) struct AuthPolicy {
     auth_required: bool,
     allowed_auth_methods: u32,
     allowed_sasl_mechs: [Option<SaslMech>; 2],
+    channel_binding_required: bool,
 }
 
 impl AuthPolicy {
@@ -56,6 +57,7 @@ impl AuthPolicy {
             auth_required: false,
             allowed_auth_methods: 0,
             allowed_sasl_mechs: [None; 2],
+            channel_binding_required: false,
         };
         let Some(s) = require_auth else {
             return Ok(pol);
@@ -178,7 +180,41 @@ impl AuthPolicy {
     /// fe-auth.c check_expected_areq (:903), require_auth arm: reject every
     /// request the user did not allow, and demand a completed exchange
     /// before AuthenticationOk unless "none" was allowed.
+    pub(crate) fn with_channel_binding_required(mut self, required: bool) -> Self {
+        self.channel_binding_required = required;
+        self
+    }
+
     fn check_expected_areq(&self, areq: i32, client_finished_auth: bool) -> Result<(), String> {
+        self.check_require_auth(areq, client_finished_auth)?;
+        // fe-auth.c:1019-1044: with channel_binding=require never answer a
+        // non-SASL request (it would leak the password), and never accept an
+        // AuthenticationOk that was not channel-bound. This client has no TLS,
+        // so no exchange is ever channel-bound.
+        if self.channel_binding_required {
+            match areq {
+                AUTH_REQ_SASL | AUTH_REQ_SASL_CONT | AUTH_REQ_SASL_FIN => {}
+                AUTH_REQ_OK => {
+                    return Err("channel binding required, but server authenticated client without channel binding".into());
+                }
+                _ => {
+                    return Err("channel binding required but not supported by server's authentication request".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// pg_SASL_init's first check (fe-auth.c:446): SCRAM under
+    /// channel_binding=require needs a TLS transport, which we never have.
+    pub(crate) fn check_sasl_transport(&self) -> Result<(), String> {
+        if self.channel_binding_required {
+            return Err("channel binding required, but SSL not in use".into());
+        }
+        Ok(())
+    }
+
+    fn check_require_auth(&self, areq: i32, client_finished_auth: bool) -> Result<(), String> {
         let Some(require_auth) = &self.require_auth else {
             return Ok(());
         };
@@ -379,6 +415,9 @@ pub(crate) fn handshake(
                         // (PQconnectionUsedPassword) whether or not the
                         // exchange ends up using a pass-through key.
                         conn.used_password = true;
+                        if let Err(e) = auth.policy.check_sasl_transport() {
+                            return Ok(Err(e));
+                        }
                         let mechs = match sasl_mechanisms(&mbody) {
                             Ok(v) => v,
                             Err(e) => return Ok(Err(e)),

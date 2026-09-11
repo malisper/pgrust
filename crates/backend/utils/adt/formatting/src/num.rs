@@ -629,7 +629,9 @@ impl NumFromChar<'_> {
 
     #[inline]
     fn amount_test(&self, s: usize) -> bool {
-        self.inout_p <= self.inout.len().saturating_sub(s)
+        // formatting.c AMOUNT_TEST: inout_p <= inout + (input_len - s), false
+        // whenever fewer than `s` bytes exist at all (no saturation to 0).
+        self.inout.len() >= s && self.inout_p <= self.inout.len() - s
     }
 
     fn write_number(&mut self, c: u8) {

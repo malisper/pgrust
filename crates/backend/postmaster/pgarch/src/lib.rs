@@ -594,14 +594,17 @@ fn pgarch_readyXlog(af: &mut ArchFilesState) -> PgResult<Option<String>> {
     let rldir = fd::AllocateDir(&status_dir)?;
     while let Some(rlde) = fd::ReadDir(rldir, &status_dir)? {
         let d_name = &rlde.d_name;
-        let Some(basenamelen) = d_name.len().checked_sub(".ready".len()) else { continue };
+        let bytes = d_name.as_bytes();
+        let Some(basenamelen) = bytes.len().checked_sub(".ready".len()) else { continue };
         if !(MIN_XFN_CHARS..=MAX_XFN_CHARS).contains(&basenamelen) {
             continue;
         }
-        if !d_name[..basenamelen].bytes().all(|c| VALID_XFN_CHARS.as_bytes().contains(&c)) {
+        // pgarch.c works on bytes (strspn over VALID_XFN_CHARS, strcmp of the
+        // suffix); a multibyte name is simply not a ready file.
+        if !bytes[..basenamelen].iter().all(|c| VALID_XFN_CHARS.as_bytes().contains(c)) {
             continue;
         }
-        if &d_name[basenamelen..] != ".ready" {
+        if &bytes[basenamelen..] != b".ready" {
             continue;
         }
         let basename = &d_name[..basenamelen];

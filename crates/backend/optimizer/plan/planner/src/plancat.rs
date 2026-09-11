@@ -222,7 +222,7 @@ pub fn get_relation_info<'mcx>(
                 let node = readfuncs::stringToNode(mcx, src.as_str())?;
                 let list = node.as_list().expect("indexprs is a List");
                 for e in list.iter() {
-                    let e = clauses::eval_const_expressions(mcx, e)?;
+                    let e = crate::setrefs::fold_with_deps(run, e)?;
                     if varno != 1 {
                         change_var_nodes(e, varno as i32)?;
                     }
@@ -231,7 +231,7 @@ pub fn get_relation_info<'mcx>(
             }
             if let Some(src) = ind.indpred_src.as_ref() {
                 let node = readfuncs::stringToNode(mcx, src.as_str())?;
-                let folded = clauses::eval_const_expressions(mcx, node)?;
+                let folded = crate::setrefs::fold_with_deps(run, node)?;
                 let canon = crate::prepqual::canonicalize_qual(mcx, folded, false)?;
                 let implicit = clauses::make_ands_implicit(mcx, Some(canon))?;
                 for e in implicit.iter() {
@@ -868,7 +868,7 @@ fn set_baserel_partition_constraint<'mcx>(
     }
     let mut folded_ids: PgVec<'mcx, NodeId> = PgVec::new_in(mcx);
     for q in partconstr.iter() {
-        let folded = clauses::eval_const_expressions(mcx, q)?;
+        let folded = crate::setrefs::fold_with_deps(run, q)?;
         if varno != 1 {
             change_var_nodes(folded, varno as i32)?;
         }
@@ -1663,7 +1663,7 @@ pub fn get_relation_constraints<'mcx>(
             }
             let ccbin = check.ccbin.as_ref().expect("CHECK constraint has ccbin");
             let cexpr = readfuncs::stringToNode(mcx, ccbin.as_str())?;
-            let cexpr = clauses::eval_const_expressions(mcx, cexpr)?;
+            let cexpr = crate::setrefs::fold_with_deps(run, cexpr)?;
             let cexpr = crate::prepqual::canonicalize_qual(mcx, cexpr, true)?;
             if varno != 1 {
                 change_var_nodes(cexpr, varno as i32)?;

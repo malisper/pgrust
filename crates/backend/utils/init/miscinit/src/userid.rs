@@ -66,6 +66,12 @@ pub fn ReplaceSessionIdentityState(state: SessionIdentityState) -> SessionIdenti
     old
 }
 
+/// The current user id without GetUserId's initialized-session assertion
+/// (InvalidOid before InitPostgres, e.g. unit tests and early startup).
+pub fn CurrentUserIdOrInvalid() -> Oid {
+    CURRENT_USER_ID.get()
+}
+
 pub fn GetUserId() -> Oid {
     debug_assert_ne!(CURRENT_USER_ID.get(), InvalidOid);
     CURRENT_USER_ID.get()
@@ -282,7 +288,7 @@ pub fn InitializeSessionUserIdStandalone() -> PgResult<()> {
 
 pub fn InitializeSystemUser(authn_id: &str, auth_method: &str) {
     debug_assert!(SYSTEM_USER.get().is_none());
-    SYSTEM_USER.set(Some(format!("{auth_method}:{authn_id}").leak()));
+    SYSTEM_USER.set(Some(crate::intern_static(&format!("{auth_method}:{authn_id}"))));
 }
 
 // session_authorization assign hook; commutative with SetCurrentRoleId, so

@@ -788,12 +788,13 @@ fn pg_decode_stream_prepare(
     _prepare_lsn: XLogRecPtr,
 ) -> PgResult<()> {
     let data = data_from(opc);
+    // C never frees here (test_decoding.c:856-880): a skipped ROLLBACK
+    // PREPARED still routes stream_abort through this txn, so the private
+    // stays owned by the txn until the reorderbuffer forgets it.
     let p = rb.txn(txn).output_plugin_private;
-    rb.txn_mut(txn).output_plugin_private = 0;
     let xact_wrote_changes = if p != 0 {
-        // SAFETY: exclusive owner of the stream-start allocation.
-        let txndata = unsafe { Box::from_raw(p as *mut TestDecodingTxnData) };
-        txndata.xact_wrote_changes
+        // SAFETY: the stream-start allocation, live while the txn exists.
+        unsafe { (*(p as *const TestDecodingTxnData)).xact_wrote_changes }
     } else {
         false
     };

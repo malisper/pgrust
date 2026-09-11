@@ -5996,6 +5996,24 @@ fn ir_row_triggers<'mcx>(
     )
 }
 
+// The result rel a row-level trigger/WCO must see: rel()/rel_mut() route a
+// MERGE root-targeted INSERT to the root (C passes rootResultRelInfo to
+// ExecInsert), so its triggers, WHEN caches and descriptor come from the
+// same ResultRelInfo as the tuple.
+#[inline]
+fn cur_rel<'a, 'mcx>(
+    rels: &'a mut [ResultRelExec<'mcx>],
+    root: &'a mut Option<ResultRelExec<'mcx>>,
+    insert_target_root: bool,
+    cur: usize,
+) -> &'a mut ResultRelExec<'mcx> {
+    if insert_target_root {
+        root.as_mut().unwrap_or(&mut rels[0])
+    } else {
+        &mut rels[cur]
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn row_triggers_common<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
@@ -6082,11 +6100,13 @@ fn row_triggers_common<'mcx>(
             let ModifyTableState {
                 rels,
                 cur,
+                root,
+                insert_target_root,
                 router,
                 leaf_trig_when,
                 ..
             } = &mut *mt;
-            let r = &mut rels[*cur];
+            let r = cur_rel(rels, root, *insert_target_root, *cur);
             let (rel, cache) = match leaf {
                 None => (
                     estate.es_relations[(r.rti - 1) as usize]
@@ -6145,18 +6165,20 @@ fn row_triggers_common<'mcx>(
             let ModifyTableState {
                 rels,
                 cur,
+                root,
+                insert_target_root,
                 leaf_trig_fmgr,
                 leaf_trig_instr,
                 router,
                 ..
             } = &mut *mt;
-            let cur_rti = rels[*cur].rti;
+            let cur_rti = cur_rel(rels, root, *insert_target_root, *cur).rti;
             let trig_instr = match leaf {
-                None => rels[*cur].trig_instr,
+                None => cur_rel(rels, root, *insert_target_root, *cur).trig_instr,
                 Some(ix) => leaf_trig_instr[ix],
             };
             let finfo = match leaf {
-                None => rels[*cur].trig_fmgr.get(i, trigger.tgfoid)?,
+                None => cur_rel(rels, root, *insert_target_root, *cur).trig_fmgr.get(i, trigger.tgfoid)?,
                 Some(ix) => leaf_trig_fmgr[ix].get(i, trigger.tgfoid)?,
             };
             // relinfo->ri_TrigInstrument + tgindx (trigger.c:2508 etc.).
@@ -6231,11 +6253,13 @@ fn row_triggers_common<'mcx>(
                     let ModifyTableState {
                         rels,
                         cur,
+                        root,
+                        insert_target_root,
                         router,
                         leaf_partition_check,
                         ..
                     } = &mut *mt;
-                    let r = &mut rels[*cur];
+                    let r = cur_rel(rels, root, *insert_target_root, *cur);
                     let (rel, pcheck) = match leaf {
                         Some(ix) => (
                             router
@@ -7212,6 +7236,8 @@ fn ar_insert_triggers<'mcx>(
     let ModifyTableState {
         rels,
         cur,
+        root,
+        insert_target_root,
         leaf_trig_when,
         leaf_child_to_root,
         transition_capture,
@@ -7221,7 +7247,7 @@ fn ar_insert_triggers<'mcx>(
     } = mt;
     let (rel, cache, conv) = match leaf {
         None => {
-            let r = &mut rels[*cur];
+            let r = cur_rel(rels, root, *insert_target_root, *cur);
             let rel = estate.es_relations[(result_rti - 1) as usize]
                 .as_ref()
                 .expect("result relation opened");

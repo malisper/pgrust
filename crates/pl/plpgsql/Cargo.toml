@@ -26,6 +26,8 @@ event_trigger = { path = "../../backend/commands/event_trigger" }
 datum = { path = "../../_support/types/datum" }
 detoast = { path = "../../backend/access/common/detoast" }
 elog = { path = "../../backend/utils/error/elog" }
+stack_depth_core = { path = "../../backend/utils/misc/stack_depth_core" }
+miscinit_seams = { path = "../../backend/utils/init/miscinit_seams" }
 execexpr = { path = "../../backend/executor/execexpr" }
 fmgr = { package = "types_fmgr", path = "../../_support/types/fmgr" }
 fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }

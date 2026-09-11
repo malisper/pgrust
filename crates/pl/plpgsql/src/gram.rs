@@ -1098,6 +1098,9 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     }
 
     fn parse_statement(&mut self, t: Tok) -> PgResult<Option<PlStmt>> {
+        // C's bison parser is YYMAXDEPTH-bounded; this recursive descent
+        // nests per block/IF/LOOP/CASE, so bound it by the stack guard.
+        stack_depth_core::check_stack_depth()?;
         self.comp.nstatements += 1;
         let lloc = t.2;
         match t.0 {

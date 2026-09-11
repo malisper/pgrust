@@ -174,9 +174,16 @@ fn with_fileset<R>(f: impl FnOnce(&FileSet) -> PgResult<R>) -> PgResult<R> {
 
 // The leader's stream fileset, shared with a parallel apply worker at
 // FS_SERIALIZE_DONE (C copies the FileSet by value into the DSM).
-pub(crate) fn stream_fileset_arc() -> Arc<FileSet> {
-    STREAM_FILESET.with(|cell| {
-        Arc::clone(cell.borrow().as_ref().expect("stream fileset initialized"))
+pub(crate) fn stream_fileset_arc() -> PgResult<Arc<FileSet>> {
+    STREAM_FILESET.with(|cell| match cell.borrow().as_ref() {
+        Some(fs) => Ok(Arc::clone(fs)),
+        // A spool-consuming message (STREAM COMMIT/PREPARE) for a transaction
+        // the publisher never streamed to this worker.
+        None => Err(types_error::PgError::error(
+            "invalid logical replication message sequence: no streamed transaction spool exists",
+        )
+        .with_sqlstate(ERRCODE_PROTOCOL_VIOLATION)
+        .into()),
     })
 }
 
@@ -813,7 +820,7 @@ pub(crate) fn apply_handle_stream_commit(
     match apply_action {
         LeaderApply => {
             // Serialized to file: replay all the spooled operations.
-            let fileset = stream_fileset_arc();
+            let fileset = stream_fileset_arc()?;
             apply_spooled_messages(
                 mcx,
                 conn.as_deref_mut(),
@@ -924,7 +931,7 @@ pub(crate) fn apply_handle_stream_prepare(
         LeaderApply => {
             // Replay the spool; the last change's transaction stays open for
             // the prepare.
-            let fileset = stream_fileset_arc();
+            let fileset = stream_fileset_arc()?;
             apply_spooled_messages(
                 mcx,
                 conn.as_deref_mut(),

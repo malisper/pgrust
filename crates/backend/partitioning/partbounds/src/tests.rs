@@ -40,6 +40,7 @@ fn test_key(strategy: u8) -> PartitionKeyData {
         parttypbyval,
         parttypalign,
         parttypcoll: one_oid(0),
+        _ctx: None,
     }
 }
 

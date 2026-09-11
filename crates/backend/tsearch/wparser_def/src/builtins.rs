@@ -155,6 +155,19 @@ pub(crate) enum SrfRows {
     Tuples(Vec<Vec<u8>>),
 }
 
+// wparser.c prs_setup_firstcall/tt_setup materialise the whole set into a
+// repalloc'd array: the same MaxAllocSize admission applies here, and every
+// growth is fallible so exhaustion is C's error rather than an abort.
+fn push_image(rows: &mut Vec<Vec<u8>>, img: &[u8], mcx: ::mcx::Mcx<'_>) -> PgResult<()> {
+    ::mcx::check_alloc_size((rows.len() + 1) * 16)?;
+    rows.try_reserve(1).map_err(|_| mcx.oom(16))?;
+    let mut v = Vec::new();
+    v.try_reserve_exact(img.len()).map_err(|_| mcx.oom(img.len()))?;
+    v.extend_from_slice(img);
+    rows.push(v);
+    Ok(())
+}
+
 fn srf_drive(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -241,7 +254,7 @@ pub(crate) fn token_type_rows(fcinfo: &Fcinfo, prsid: ::types_core::Oid) -> PgRe
             &[Datum::from_i32(d.lexid), alias, descr],
             &[false, false, false],
         )?;
-        rows.push(tuple.image().to_vec());
+        push_image(&mut rows, tuple.image(), mcx)?;
     }
     Ok(SrfRows::Tuples(rows))
 }
@@ -371,7 +384,7 @@ pub(crate) fn parse_rows(fcinfo: &Fcinfo, prsid: ::types_core::Oid) -> PgResult<
             &[Datum::from_i32(type_), token],
             &[false, false],
         )?;
-        rows.push(tuple.image().to_vec());
+        push_image(&mut rows, tuple.image(), mcx)?;
         Ok(())
     };
     if prsid == DEFAULT_PARSER_OID {

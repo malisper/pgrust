@@ -21,6 +21,21 @@ pub(crate) enum SrfRows {
     Tuples(Vec<Vec<u8>>),
 }
 
+// jsonfuncs.c materialises through a tuplestore: rows are admitted under
+// MaxAllocSize and every growth is fallible, so an oversized set is an ERROR.
+fn admit<T>(rows: &mut Vec<T>) -> PgResult<()> {
+    let n = rows.len() + 1;
+    ::mcx::check_alloc_size(n.saturating_mul(core::mem::size_of::<T>().max(16)))?;
+    rows.try_reserve(1).map_err(|_| ::mcx::oom_named("json SRF", core::mem::size_of::<T>()).into())
+}
+
+fn owned(b: &[u8]) -> PgResult<Vec<u8>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(b.len()).map_err(|_| ::mcx::oom_named("json SRF", b.len()))?;
+    v.extend_from_slice(b);
+    Ok(v)
+}
+
 pub(crate) fn srf_drive(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -75,7 +90,8 @@ impl<'mcx> JsonSem<'mcx> for OkeysState<'mcx> {
         _isnull: bool,
     ) -> PgResult<bool> {
         if lex.lex_level == 1 {
-            self.keys.push(Some(fname.to_vec()));
+            admit(&mut self.keys)?;
+            self.keys.push(Some(owned(fname)?));
         }
         Ok(true)
     }
@@ -154,7 +170,8 @@ impl<'mcx> JsonSem<'mcx> for EachState<'_, 'mcx> {
         } else {
             Some(self.input[self.result_start..lex.prev_token_terminator].to_vec())
         };
-        self.pairs.push((fname.to_vec(), val));
+        admit(&mut self.pairs)?;
+        self.pairs.push((owned(fname)?, val));
         Ok(true)
     }
 
@@ -221,7 +238,8 @@ pub(crate) fn each_rows(mcx: Mcx<'_>, json: &[u8], as_text: bool) -> PgResult<Sr
         };
         let tuple =
             heaptuple::heap_form_tuple(mcx, &desc, &[key_datum, val_datum], &[false, val_null])?;
-        rows.push(tuple.image().to_vec());
+        admit(&mut rows)?;
+        rows.push(owned(tuple.image())?);
     }
     Ok(SrfRows::Tuples(rows))
 }
@@ -252,15 +270,16 @@ impl<'mcx> JsonSem<'mcx> for ElementsState<'_, 'mcx> {
         if lex.lex_level != 1 {
             return Ok(true);
         }
+        admit(&mut self.rows)?;
         if isnull && self.normalize {
             self.rows.push(None);
         } else if self.next_scalar {
             let s = self.normalized_scalar.expect("scalar recorded");
             self.next_scalar = false;
-            self.rows.push(Some(s.to_vec()));
+            self.rows.push(Some(owned(s)?));
         } else {
             self.rows
-                .push(Some(self.input[self.result_start..lex.prev_token_terminator].to_vec()));
+                .push(Some(owned(&self.input[self.result_start..lex.prev_token_terminator])?));
         }
         Ok(true)
     }

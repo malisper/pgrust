@@ -190,7 +190,13 @@ fn generate_trgm_only(
     legacy_crc32: &dyn Fn(&[u8]) -> u32,
 ) -> (Vec<Trgm>, Option<Vec<u8>>) {
     let slen = s.len();
-    let mut dst: Vec<Trgm> = Vec::with_capacity(slen + 1);
+    let mut dst: Vec<Trgm> = Vec::new();
+    // trgm_op.c: palloc((slen / 2 + 1) * 3 * sizeof(trgm)) under MaxAllocSize.
+    if ::mcx::check_alloc_size((slen + 1).saturating_mul(core::mem::size_of::<Trgm>())).is_err()
+        || dst.try_reserve_exact(slen + 1).is_err()
+    {
+        std::panic::panic_any(::mcx::oom_named("pg_trgm", slen + 1));
+    }
     let mut bounds: Option<Vec<u8>> = if want_bounds { Some(Vec::new()) } else { None };
 
     if slen + LPADDING + RPADDING < 3 || slen == 0 {
@@ -334,7 +340,12 @@ pub fn generate_wildcard_trgm(
     legacy_crc32: &dyn Fn(&[u8]) -> u32,
 ) -> Vec<Trgm> {
     let slen = s.len();
-    let mut dst: Vec<Trgm> = Vec::with_capacity(slen + 1);
+    let mut dst: Vec<Trgm> = Vec::new();
+    if ::mcx::check_alloc_size((slen + 1).saturating_mul(core::mem::size_of::<Trgm>())).is_err()
+        || dst.try_reserve_exact(slen + 1).is_err()
+    {
+        std::panic::panic_any(::mcx::oom_named("pg_trgm", slen + 1));
+    }
 
     if slen + LPADDING + RPADDING < 3 || slen == 0 {
         return dst;

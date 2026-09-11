@@ -227,6 +227,13 @@ struct PLevel {
     variants: Vec<NodeItem>,
 }
 
+// C keeps the nodeitem array under palloc's MaxAllocSize; the per-level
+// 65535 cap alone leaves the total unbounded across levels.
+fn admit_variant(total: &mut usize) -> Result<(), PgError> {
+    *total += 1;
+    ::mcx::check_alloc_size(total.saturating_mul(core::mem::size_of::<NodeItem>())).map_err(|e| *e)
+}
+
 /// C's `atoi`, which lquery_in's repeat-count parser relies on for its
 /// out-of-range rejection. `atoi(s)` is `(int) strtol(s, NULL, 10)`, so the
 /// observable behavior is: accumulate in `long` (64-bit here), SATURATE at
@@ -262,6 +269,7 @@ fn atoi(buf: &[u8], i: usize) -> i32 {
 
 pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     let n = buf.len();
+    let mut total_variants = 0usize;
 
     let mut num = 0i32;
     {
@@ -314,6 +322,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
         match state {
             LQPRS_WAITLEVEL => {
                 if is_label(&buf[i..], cl) {
+                    admit_variant(&mut total_variants)?;
                     levels[cur].variants.push(NodeItem {
                         start: i,
                         len: 0,
@@ -323,6 +332,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                     lvar = 0;
                     state = LQPRS_WAITDELIM;
                 } else if c == b'!' {
+                    admit_variant(&mut total_variants)?;
                     levels[cur].variants.push(NodeItem {
                         start: i + 1,
                         len: 0,
@@ -348,6 +358,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                             "Number of variants exceeds the maximum allowed (65535).",
                         ));
                     }
+                    admit_variant(&mut total_variants)?;
                     levels[cur].variants.push(NodeItem {
                         start: i,
                         len: 0,

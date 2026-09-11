@@ -129,6 +129,30 @@ pub use sizing::{Phase, SizingDecision, SizingParams, DEFAULT_T_MAX_NS, DEFAULT_
 pub use stats::{RgStatsSnapshot, RuntimeStatsSnapshot};
 pub use sync::{IoGuard, Semaphore};
 
+/// An execution permit returned on every exit path, including the
+/// exit-committed unwinds (FATAL/PANIC via proc_exit) that the drive loops
+/// deliberately propagate; a leaked permit would shrink the shared runtime
+/// for the process lifetime.
+pub struct PermitGuard<'a>(&'a Semaphore);
+
+impl<'a> PermitGuard<'a> {
+    pub fn acquire(sem: &'a Semaphore) -> Self {
+        sem.acquire();
+        PermitGuard(sem)
+    }
+
+    pub fn acquire_priority(sem: &'a Semaphore) -> Self {
+        sem.acquire_priority();
+        PermitGuard(sem)
+    }
+}
+
+impl Drop for PermitGuard<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 pub use caller::CallerWorker;
 #[cfg(not(loom))]
 pub use pool::{worker_loop, WorkerPool};
@@ -693,9 +717,10 @@ impl Runtime {
                 self.sched.stat_flush_all(local);
                 return Some(outcome);
             }
-            self.execution_permits().acquire();
-            let step = self.sched.worker_step_pinned(local, &rg.rg);
-            self.execution_permits().release();
+            let step = {
+                let _permit = PermitGuard::acquire(self.execution_permits());
+                self.sched.worker_step_pinned(local, &rg.rg)
+            };
             match step {
                 Step::Ran => idle = 0,
                 Step::Retry => std::thread::yield_now(),
@@ -748,9 +773,10 @@ impl Runtime {
                 flush(self, local);
                 return (None, ran);
             }
-            self.execution_permits().acquire();
-            let step = self.sched.worker_step_pinned(local, &rg.rg);
-            self.execution_permits().release();
+            let step = {
+                let _permit = PermitGuard::acquire(self.execution_permits());
+                self.sched.worker_step_pinned(local, &rg.rg)
+            };
             match step {
                 Step::Ran => {
                     ran += 1;
@@ -808,7 +834,7 @@ impl Runtime {
             return Some(self.drive_pinned(local, rg));
         }
         let cprobe = crate::sched::cprobe_enabled();
-        let mut held = false;
+        let mut held: Option<PermitGuard<'_>> = None;
         let mut retries = 0u32;
         let outcome = loop {
             if let Some(outcome) = rg.try_outcome() {
@@ -822,14 +848,13 @@ impl Runtime {
                 rg.rg.priority.load(crate::sync::atomic::Ordering::Relaxed)
                     >= crate::sched::qos_interactive_p();
             let epoch = self.park_epoch();
-            if !held {
+            if held.is_none() {
                 if interactive {
-                    self.execution_permits().acquire_priority();
+                    held = Some(PermitGuard::acquire_priority(self.execution_permits()));
                     stats::RuntimeStats::tick(&self.sched.stats.qos_priority_acquires);
                 } else {
-                    self.execution_permits().acquire();
+                    held = Some(PermitGuard::acquire(self.execution_permits()));
                 }
-                held = true;
             }
             let step = self.sched.worker_step_pinned(local, &rg.rg);
             match step {
@@ -869,8 +894,7 @@ impl Runtime {
                     retries += 1;
                     if retries >= crate::sched::RETRY_PARK_AFTER {
                         retries = 0;
-                        self.execution_permits().release();
-                        held = false;
+                        held = None;
                         local.drive.parks += 1;
                         self.park(epoch);
                     } else if cprobe {
@@ -886,17 +910,14 @@ impl Runtime {
                     if rg.try_outcome().is_some() {
                         continue;
                     }
-                    self.execution_permits().release();
-                    held = false;
+                    held = None;
                     local.drive.parks += 1;
                     self.park(epoch);
                 }
                 Step::Stop => unreachable!("pinned steps do not observe stop"),
             }
         };
-        if held {
-            self.execution_permits().release();
-        }
+        drop(held);
         outcome
     }
 
@@ -916,7 +937,7 @@ impl Runtime {
         // wake_all, and the epoch is captured BEFORE the failing step, so
         // the park is lost-wakeup-free.
         let cprobe = crate::sched::cprobe_enabled();
-        let mut held = false;
+        let mut held: Option<PermitGuard<'_>> = None;
         let mut retries = 0u32;
         let outcome = loop {
             if let Some(outcome) = rg.try_outcome() {
@@ -928,15 +949,14 @@ impl Runtime {
                 break outcome;
             }
             let epoch = self.park_epoch();
-            if !held {
+            if held.is_none() {
                 if cprobe {
                     let t0 = std::time::Instant::now();
-                    self.execution_permits().acquire();
+                    held = Some(PermitGuard::acquire(self.execution_permits()));
                     local.drive.permit_wait_ns += t0.elapsed().as_nanos() as u64;
                 } else {
-                    self.execution_permits().acquire();
+                    held = Some(PermitGuard::acquire(self.execution_permits()));
                 }
-                held = true;
             }
             let step = self.sched.worker_step_pinned(local, &rg.rg);
             match step {
@@ -946,8 +966,7 @@ impl Runtime {
                     retries += 1;
                     if retries >= crate::sched::RETRY_PARK_AFTER {
                         retries = 0;
-                        self.execution_permits().release();
-                        held = false;
+                        held = None;
                         local.drive.parks += 1;
                         self.park(epoch);
                     } else if cprobe {
@@ -963,17 +982,14 @@ impl Runtime {
                     if rg.try_outcome().is_some() {
                         continue;
                     }
-                    self.execution_permits().release();
-                    held = false;
+                    held = None;
                     local.drive.parks += 1;
                     self.park(epoch);
                 }
                 Step::Stop => unreachable!("pinned steps do not observe stop"),
             }
         };
-        if held {
-            self.execution_permits().release();
-        }
+        drop(held);
         if cprobe {
             let d = &local.drive;
             eprintln!(
@@ -1004,9 +1020,10 @@ impl Runtime {
                 return outcome;
             }
             let epoch = self.park_epoch();
-            self.execution_permits().acquire();
-            let step = self.sched.worker_step_pinned(local, &rg.rg);
-            self.execution_permits().release();
+            let step = {
+                let _permit = PermitGuard::acquire(self.execution_permits());
+                self.sched.worker_step_pinned(local, &rg.rg)
+            };
             match step {
                 Step::Ran => {}
                 Step::Retry => std::thread::yield_now(),

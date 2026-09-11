@@ -345,11 +345,13 @@ impl TableWriter {
         // The granule gate is the byte-identity boundary (see
         // `PartCutPolicy`); it also keeps the O(ncols) byte scan off the
         // per-row path — it now runs once per granule, not once per row.
-        if self.policy.at_granule(self.buffered_rows())
-            && self
-                .policy
-                .should_cut(self.buffered_rows(), self.buffered_bytes())
-        {
+        // The granule gate is the byte-identity boundary (see
+        // `PartCutPolicy`; a byte-budget parallel partition must be
+        // byte-identical to serial), so the byte budget is consulted at every
+        // granule and never between them. Wide rows inside one granule are
+        // bounded by the varlena cap and admitted fallibly (arena ceiling).
+        let rows = self.buffered_rows();
+        if self.policy.at_granule(rows) && self.policy.should_cut(rows, self.buffered_bytes()) {
             self.cut_part(env)?;
         }
         Ok(())

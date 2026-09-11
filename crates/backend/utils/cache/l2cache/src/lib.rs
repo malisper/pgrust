@@ -146,13 +146,18 @@ fn rel_stripe(relid: Oid) -> usize {
     (relid as usize) & (REL_STRIPES - 1)
 }
 
+// Cache ids arrive from WAL commit records, two-phase state and the sinval
+// queue; an id outside the catcache range (C: an unchecked array index)
+// lands on a spare slot no reader consults.
+static SPARE_GEN: AtomicU64 = AtomicU64::new(0);
+
 #[inline]
 fn gen_slot(domain: Domain) -> &'static AtomicU64 {
     match domain {
-        Domain::Cat(id) => {
-            debug_assert!((0..CAT_DOMAINS as i32).contains(&id));
-            &CAT_GENS[id as usize]
-        }
+        Domain::Cat(id) => match CAT_GENS.get(usize::try_from(id).unwrap_or(usize::MAX)) {
+            Some(slot) => slot,
+            None => &SPARE_GEN,
+        },
         Domain::Rel(relid) => &REL_GENS[rel_stripe(relid)],
     }
 }
@@ -220,7 +225,7 @@ fn ensure_view() {
 pub fn view_gen(domain: Domain) -> u64 {
     ensure_view();
     match domain {
-        Domain::Cat(id) => CAT_VIEW.with(|a| a[id as usize].get()),
+        Domain::Cat(id) => CAT_VIEW.with(|a| a.get(id as usize).map_or(0, |c| c.get())),
         Domain::Rel(relid) => REL_VIEW.with(|a| a[rel_stripe(relid)].get()),
     }
 }
@@ -228,47 +233,59 @@ pub fn view_gen(domain: Domain) -> u64 {
 /// Advance this thread's view of `domain` to the current global generation.
 /// Called wherever sinval processing drops L1 entries of the domain.
 #[inline]
-pub fn sync_view(domain: Domain) {
+/// Returns whether the view advanced.
+pub fn sync_view(domain: Domain) -> bool {
     ensure_view();
     let g = current_gen(domain);
     match domain {
         Domain::Cat(id) => CAT_VIEW.with(|a| {
-            let c = &a[id as usize];
-            if g > c.get() {
-                c.set(g);
+            if let Some(c) = a.get(id as usize) {
+                if g > c.get() {
+                    c.set(g);
+                    return true;
+                }
             }
+            false
         }),
         Domain::Rel(relid) => REL_VIEW.with(|a| {
             let c = &a[rel_stripe(relid)];
             if g > c.get() {
                 c.set(g);
+                return true;
             }
+            false
         }),
     }
 }
 
-pub fn sync_view_all_cat() {
+pub fn sync_view_all_cat() -> bool {
+    let mut advanced = false;
     ensure_view();
     for (i, g) in CAT_GENS.iter().enumerate() {
         let v = g.load(Ordering::Acquire);
         CAT_VIEW.with(|a| {
             if v > a[i].get() {
                 a[i].set(v);
+                advanced = true;
             }
         });
     }
+    advanced
 }
 
-pub fn sync_view_all_rel() {
+pub fn sync_view_all_rel() -> bool {
     ensure_view();
+    let mut advanced = false;
     for (i, g) in REL_GENS.iter().enumerate() {
         let v = g.load(Ordering::Acquire);
         REL_VIEW.with(|a| {
             if v > a[i].get() {
                 a[i].set(v);
+                advanced = true;
             }
         });
     }
+    advanced
 }
 
 pub fn sync_view_all() {
@@ -300,7 +317,11 @@ pub fn bump(domain: Domain) {
     ensure_view();
     let new = gen_slot(domain).fetch_add(1, Ordering::SeqCst) + 1;
     match domain {
-        Domain::Cat(id) => CAT_VIEW.with(|a| a[id as usize].set(new)),
+        Domain::Cat(id) => CAT_VIEW.with(|a| {
+            if let Some(c) = a.get(id as usize) {
+                c.set(new);
+            }
+        }),
         Domain::Rel(relid) => REL_VIEW.with(|a| a[rel_stripe(relid)].set(new)),
     }
 }
@@ -309,6 +330,15 @@ pub fn bump_all_cat() {
     for id in 0..CAT_DOMAINS as i32 {
         bump(Domain::Cat(id));
     }
+}
+
+/// C re-creates every cache with the crashed backends; this process-global
+/// store survives the in-process crash cycle, so every generation advances
+/// (a change committed but killed before its inval send is otherwise served
+/// stale forever).
+pub fn bump_all_after_crash() {
+    bump_all_cat();
+    bump_all_rel();
 }
 
 pub fn bump_all_rel() {
@@ -689,6 +719,16 @@ pub fn acquire_gate(key: L2Key, gen: u64) -> GateOutcome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn out_of_range_cache_id_is_inert() {
+        // ids arrive from WAL/2PC/sinval: 96..=127 decode but exceed CAT_DOMAINS.
+        for id in [96, 100, 127] {
+            super::bump(super::Domain::Cat(id));
+            super::sync_view(super::Domain::Cat(id));
+            let _ = super::current_gen(super::Domain::Cat(id));
+        }
+    }
+
     use super::*;
 
     #[derive(Debug)]

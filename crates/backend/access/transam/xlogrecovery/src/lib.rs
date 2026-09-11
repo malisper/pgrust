@@ -122,6 +122,25 @@ static REPLAY_END_TLI: AtomicU32 = AtomicU32::new(0);
 static SIGNAL_FILE_STANDBY: AtomicBool = AtomicBool::new(false);
 static SIGNAL_FILE_RECOVERY: AtomicBool = AtomicBool::new(false);
 
+/// C's recovery-request statics are fresh in every forked startup process
+/// and XLogRecoveryCtl is re-created by reset_shared(); the in-process crash
+/// restart must clear them the same way or a promoted primary re-enters
+/// standby mode from the previous life's request.
+pub fn XLogRecoveryResetAfterCrash() {
+    for f in [
+        &ARCHIVE_RECOVERY_REQUESTED,
+        &IN_ARCHIVE_RECOVERY,
+        &STANDBY_MODE_REQUESTED,
+        &STANDBY_MODE,
+        &REACHED_CONSISTENCY,
+        &PROMOTE_IS_TRIGGERED,
+        &SIGNAL_FILE_STANDBY,
+        &SIGNAL_FILE_RECOVERY,
+    ] {
+        f.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 thread_local! {
     static DO_REQUEST_WALRCV_REPLY: Cell<bool> = const { Cell::new(false) };
     static RECOVERY: RefCell<Option<Recovery>> = const { RefCell::new(None) };

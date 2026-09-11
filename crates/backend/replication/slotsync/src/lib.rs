@@ -17,7 +17,8 @@ use types_core::{Oid, TransactionId, XLogRecPtr};
 use types_tuple::NameData;
 use types_error::{
     ErrorLocation, PgResult, DEBUG1, ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_PROTOCOL_VIOLATION, ERROR, LOG,
 };
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
@@ -689,15 +690,33 @@ fn synchronize_slots(conn: &mut PgConn) -> PgResult<bool> {
             .map(|()| false);
     }
 
+    // libpqrcv_processTuples: a result whose shape differs from the query's
+    // declared 10 columns is "invalid query response", never a panic.
+    const SLOT_QUERY_NFIELDS: usize = 10;
+    let invalid_response = |what: &str| -> PgResult<bool> {
+        ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg("invalid query response")
+            .errdetail(format!("Expected {SLOT_QUERY_NFIELDS} fields, got {what}."))
+            .finish(loc("synchronize_slots"))
+            .map(|()| false)
+    };
+    if res.nfields != SLOT_QUERY_NFIELDS {
+        return invalid_response(&res.nfields.to_string());
+    }
     let mut remote_slot_list: Vec<RemoteSlot> = Vec::new();
     for row in &res.rows {
+        if row.len() != SLOT_QUERY_NFIELDS {
+            return invalid_response(&format!("a row of {}", row.len()));
+        }
         let text = |i: usize| -> Option<String> {
             row.get(i)
                 .and_then(|c| c.as_ref())
                 .map(|v| String::from_utf8_lossy(v).into_owned())
         };
-        let name = text(0).expect("slot_name is never null");
-        let plugin = text(1).expect("plugin is never null");
+        let (Some(name), Some(plugin), Some(database)) = (text(0), text(1), text(8)) else {
+            return invalid_response("a NULL slot_name, plugin or database");
+        };
         // LSN and xmin may be null if the slot is invalidated on the primary.
         let confirmed_lsn = text(2).map(|s| parse_lsn(&s)).unwrap_or(InvalidXLogRecPtr);
         let restart_lsn = text(3).map(|s| parse_lsn(&s)).unwrap_or(InvalidXLogRecPtr);
@@ -707,7 +726,6 @@ fn synchronize_slots(conn: &mut PgConn) -> PgResult<bool> {
         let two_phase = text(5).as_deref() == Some("t");
         let two_phase_at = text(6).map(|s| parse_lsn(&s)).unwrap_or(InvalidXLogRecPtr);
         let failover = text(7).as_deref() == Some("t");
-        let database = text(8).expect("database is never null");
         let invalidated = match text(9) {
             None => RS_INVAL_NONE,
             Some(cause) => GetSlotInvalidationCause(&cause).0,

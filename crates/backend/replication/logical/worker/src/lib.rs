@@ -459,6 +459,9 @@ fn maybe_reread_subscription_guts(mcx: Mcx<'_>) -> PgResult<()> {
                     || n.publications != old.publications
                     || n.origin != old.origin
                     || n.owner != old.owner
+                    // password_required governs the publisher session's
+                    // authentication: a change must reconnect and re-enforce.
+                    || n.passwordrequired != old.passwordrequired
             });
             if differs {
                 Some("subscription was modified")

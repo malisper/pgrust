@@ -1,7 +1,8 @@
 //! tzparser.c: timezone_abbreviations GUC check-hook parsing. Failures are
 //! soft — GUC_check_errmsg + None, never ERROR (C's contract with guc.c).
 
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use adt_datetime::tz::{ConvertTimeZoneAbbrevs, TzEntry as TzView, ZoneAbbrevTable};
 use guc::{GUC_check_errhint, GUC_check_errmsg};
@@ -366,8 +367,17 @@ fn load_tzoffsets_from(dir: &str, filename: &str) -> Option<&'static ZoneAbbrevT
     Some(ConvertTimeZoneAbbrevs(&views))
 }
 
+// C guc_mallocs a table per SET and frees it with the superseded extra;
+// the port hands out &'static tables, so they are interned per file name
+// (the timezonesets directory is finite) instead of leaked per SET.
+static TABLES: Mutex<BTreeMap<String, &'static ZoneAbbrevTable>> = Mutex::new(BTreeMap::new());
+
 /// On failure returns None with the details in the GUC check-error slots.
 pub fn load_tzoffsets(filename: &str) -> Option<&'static ZoneAbbrevTable> {
+    if let Some(tbl) = TABLES.lock().unwrap().get(filename) {
+        return Some(*tbl);
+    }
     let dir = tzsets_dir();
-    load_tzoffsets_from(dir, filename)
+    let tbl = load_tzoffsets_from(dir, filename)?;
+    Some(*TABLES.lock().unwrap().entry(filename.to_string()).or_insert(tbl))
 }

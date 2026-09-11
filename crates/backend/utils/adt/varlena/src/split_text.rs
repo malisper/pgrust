@@ -61,12 +61,20 @@ pub(crate) fn split_fields(fcinfo: &Fcinfo) -> PgResult<Vec<TableField>> {
     let collation = fcinfo.get_collation();
     let ns = null_string.as_deref();
 
+    // C materialises through a tuplestore: rows are admitted under
+    // MaxAllocSize and every growth is fallible, so an oversized set is an
+    // ERROR, never an abort.
     let push = |out: &mut Vec<TableField>, field: &[u8]| -> PgResult<()> {
         let is_null = match ns {
             Some(n) => texteq(field, n, collation)?,
             None => false,
         };
-        out.push(TableField { bytes: field.to_vec(), is_null });
+        ::mcx::check_alloc_size((out.len() + 1).saturating_mul(core::mem::size_of::<TableField>()))?;
+        out.try_reserve(1).map_err(|_| ::mcx::oom_named("text_to_table", 32))?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(field.len()).map_err(|_| ::mcx::oom_named("text_to_table", field.len()))?;
+        bytes.extend_from_slice(field);
+        out.push(TableField { bytes, is_null });
         Ok(())
     };
 

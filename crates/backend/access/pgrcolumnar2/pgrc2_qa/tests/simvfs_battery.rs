@@ -102,7 +102,7 @@ fn adjudicate_old_then_retry(
         .set(ctx.fxid1, TxnVerdict::Committed)
         .set(ctx.fxid2, TxnVerdict::Aborted);
     // Both walks agree on OLD.
-    let eff = effective_manifest(vfs, &ctx.fx.dir, &probe)
+    let eff = effective_manifest(vfs, &ctx.fx.dir, &probe, None)
         .map_err(|e| format!("{label}: effective: {e}"))?
         .ok_or_else(|| format!("{label}: table lost gen1"))?;
     if eff.header.gen != 1 {
@@ -207,7 +207,7 @@ fn adjudicate_old_then_retry(
     let probe3 = Probe::new(TxnVerdict::Aborted)
         .set(ctx.fxid1, TxnVerdict::Committed)
         .set(fxid3, TxnVerdict::Committed);
-    let eff2 = effective_manifest(vfs, &ctx.fx.dir, &probe3)
+    let eff2 = effective_manifest(vfs, &ctx.fx.dir, &probe3, None)
         .map_err(|e| format!("{label}: effective2: {e}"))?
         .ok_or_else(|| format!("{label}: retry lost table"))?;
     let files2 = vfs.snapshot_dir(&ctx.fx.dir);
@@ -290,7 +290,7 @@ fn publish_boundary_sweep_torn_sectors_and_dirent_loss() {
                     .set(ctx.fxid1, TxnVerdict::Committed)
                     .set(ctx.fxid2, TxnVerdict::Committed);
                 let mut u2 = universe.clone();
-                let eff = effective_manifest(&mut u2, &ctx.fx.dir, &probe_c)
+                let eff = effective_manifest(&mut u2, &ctx.fx.dir, &probe_c, None)
                     .unwrap_or_else(|e| panic!("op{n} seed{seed}: acked effective: {e}"))
                     .unwrap_or_else(|| panic!("op{n} seed{seed}: acked publish lost"));
                 assert_eq!(eff.header.gen, 2, "op{n} seed{seed}: acked gen not effective");
@@ -393,7 +393,7 @@ fn seal_window_crash_composes() {
                     .set(ctx.fxid1, TxnVerdict::Committed)
                     .set(ctx.fxid2, TxnVerdict::Committed);
                 let mut u2 = universe.clone();
-                let eff = effective_manifest(&mut u2, &ctx.fx.dir, &probe_c)
+                let eff = effective_manifest(&mut u2, &ctx.fx.dir, &probe_c, None)
                     .unwrap_or_else(|e| panic!("seal op{n} seed{seed}: acked effective: {e}"))
                     .unwrap_or_else(|| panic!("seal op{n} seed{seed}: acked publish lost"));
                 assert_eq!(eff.header.gen, 2, "seal op{n} seed{seed}: acked gen not effective");
@@ -435,7 +435,7 @@ fn acked_publish_survives_any_adversary() {
         let mut universe = v.clone();
         let mut rng = XorShift::new(0xACED ^ seed);
         universe.crash_and_revive(&mut rng);
-        let eff = effective_manifest(&mut universe, &ctx.fx.dir, &probe)
+        let eff = effective_manifest(&mut universe, &ctx.fx.dir, &probe, None)
             .expect("effective")
             .expect("acked table present");
         assert_eq!(eff.header.gen, 2, "acked publish lost (seed {seed})");
@@ -540,7 +540,7 @@ fn born_red_no_fsync_publisher_is_caught() {
 
     let mut v = vfs0.clone();
     let probe_walk = Probe::new(TxnVerdict::Aborted).set(ctx.fxid1, TxnVerdict::Committed);
-    let prev = effective_manifest(&mut v, &ctx.fx.dir, &probe_walk)
+    let prev = effective_manifest(&mut v, &ctx.fx.dir, &probe_walk, None)
         .expect("effective")
         .expect("gen1");
     bad_publish(&mut v, &ctx.fx.dir, &spec, &sealed, ctx.fxid2, &prev);
@@ -555,7 +555,7 @@ fn born_red_no_fsync_publisher_is_caught() {
         let mut universe = v.clone();
         let mut rng = XorShift::new(0xDEAD_2026 ^ seed);
         universe.crash_and_revive(&mut rng);
-        let eff = match effective_manifest(&mut universe, &ctx.fx.dir, &probe) {
+        let eff = match effective_manifest(&mut universe, &ctx.fx.dir, &probe, None) {
             Ok(Some(m)) => m,
             _ => continue,
         };
@@ -690,7 +690,7 @@ fn recovery_window_crash_sweep_empty_table() {
             // Re-recovery completes and the walks agree on EMPTY.
             recover_and_clean(&mut universe, &ctx.fx.dir, &probe)
                 .unwrap_or_else(|e| panic!("{label}: re-recovery: {e}"));
-            let eff = effective_manifest(&mut universe, &ctx.fx.dir, &probe)
+            let eff = effective_manifest(&mut universe, &ctx.fx.dir, &probe, None)
                 .unwrap_or_else(|e| panic!("{label}: effective: {e}"));
             assert!(eff.is_none(), "{label}: writer walk resurrected a dead gen");
             let files = universe.snapshot_dir(&ctx.fx.dir);
@@ -711,7 +711,7 @@ fn recovery_window_crash_sweep_empty_table() {
             w3.publish(&mut universe, &probe2)
                 .unwrap_or_else(|e| panic!("{label}: publish: {e}"));
             let probe3 = Probe::new(TxnVerdict::Aborted).set(fxid3, TxnVerdict::Committed);
-            let eff2 = effective_manifest(&mut universe, &ctx.fx.dir, &probe3)
+            let eff2 = effective_manifest(&mut universe, &ctx.fx.dir, &probe3, None)
                 .unwrap_or_else(|e| panic!("{label}: effective2: {e}"))
                 .unwrap_or_else(|| panic!("{label}: retry lost table"));
             assert_eq!(eff2.header.gen, 1, "{label}");

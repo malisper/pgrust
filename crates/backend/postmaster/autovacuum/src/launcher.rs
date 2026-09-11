@@ -138,6 +138,7 @@ pub fn AutoVacLauncherMain(startup_data: &StartupData) -> ! {
 enum Never {}
 
 fn abort_cleanup(err: &PgError) {
+    crate::worker::recover_error_state(err);
     g::HoldInterrupts();
 
     let _ = timeout_seams::disable_all_timeouts::call(false);

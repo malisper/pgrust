@@ -1405,11 +1405,17 @@ fn set_param_references<'mcx>(run: &PlannerRun<'mcx>, plan: Node<'mcx>) -> PgRes
     if ext.is_empty() {
         return Ok(());
     }
+    // C walks root->parent_root to the top (setrefs.c:2579). Here the
+    // parents of a subquery level are parked in rel_subroots by
+    // swap_with_rel_subroot, so those are walked too; setParam ids are
+    // global (paramExecTypes), so a not-yet-entered subroot's initplans
+    // cannot alias an ancestor's and the intersection stays exact.
     let mut init_set_param = types_nodes::Bitmapset::empty();
     for root in run
         .suspended_roots
         .iter()
         .map(|s| &s.root)
+        .chain(run.rel_subroots.iter().map(|s| &s.root))
         .chain(core::iter::once(&run.root))
     {
         for &ipid in root.init_plans.iter() {
@@ -5652,4 +5658,26 @@ mod scan_mutator_tests {
             .unwrap();
         assert_eq!(inner.varno, 2);
     }
+}
+
+/// eval_const_expressions with a PlannerInfo (clauses.c:2214): the folded
+/// domains and inlined SQL functions become plan dependencies so the cached
+/// plan is dropped when pg_type/pg_proc change (record_plan_*_dependency).
+pub(crate) fn fold_with_deps<'mcx>(run: &mut PlannerRun<'mcx>, expr: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    let mut type_deps: Vec<types_core::Oid> = Vec::new();
+    let mut func_deps: Vec<types_core::Oid> = Vec::new();
+    let folded = clauses::fold::eval_const_expressions_planner(
+        run.mcx,
+        expr,
+        run.glob.bound_params,
+        &mut type_deps,
+        &mut func_deps,
+    )?;
+    for typid in type_deps {
+        record_plan_type_dependency(run, typid)?;
+    }
+    for funcid in func_deps {
+        record_plan_function_dependency(run, funcid)?;
+    }
+    Ok(folded)
 }

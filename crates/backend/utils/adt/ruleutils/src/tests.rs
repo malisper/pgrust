@@ -386,7 +386,7 @@ fn deparse_view_action(action: &str, attnames: &[&str]) -> String {
     let rd = std::rc::Rc::new(attnames.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     query::get_query_def(q, &mut dctx, Some(rd), true).unwrap();
     dctx.buf.push(';');
-    dctx.buf
+    dctx.buf.into_inner()
 }
 
 #[test]

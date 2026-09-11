@@ -21,11 +21,17 @@ pub fn LocalExecuteInvalidationMessage(msg: &SharedInvalidationMessage) -> PgRes
             // leave its view permanently behind those messages' bumps (the
             // D3.2 stressor's stale-shape failure). Advancing the view on a
             // foreign-db message is harmless — lookups are db-keyed.
-            l2cache::sync_view(l2cache::Domain::Cat(m.id as i32));
+            let advanced = l2cache::sync_view(l2cache::Domain::Cat(m.id as i32));
             if m.dbId == init_small::globals::MyDatabaseId() || m.dbId == InvalidOid {
                 snapmgr_seams::invalidate_catalog_snapshot::call();
                 syscache_seams::sys_cache_invalidate::call(m.id as i32, m.hashValue)?;
                 CallSyscacheCallbacks(m.id as i32, m.hashValue)?;
+            } else if advanced {
+                // The L2 invariant is "a view at generation G scanned with a
+                // snapshot taken after the G-th bump": a foreign-database
+                // message that advanced this view drops the catalog snapshot
+                // too, so no stale image can be published at G.
+                snapmgr_seams::invalidate_catalog_snapshot::call();
             }
             Ok(())
         }
@@ -43,19 +49,21 @@ fn local_execute_other(msg: &SharedInvalidationMessage) -> PgResult<()> {
             // Catalog-wide flush: the sender bumped every cat domain
             // (catId -> cache-id mapping is not visible here either way).
             // Outside the db filter — see the Catcache arm.
-            l2cache::sync_view_all_cat();
+            let advanced = l2cache::sync_view_all_cat();
             if m.dbId == my_database_id || m.dbId == InvalidOid {
                 snapmgr_seams::invalidate_catalog_snapshot::call();
                 // CatalogCacheFlushCatalog calls CallSyscacheCallbacks as needed.
                 catcache_seams::catalog_cache_flush_catalog::call(m.catId)?;
+            } else if advanced {
+                snapmgr_seams::invalidate_catalog_snapshot::call();
             }
         }
         SharedInvalidationMessage::Relcache(m) => {
             // View sync outside the db filter — see the Catcache arm.
-            if m.relId == InvalidOid {
-                l2cache::sync_view_all_rel();
+            let advanced = if m.relId == InvalidOid {
+                l2cache::sync_view_all_rel()
             } else {
-                l2cache::sync_view(l2cache::Domain::Rel(m.relId));
+                let advanced = l2cache::sync_view(l2cache::Domain::Rel(m.relId));
                 if crate::eoxact::l2_bump_debug() {
                     eprintln!(
                         "L2DBG sync rel={} view={} thr={:?}",
@@ -64,6 +72,10 @@ fn local_execute_other(msg: &SharedInvalidationMessage) -> PgResult<()> {
                         std::thread::current().id()
                     );
                 }
+                advanced
+            };
+            if advanced && !(m.dbId == my_database_id || m.dbId == InvalidOid) {
+                snapmgr_seams::invalidate_catalog_snapshot::call();
             }
             if m.dbId == my_database_id || m.dbId == InvalidOid {
                 if m.relId == InvalidOid {

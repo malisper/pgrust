@@ -198,6 +198,9 @@ pub struct WindowAggStateData<'mcx> {
     buffer: Option<Tuplestore>,
     scan_slot: SlotData<'mcx>,
     first_part_slot: SlotData<'mcx>,
+    // C keeps one owned copy (ExecCopySlot pfrees the previous partition's
+    // tuple); a freeing context makes that hold in the no-free query arena.
+    first_part_mcx: ::mcx::Mcx<'mcx>,
     first_part_valid: bool,
     agg_row_slot: SlotData<'mcx>,
     agg_row_valid: bool,
@@ -676,6 +679,21 @@ fn erased_agg_argtypes<'mcx>(
     Ok(unsafe { ::types_core::fmgr::FnExprErased::from_node_ref(carrier) })
 }
 
+// A droppy MemoryContext pinned in the no-drop query arena; the arena's
+// reset callback is its destructor (docs/no-drop.md guard rule).
+fn make_owned_context<'mcx>(mcx: ::mcx::Mcx<'mcx>, ctx: MemoryContext) -> PgResult<::mcx::Mcx<'mcx>> {
+    let layout = core::alloc::Layout::new::<MemoryContext>();
+    let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<MemoryContext> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout; the callback fires exactly
+    // once, before the arena bytes are reclaimed.
+    unsafe { p.write(ctx) };
+    mcx.context()
+        .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+    // SAFETY: the context lives in the query arena for 'mcx.
+    Ok(unsafe { p.as_ref() }.mcx())
+}
+
 fn make_agg_state_node<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     ctx: MemoryContext,
@@ -778,6 +796,16 @@ fn wfkind_for_builtin(oid: Oid) -> Option<WfKind> {
 fn wfkind_for(mcx: ::mcx::Mcx<'_>, winfnoid: Oid) -> PgResult<Option<WfKind>> {
     if let Some(k) = wfkind_for_builtin(winfnoid) {
         return Ok(Some(k));
+    }
+    // fmgr_info resolves prosrc by name only for prolang = internal
+    // (INTERNALlanguageId = 12); a SQL-language WINDOW function naming a
+    // builtin's prosrc must not select the native kernel, whose Datum/type
+    // contract is the builtin's signature, not the user-declared one.
+    let Some(shape) = syscache_seams::lookup_pg_proc_shape::call(winfnoid)? else {
+        return Ok(None);
+    };
+    if shape.prolang != 12 {
+        return Ok(None);
     }
     let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(mcx, winfnoid)?;
     Ok(prosrc
@@ -1098,6 +1126,7 @@ pub fn exec_init_window_agg<'mcx>(
     };
     let scan_slot = mk_slot();
     let first_part_slot = mk_slot();
+    let first_part_mcx = make_owned_context(mcx, mcx.context().new_child("WindowAgg First Part"))?;
     let agg_row_slot = mk_slot();
     let temp_slot_1 = mk_slot();
     let temp_slot_2 = mk_slot();
@@ -1144,6 +1173,7 @@ pub fn exec_init_window_agg<'mcx>(
         buffer: None,
         scan_slot,
         first_part_slot,
+        first_part_mcx,
         first_part_valid: false,
         agg_row_slot,
         agg_row_valid: false,
@@ -1634,7 +1664,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             match fetch(estate)? {
                 Some(outer_id) => {
                     let outer_slot = estate.slot_mut(outer_id);
-                    exectuples::exec_copy_slot(&mut self.first_part_slot, outer_slot, mcx, mcx)?;
+                    exectuples::exec_copy_slot(&mut self.first_part_slot, outer_slot, self.first_part_mcx, mcx)?;
                     self.first_part_valid = true;
                 }
                 None => {
@@ -1732,7 +1762,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 estate.reset_expr_context(self.tmpcontext);
                 if !same {
                     let outer_slot = estate.slot_mut(outer_id);
-                    exectuples::exec_copy_slot(&mut self.first_part_slot, outer_slot, mcx, mcx)?;
+                    exectuples::exec_copy_slot(&mut self.first_part_slot, outer_slot, self.first_part_mcx, mcx)?;
                     self.partition_spooled = true;
                     self.more_partitions = true;
                     break;
@@ -3906,7 +3936,7 @@ pub fn exec_rescan_window_agg<'mcx>(
     node.all_first = true;
     node.release_partition(estate);
     let mcx = estate.es_query_cxt;
-    exectuples::exec_clear_tuple(&mut node.first_part_slot, mcx);
+    exectuples::exec_clear_tuple(&mut node.first_part_slot, node.first_part_mcx);
     node.first_part_valid = false;
     exectuples::exec_clear_tuple(&mut node.temp_slot_1, mcx);
     exectuples::exec_clear_tuple(&mut node.temp_slot_2, mcx);
@@ -3935,7 +3965,7 @@ mcx::forget_safe_struct!(
         argstates, filterstate, kernel, finalfn },
     WindowAggStateData<'_> { plan, frameOptions, default_frame, instr_idx,
         ps_ExprContext, tmpcontext,
-        ps_ResultTupleSlot, first_part_valid, agg_row_valid, perfunc, peragg,
+        ps_ResultTupleSlot, first_part_valid, first_part_mcx, agg_row_valid, perfunc, peragg,
         trans_init, trans_typlen, trans_byval, agg_node, _pergroup, pergroup_base,
         peragg_wfuncno, agg_saved,
         agg_readptr, agg_seekpos, agg_markpos, agg_mark_active,

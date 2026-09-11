@@ -112,12 +112,12 @@ fn five_step_ordering_holds_and_clog_fence_present() {
 
     // Effectiveness is clog-fenced: committed ⇒ effective; in-progress or
     // aborted ⇒ structurally invisible.
-    let eff = effective_manifest(&mut vfs, DIR, &probe).expect("eff");
+    let eff = effective_manifest(&mut vfs, DIR, &probe, None).expect("eff");
     assert_eq!(eff.expect("some").header.gen, 1);
     let cold = Probe::new(TxnVerdict::InProgress);
-    assert!(effective_manifest(&mut vfs, DIR, &cold).expect("eff").is_none());
+    assert!(effective_manifest(&mut vfs, DIR, &cold, None).expect("eff").is_none());
     let aborted = Probe::new(TxnVerdict::Aborted);
-    assert!(effective_manifest(&mut vfs, DIR, &aborted).expect("eff").is_none());
+    assert!(effective_manifest(&mut vfs, DIR, &aborted, None).expect("eff").is_none());
 }
 
 /// Generation chaining: a second committed publish chains prev_gen and

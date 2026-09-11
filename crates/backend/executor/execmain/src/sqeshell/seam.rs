@@ -2137,14 +2137,10 @@ fn registry_probe(
             map.remove(&key);
             return None;
         }
-        // Width currency: an engine built at a different pool width than
-        // the session's resolved `pgrust.sqe_threads` is stale — rebuild
-        // (this is what keeps memoized elections width-current, since
-        // `engine_is_current` is an Arc-identity probe through here).
-        if c.engine.pool.threads() != engine_threads() {
-            map.remove(&key);
-            return None;
-        }
+        // The engine is process-global and shared by every session; a
+        // session's USERSET `pgrust.sqe_threads` must not evict it (that let
+        // one session force a rebuild under everyone else). The width is
+        // fixed by whichever session built the engine.
         (Arc::clone(&c.dir), c.generation, c.publisher_fxid, Arc::clone(&c.engine))
     };
     // Head probe OUTSIDE the registry lock (file I/O never under it).
@@ -6797,6 +6793,17 @@ fn lower_set_child<'mcx>(
             }
         }
     }
+    // run_set_child applies having/sort/slice only: a child carrying a
+    // One-Time Filter verdict of false, a DISTINCT obligation, a window
+    // filter or a deferred runtime error would run unfiltered (RLS/view
+    // predicates bypassed) — refuse so the row engine executes it.
+    if child.gate.as_ref().is_some_and(|g| !g.pass)
+        || child.unique.is_some()
+        || !child.win_filter.is_empty()
+        || child.exec_error.is_some()
+    {
+        return Err(refuse(RefuseCause::NodeShape(tag, ShapeDetail::SetChild)));
+    }
     Ok(child)
 }
 
@@ -7067,6 +7074,10 @@ fn lower_append<'mcx>(
     let engine = Arc::clone(&children[0].engine);
     let relid = children[0].relid;
     let empty_bank = children.iter().any(|c| c.empty_bank);
+    // A child that consumed scalar initplans / a gate at lowering must not
+    // be memoized with those values frozen: the composed statement carries
+    // the bar (its own inits stay empty; the children re-lower per run).
+    let memo_bar = children.iter().any(|c| c.memo_bar);
     Ok(LoweredStmt {
         inits: Vec::new(),
         pass_nodes: Vec::new(),
@@ -7085,7 +7096,7 @@ fn lower_append<'mcx>(
         aux_node_ids: Vec::new(),
         gate: None,
         unique: None,
-        memo_bar: false,
+        memo_bar,
         empty_bank,
         relid,
         exec_error: None,
@@ -7292,6 +7303,7 @@ fn lower_setop<'mcx>(
     let engine = Arc::clone(&left.engine);
     let relid = left.relid;
     let empty_bank = left.empty_bank || right.empty_bank;
+    let memo_bar = left.memo_bar || right.memo_bar;
     Ok(LoweredStmt {
         inits: Vec::new(),
         pass_nodes: Vec::new(),
@@ -7314,7 +7326,7 @@ fn lower_setop<'mcx>(
         aux_node_ids: Vec::new(),
         gate: None,
         unique: None,
-        memo_bar: false,
+        memo_bar,
         empty_bank,
         relid,
         exec_error: None,
@@ -12071,6 +12083,9 @@ fn lower_recursive<'mcx>(
     // The top engine binding: the step's base goal (columnar) or the
     // seed goal — at least one exists (a CTE with neither never
     // addresses a columnar relation and never reaches this seam).
+    // Children that consumed initplans/gates at lowering bar memoization.
+    let memo_bar = matches!(&seed, RecSeed::Goal(g) if g.memo_bar)
+        || matches!(&step, RecStep::Join { base, .. } if base.memo_bar);
     let bound: Option<&LoweredStmt> = match (&step, &seed) {
         (RecStep::Join { base, .. }, _) => Some(base),
         (_, RecSeed::Goal(g)) => Some(g),
@@ -12128,7 +12143,7 @@ fn lower_recursive<'mcx>(
         unique: None,
         // Memoization law: the fixpoint is a pure function of the plan
         // and the bound engines' currency (checked per execution).
-        memo_bar: false,
+        memo_bar,
         empty_bank: false,
         relid,
         exec_error: None,
@@ -19850,6 +19865,7 @@ fn lower_full_merge_join<'mcx>(
     let engine = Arc::clone(&left.engine);
     let relid = left.relid;
     let empty_bank = left.empty_bank || right.empty_bank;
+    let memo_bar = left.memo_bar || right.memo_bar;
     Ok(LoweredStmt {
         inits: Vec::new(),
         pass_nodes: Vec::new(),
@@ -19868,7 +19884,7 @@ fn lower_full_merge_join<'mcx>(
         having: None,
         gate: None,
         unique: None,
-        memo_bar: false,
+        memo_bar,
         empty_bank,
         relid,
         exec_error: None,
@@ -24035,6 +24051,15 @@ fn open_engine(
             &OpenOpts { bankstats: true, threads: engine_threads() },
         );
         let engine = Arc::new(Engine::new(bank, engine_config()));
+        // Every engine owns a core-width OS thread pool: bound the registry
+        // so querying many columnar relations cannot pin threads without
+        // limit (an evicted engine's pool stops when its last user drops).
+        const MAX_ENGINES: usize = 64;
+        if map.len() >= MAX_ENGINES {
+            if let Some(victim) = map.keys().next().copied() {
+                map.remove(&victim);
+            }
+        }
         map.insert(
             key,
             CachedEngine {

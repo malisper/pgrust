@@ -157,6 +157,10 @@ pub(crate) struct Acct {
     pub(crate) live_chunk_bytes: Cell<usize>,
     pub(crate) free_chunks: Cell<usize>,
     pub(crate) is_bump: bool,
+    // An AllocSet whose reset discards live chunks by design (C's aggcontext:
+    // transition states of any type are dropped by AllocSetReset), exempt
+    // from the leak check exact-accounting contexts get.
+    pub(crate) wholesale_reset: Cell<bool>,
     pub(crate) kind: &'static str,
     pub(crate) parent: Option<AcctRc>,
     pub(crate) children: RefCell<alloc::vec::Vec<AcctWeak>>,
@@ -1101,6 +1105,14 @@ impl MemoryContext {
         )
     }
 
+    /// An AllocSet (individual frees work) whose reset is wholesale like C's
+    /// AllocSetReset: live chunks are dropped, not reported as leaks.
+    pub fn new_child_wholesale(&self, name: &'static str) -> MemoryContext {
+        let ctx = self.new_child(name);
+        ctx.acct.wholesale_reset.set(true);
+        ctx
+    }
+
     pub fn new_child_bump(&self, name: &'static str) -> MemoryContext {
         Self::with_backend(name, Backend::Bump(new_arena()), Some(self.acct.clone()))
     }
@@ -1219,6 +1231,7 @@ impl MemoryContext {
             name: Cell::new(name),
             ident: RefCell::new(None),
             self_used: Cell::new(0),
+            wholesale_reset: Cell::new(false),
             self_peak: Cell::new(0),
             limit: Cell::new(usize::MAX),
             limited_path: Cell::new(limited_path),
@@ -1435,7 +1448,10 @@ impl MemoryContext {
         // a final wholesale teardown (C frees TopMemoryContext at proc_exit
         // without such a check), where transient charged data is discarded by
         // design, not leaked.
-        if !self.acct.is_bump && !SESSION_ROOT_RETIRING.with(core::cell::Cell::get) {
+        if !self.acct.is_bump
+            && !self.acct.wholesale_reset.get()
+            && !SESSION_ROOT_RETIRING.with(core::cell::Cell::get)
+        {
             debug_assert_eq!(
                 self.acct.self_used.get(),
                 0,
@@ -1779,10 +1795,14 @@ impl fmt::Debug for Mcx<'_> {
 /// C mcxt.c: `palloc` rejects any request above `MaxAllocSize` before the
 /// context sees it ("invalid memory alloc request size"). Out-of-line so the
 /// allocate/grow fast paths carry only a compare + never-taken branch.
+// mcxt.c MemoryContextSizeFailure: elog(ERROR), recovered at the statement
+// boundary. Returning AllocError here would leave every infallible lane
+// (PgVec::push, extend, resize) to handle_alloc_error — an abort of the whole
+// server — where C raises a catchable error.
 #[cold]
 #[inline(never)]
-fn alloc_ceiling_exceeded() -> AllocError {
-    AllocError
+fn alloc_ceiling_exceeded(size: usize) -> ! {
+    panic!("invalid memory alloc request size {size}")
 }
 
 // SAFETY contract for callers: one-statement &mut, never re-entered; one context, one thread.
@@ -1812,7 +1832,7 @@ unsafe impl Allocator for Mcx<'_> {
         // Huge (>1GB) requests must opt out via `alloc_uninit_bytes_huge` /
         // the `*_huge` helpers, mirroring C's palloc vs palloc_extended(HUGE).
         if layout.size() > MAX_ALLOC_SIZE {
-            return Err(alloc_ceiling_exceeded());
+            alloc_ceiling_exceeded(layout.size());
         }
         self.allocate_unchecked(layout)
     }
@@ -1856,7 +1876,7 @@ unsafe impl Allocator for Mcx<'_> {
         // try_reserve) reallocates through here, so the ceiling must hold on
         // grow as well as allocate. Huge growth opts out via vec_reserve_huge.
         if new_layout.size() > MAX_ALLOC_SIZE {
-            return Err(alloc_ceiling_exceeded());
+            alloc_ceiling_exceeded(new_layout.size());
         }
         self.0.check_live();
         #[cfg(debug_assertions)]
@@ -2032,7 +2052,7 @@ impl Mcx<'_> {
     #[inline(never)]
     pub fn alloc_uninit_bytes_huge(self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
         if layout.size() > MAX_ALLOC_HUGE_SIZE {
-            return Err(alloc_ceiling_exceeded());
+            alloc_ceiling_exceeded(layout.size());
         }
         self.allocate_unchecked(layout).map(|p| p.cast::<u8>())
     }

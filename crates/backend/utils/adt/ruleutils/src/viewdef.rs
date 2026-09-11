@@ -54,7 +54,7 @@ pub fn pg_get_viewdef_worker(
     ctx.wrap_column = wrap_column;
     query::get_query_def(query, &mut ctx, Some(result_desc), true)?;
     ctx.buf.push(';');
-    Ok(Some(ctx.buf))
+    Ok(Some(ctx.buf.into_inner()))
 }
 
 // RelationGetDescr(ev_relation) reduced to the attname-by-position slice

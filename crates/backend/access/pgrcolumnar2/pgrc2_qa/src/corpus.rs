@@ -855,7 +855,7 @@ pub fn build_fixture(fx: Fixture) -> BuiltFixture {
     let files = vfs.snapshot_dir(&fx.dir);
     let manifest = {
         use pgrc2_write::publish::effective_manifest;
-        effective_manifest(&mut vfs, &fx.dir, &probe)
+        effective_manifest(&mut vfs, &fx.dir, &probe, None)
             .expect("effective")
             .expect("committed generation")
     };

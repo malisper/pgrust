@@ -777,6 +777,51 @@ fn convert_exists_sublink_to_join<'mcx>(
                 })
             };
         }
+        // OffsetVarNodes over the copied Query (subselect.c:1542) reaches
+        // every RTE field through range_table_walker; the rewriter's RLS
+        // securityQuals number their Vars against the sub-select's rtable.
+        if !srte.securityQuals.is_nil() {
+            let mut quals = NodeList::nil();
+            for q in &srte.securityQuals {
+                quals.lappend(mcx, offset_and_pull_down(mcx, q, rtoffset)?)?;
+            }
+            // SAFETY: exclusive pre-seal fixup of the fresh copy.
+            unsafe {
+                copy.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.securityQuals = quals
+                })
+            };
+        }
+        if let Some(ts) = srte.tablesample {
+            let ts = offset_and_pull_down(mcx, ts, rtoffset)?;
+            // SAFETY: as above.
+            unsafe {
+                copy.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.tablesample = Some(ts)
+                })
+            };
+        }
+        if let Some(tf) = srte.tablefunc {
+            let tf = offset_and_pull_down(mcx, tf, rtoffset)?;
+            // SAFETY: as above.
+            unsafe {
+                copy.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.tablefunc = Some(tf)
+                })
+            };
+        }
+        if !srte.values_lists.is_nil() {
+            let mut lists = NodeList::nil();
+            for l in &srte.values_lists {
+                lists.lappend(mcx, offset_and_pull_down(mcx, l, rtoffset)?)?;
+            }
+            // SAFETY: as above.
+            unsafe {
+                copy.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.values_lists = lists
+                })
+            };
+        }
         parse.rtable.lappend(mcx, copy)?;
     }
     for p in &subselect.rteperminfos {

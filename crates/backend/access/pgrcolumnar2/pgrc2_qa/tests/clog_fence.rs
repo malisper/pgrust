@@ -78,7 +78,7 @@ fn durable_uncommitted_publish_is_invisible_on_both_walks() {
     let probe = Probe::new(TxnVerdict::Aborted).set(FXID_GEN1, TxnVerdict::Committed);
 
     // Writer-side walk: gen1, with the dead gen2 walked past.
-    let eff = effective_manifest(&mut vfs, &fx.dir, &probe)
+    let eff = effective_manifest(&mut vfs, &fx.dir, &probe, None)
         .expect("effective")
         .expect("gen1 present");
     assert_eq!(eff.header.gen, 1, "dead publish resurrected on writer walk");
@@ -112,7 +112,7 @@ fn durable_uncommitted_publish_is_invisible_on_both_walks() {
     let lying = Probe::new(TxnVerdict::Aborted)
         .set(FXID_GEN1, TxnVerdict::Committed)
         .set(FXID_DEAD, TxnVerdict::Committed);
-    let eff_lied = effective_manifest(&mut vfs, &fx.dir, &lying)
+    let eff_lied = effective_manifest(&mut vfs, &fx.dir, &lying, None)
         .expect("effective under lie")
         .expect("present");
     assert_eq!(
@@ -149,7 +149,7 @@ fn recycled_xid_cannot_resurrect_and_name_is_reclaimed() {
 
     // gen2 is now FXID_LIVE's — the name was reclaimed; FXID_DEAD's bytes
     // are gone, and its verdict (still Aborted) is irrelevant forever.
-    let eff = effective_manifest(&mut vfs, &fx.dir, &committed)
+    let eff = effective_manifest(&mut vfs, &fx.dir, &committed, None)
         .expect("effective")
         .expect("gen2");
     assert_eq!(eff.header.gen, 2);
@@ -187,7 +187,7 @@ fn all_uncommitted_is_an_empty_table_and_fully_reclaimed() {
 
     let dead = Probe::new(TxnVerdict::Aborted);
     // Both walks: empty table, not an error.
-    assert!(effective_manifest(&mut vfs, &fx.dir, &dead)
+    assert!(effective_manifest(&mut vfs, &fx.dir, &dead, None)
         .expect("effective")
         .is_none());
     let files = vfs.snapshot_dir(&fx.dir);

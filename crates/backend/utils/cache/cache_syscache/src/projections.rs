@@ -2562,9 +2562,15 @@ fn lookup_pg_statistic_slot_images<'mcx>(
         SysCacheKey::Value(Datum::from_i16(attnum)),
         SysCacheKey::Value(Datum::from_bool(inh)),
     )?
-    .unwrap_or_else(|| {
-        panic!("pg_statistic row ({relid},{attnum},{inh}) vanished between bundle probe and slot fetch")
-    });
+    .ok_or_else(|| {
+        // A lock-compatible concurrent delete (pg_clear_attribute_stats) can
+        // legitimately remove the row between the bundle probe and this
+        // fetch; C keeps one pinned tuple, so the closest recoverable
+        // outcome is an ERROR for this statement.
+        Box::new(types_error::PgError::error(format!(
+            "pg_statistic row ({relid},{attnum},{inh}) vanished between bundle probe and slot fetch"
+        )))
+    })?;
     let t = tuple.tuple();
     // Read stakind/staop for slot `pos` from the SAME freshly-pinned tuple the
     // arrays are read from, so images() can re-validate them against the

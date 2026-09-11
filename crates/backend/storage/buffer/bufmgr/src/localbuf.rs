@@ -790,6 +790,19 @@ pub fn AtEOXact_LocalBuffers(_is_commit: bool) {
 
 pub fn AtProcExit_LocalBuffers() {
     CheckForLocalBufferLeaks();
+    // localbuf.c: the calloc'd arrays die with the backend process; here the
+    // thread's leaked slices are reclaimed once nothing can reference them.
+    LOCAL.with(|l| {
+        // SAFETY: one backend = one thread, at its exit; the slices were made
+        // by Box::leak in init_local_buffers and are unreachable after take().
+        if let Some(lb) = unsafe { (*l.get()).take() } {
+            unsafe {
+                drop(Box::from_raw(core::ptr::from_ref(lb.descs).cast_mut()));
+                drop(Box::from_raw(core::ptr::from_ref(lb.blocks).cast_mut()));
+                drop(Box::from_raw(core::ptr::from_ref(lb.ref_counts).cast_mut()));
+            }
+        }
+    });
 }
 
 pub(crate) fn install_check_temp_buffers_hook() {

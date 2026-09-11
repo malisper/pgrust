@@ -123,7 +123,16 @@ impl SegBuf {
         len: usize,
         fill: impl FnOnce(&mut [u8]) -> ReadResult<()>,
     ) -> ReadResult<SegBuf> {
-        let mut words = vec![0u64; len.div_ceil(8)];
+        // `len` is an on-file extent length (up to u32::MAX): admitted under
+        // C's MaxAllocSize and reserved fallibly, so a hostile part is a
+        // typed read error, never an allocator abort.
+        const MAX_ALLOC_SIZE: usize = 0x3FFF_FFFF;
+        let nwords = len.div_ceil(8);
+        let mut words: Vec<u64> = Vec::new();
+        if len > MAX_ALLOC_SIZE || words.try_reserve_exact(nwords).is_err() {
+            return Err(ReadError::Io { at: "extent image allocation", errno: libc::ENOMEM });
+        }
+        words.resize(nwords, 0);
         // SAFETY: u64 → u8 reinterpret of an exclusively owned buffer;
         // alignment only loosens and `len <= words.len() * 8`.
         let bytes =

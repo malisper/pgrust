@@ -293,6 +293,72 @@ pub fn resolve_password(opts: &[(String, String)]) -> Option<String> {
 
 // libpq's unix-socket connect leg.
 #[cfg(not(target_family = "wasm"))]
+#[cfg(not(target_family = "wasm"))]
+fn peer_uid(sock: RawFd) -> Result<libc::uid_t, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: getsockopt writes at most `len` bytes into `cred`.
+        let rc = unsafe {
+            libc::getsockopt(
+                sock,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                std::ptr::addr_of_mut!(cred).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(format!(
+                "could not get peer credentials: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(cred.uid)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let (mut uid, mut gid) = (0, 0);
+        // SAFETY: valid socket fd and out-params.
+        if unsafe { libc::getpeereid(sock, &mut uid, &mut gid) } != 0 {
+            return Err(format!(
+                "could not get peer credentials: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(uid)
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn check_requirepeer(sock: RawFd, want: &str) -> Result<(), String> {
+    let uid = peer_uid(sock)?;
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: getpwuid_r fills `pw` and strings into `buf` of the given size.
+    let rc = unsafe {
+        libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr().cast(), buf.len(), &mut result)
+    };
+    if rc != 0 || result.is_null() {
+        return Err(format!("could not look up local user ID {uid}: user does not exist"));
+    }
+    // SAFETY: pw_name points into `buf`, NUL-terminated by getpwuid_r.
+    let name = unsafe { std::ffi::CStr::from_ptr(pw.pw_name) }.to_string_lossy();
+    if name != want {
+        return Err(format!(
+            "requirepeer specifies \"{want}\", but actual peer user name is \"{name}\""
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_family = "wasm")]
+fn check_requirepeer(_sock: RawFd, _want: &str) -> Result<(), String> {
+    Err("requirepeer is not supported on this platform".into())
+}
+
 fn unix_connect(path: &str) -> Result<(Stream, RawFd), String> {
     use std::os::fd::AsRawFd;
     match std::os::unix::net::UnixStream::connect(path) {
@@ -363,6 +429,74 @@ fn check_sslmode(opts: &[(String, String)]) -> Result<(), String> {
     }
 }
 
+// fe-connect.c connectOptions2 "validate channel_binding option": returns
+// whether channel binding is required. Enforcement happens in the auth
+// handshake, where libpq refuses every non-channel-bound exchange.
+fn check_channel_binding(opts: &[(String, String)]) -> Result<bool, String> {
+    match opt(opts, "channel_binding") {
+        None | Some("") | Some("disable") | Some("prefer") => Ok(false),
+        Some("require") => Ok(true),
+        Some(other) => Err(format!("invalid channel_binding value: \"{other}\"")),
+    }
+}
+
+// The #ifndef USE_SSL arms of connectOptions2 that precede sslmode:
+// sslrootcert=system changes the default sslmode, so it is refused first.
+fn check_sslrootcert(opts: &[(String, String)]) -> Result<(), String> {
+    match opt(opts, "sslrootcert") {
+        Some("system") => {
+            Err("sslrootcert value \"system\" invalid when SSL support is not compiled in".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_sslnegotiation(opts: &[(String, String)]) -> Result<(), String> {
+    match opt(opts, "sslnegotiation") {
+        None | Some("") | Some("postgres") => Ok(()),
+        Some("direct") => Err(
+            "sslnegotiation value \"direct\" invalid when SSL support is not compiled in".into(),
+        ),
+        Some(other) => Err(format!("invalid sslnegotiation value: \"{other}\"")),
+    }
+}
+
+fn check_sslcertmode(opts: &[(String, String)]) -> Result<(), String> {
+    match opt(opts, "sslcertmode") {
+        None | Some("") | Some("disable") | Some("allow") => Ok(()),
+        Some("require") => {
+            Err("sslcertmode value \"require\" invalid when SSL support is not compiled in".into())
+        }
+        Some(other) => Err(format!("invalid sslcertmode value: \"{other}\"")),
+    }
+}
+
+// The #ifndef ENABLE_GSS arm: this client has no GSSAPI transport either.
+fn check_gssencmode(opts: &[(String, String)]) -> Result<(), String> {
+    match opt(opts, "gssencmode") {
+        None | Some("") | Some("disable") | Some("prefer") => Ok(()),
+        Some("require") => Err(
+            "gssencmode value \"require\" invalid when GSSAPI support is not compiled in".into(),
+        ),
+        Some(other) => Err(format!("invalid gssencmode value: \"{other}\"")),
+    }
+}
+
+// connectOptions2's transport-security validation in libpq's order
+// (channel_binding, sslrootcert, sslmode, sslnegotiation, sslcertmode,
+// gssencmode). Every option this client cannot honour is a hard error before
+// any socket is opened; silently proceeding in cleartext is the downgrade
+// libpq exists to prevent.
+fn check_transport_options(opts: &[(String, String)]) -> Result<bool, String> {
+    let channel_binding_require = check_channel_binding(opts)?;
+    check_sslrootcert(opts)?;
+    check_sslmode(opts)?;
+    check_sslnegotiation(opts)?;
+    check_sslcertmode(opts)?;
+    check_gssencmode(opts)?;
+    Ok(channel_binding_require)
+}
+
 pub fn connect(
     opts: Vec<(String, String)>,
     startup_params: &[(&str, &str)],
@@ -384,9 +518,10 @@ pub fn connect(
         Ok(p) => p,
         Err(e) => return Ok(Err(e)),
     };
-    if let Err(e) = check_sslmode(&opts) {
-        return Ok(Err(e));
-    }
+    let policy = match check_transport_options(&opts) {
+        Ok(cb) => policy.with_channel_binding_required(cb),
+        Err(e) => return Ok(Err(e)),
+    };
     let keys = match auth::ScramKeys::parse(
         opt(&opts, "scram_client_key"),
         opt(&opts, "scram_server_key"),
@@ -412,7 +547,18 @@ pub fn connect(
     let (stream, fd, target, display_host) = if !host.is_empty() && host.starts_with('/') {
         let path = format!("{host}/.s.PGSQL.{port}");
         match unix_connect(&path) {
-            Ok((s, fd)) => (s, fd, DialTarget::Unix(path), host.clone()),
+            Ok((s, fd)) => {
+                // fe-connect.c PQconnectPoll: requirepeer verifies the
+                // socket peer's OS identity before the startup packet (and
+                // any credential) is sent — the only server authentication
+                // available on a Unix socket in a world-writable directory.
+                if let Some(want) = opt(&opts, "requirepeer").filter(|s| !s.is_empty()) {
+                    if let Err(e) = check_requirepeer(fd, want) {
+                        return Ok(Err(e));
+                    }
+                }
+                (s, fd, DialTarget::Unix(path), host.clone())
+            }
             Err(e) => return Ok(Err(e)),
         }
     } else {
@@ -901,6 +1047,9 @@ impl PgConn {
                     rows.clear();
                 }
                 b'D' => match parse_data_row(&mbody) {
+                    Ok(r) if r.len() != nfields => {
+                        return Ok(self.proto_error(unexpected_field_count(r.len(), nfields)))
+                    }
                     Ok(r) => rows.push(r),
                     Err(e) => return Ok(self.proto_error(e)),
                 },
@@ -1125,6 +1274,9 @@ impl PgConn {
                     rows.clear();
                 }
                 b'D' => match parse_data_row(&mbody) {
+                    Ok(r) if r.len() != nfields => {
+                        return Ok(self.proto_error(unexpected_field_count(r.len(), nfields)))
+                    }
                     Ok(r) => rows.push(r),
                     Err(e) => return Ok(self.proto_error(e)),
                 },
@@ -1253,6 +1405,9 @@ impl PgConn {
                 Err(e) => return Err(e),
             };
             match t {
+                // fe-protocol3.c pqGetCopyData3: a zero-length CopyData
+                // message is dropped, never surfaced as a 0-byte read.
+                b'd' if body.is_empty() => continue,
                 b'd' => return Ok(CopyData::Msg(body)),
                 b'c' => {
                     self.copy_server_done = true;
@@ -1299,6 +1454,9 @@ impl PgConn {
                     rows.clear();
                 }
                 b'D' => match parse_data_row(&body) {
+                    Ok(r) if r.len() != nfields => {
+                        return Ok(Some(self.proto_error(unexpected_field_count(r.len(), nfields))))
+                    }
                     Ok(r) => rows.push(r),
                     Err(e) => return Ok(Some(self.proto_error(e))),
                 },
@@ -1663,6 +1821,11 @@ pub(crate) fn parse_data_row(body: &[u8]) -> Result<Vec<Option<Vec<u8>>>, String
     let mut cols = Vec::new();
     parse_data_row_borrowed(body, &mut cols)?;
     Ok(cols.into_iter().map(|c| c.map(|s| s.to_vec())).collect())
+}
+
+// fe-protocol3.c getAnotherTuple: "unexpected field count in \"D\" message".
+fn unexpected_field_count(got: usize, want: usize) -> String {
+    format!("unexpected field count in \"D\" message (got {got}, expected {want})")
 }
 
 fn parse_data_row_borrowed<'a>(
@@ -2189,6 +2352,96 @@ mod tests {
             check_sslmode(&opts).err().unwrap(),
             "invalid sslmode value: \"bogus\""
         );
+    }
+
+    #[test]
+    fn transport_options_refused_without_ssl_or_gss() {
+        let o = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+        let ssl = |k: &str, v: &str| {
+            format!("{k} value \"{v}\" invalid when SSL support is not compiled in")
+        };
+        assert_eq!(check_transport_options(&o("sslrootcert", "system")).unwrap_err(), ssl("sslrootcert", "system"));
+        assert_eq!(check_transport_options(&o("sslnegotiation", "direct")).unwrap_err(), ssl("sslnegotiation", "direct"));
+        assert_eq!(check_transport_options(&o("sslcertmode", "require")).unwrap_err(), ssl("sslcertmode", "require"));
+        assert_eq!(
+            check_transport_options(&o("gssencmode", "require")).unwrap_err(),
+            "gssencmode value \"require\" invalid when GSSAPI support is not compiled in"
+        );
+        assert_eq!(check_transport_options(&o("sslnegotiation", "x")).unwrap_err(), "invalid sslnegotiation value: \"x\"");
+        assert_eq!(check_transport_options(&o("sslcertmode", "x")).unwrap_err(), "invalid sslcertmode value: \"x\"");
+        assert_eq!(check_transport_options(&o("gssencmode", "x")).unwrap_err(), "invalid gssencmode value: \"x\"");
+        assert_eq!(check_transport_options(&o("channel_binding", "x")).unwrap_err(), "invalid channel_binding value: \"x\"");
+        // sslrootcert=system is checked before sslmode, as fe-connect.c does.
+        let both = vec![("sslmode".to_string(), "bogus".to_string()), ("sslrootcert".to_string(), "system".to_string())];
+        assert_eq!(check_transport_options(&both).unwrap_err(), ssl("sslrootcert", "system"));
+        for (k, v) in [
+            ("sslrootcert", "/x/ca.crt"), ("sslnegotiation", "postgres"), ("sslcertmode", "disable"),
+            ("sslcertmode", "allow"), ("gssencmode", "disable"), ("gssencmode", "prefer"),
+            ("channel_binding", "disable"), ("channel_binding", "prefer"),
+        ] {
+            assert_eq!(check_transport_options(&o(k, v)), Ok(false), "{k}={v}");
+        }
+        assert_eq!(check_transport_options(&o("channel_binding", "require")), Ok(true));
+        assert_eq!(check_transport_options(&[]), Ok(false));
+    }
+
+    // connect() must refuse before dialing: an unroutable port proves no
+    // socket was opened (a dial would fail with a connection error instead).
+    #[test]
+    fn connect_refuses_ignored_security_options_before_dial() {
+        for (k, v) in [
+            ("gssencmode", "require"), ("sslnegotiation", "direct"),
+            ("sslcertmode", "require"), ("sslrootcert", "system"),
+        ] {
+            let opts = vec![
+                ("host".to_string(), "127.0.0.1".to_string()),
+                ("port".to_string(), "1".to_string()),
+                (k.to_string(), v.to_string()),
+            ];
+            let err = match connect(opts, &[("user", "u")], WaitEvents { connect: 0, receive: 0 }) {
+                Ok(Err(e)) => e,
+                _ => panic!("{k}={v}: connect must refuse before dialing"),
+            };
+            assert!(err.contains("not compiled in"), "{k}={v}: {err}");
+        }
+    }
+
+    // channel_binding=require against a server that asks for a cleartext
+    // password: the request is refused and no 'p' message reaches the wire.
+    #[test]
+    fn channel_binding_require_never_sends_password() {
+        use std::io::Read;
+        for (areq, want) in [
+            (3i32, "channel binding required but not supported by server's authentication request"),
+            (5, "channel binding required but not supported by server's authentication request"),
+            (0, "channel binding required, but server authenticated client without channel binding"),
+            (10, "channel binding required, but SSL not in use"),
+        ] {
+            let (mut conn, mut srv) = test_conn();
+            let mut body = areq.to_be_bytes().to_vec();
+            if areq == 5 {
+                body.extend_from_slice(&[1, 2, 3, 4]);
+            }
+            if areq == 10 {
+                body.extend_from_slice(b"SCRAM-SHA-256\0\0");
+            }
+            conn.inbuf = frame(b'R', 4 + body.len() as i32, &body);
+            let policy = auth::AuthPolicy::parse(None).unwrap().with_channel_binding_required(true);
+            let auth_opts = auth::AuthOptions {
+                password: Some("secret"),
+                keys: auth::ScramKeys::default(),
+                policy,
+            };
+            let err = auth::handshake(&mut conn, "u", &auth_opts).unwrap().unwrap_err();
+            assert_eq!(err, want, "areq {areq}");
+            srv.set_nonblocking(true).unwrap();
+            let mut buf = [0u8; 64];
+            match srv.read(&mut buf) {
+                Ok(0) => {}
+                Ok(n) => panic!("areq {areq}: client sent {n} bytes: {:?}", &buf[..n]),
+                Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::WouldBlock),
+            }
+        }
     }
 
     #[test]

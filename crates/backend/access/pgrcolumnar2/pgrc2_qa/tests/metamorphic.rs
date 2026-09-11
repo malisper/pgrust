@@ -44,7 +44,7 @@ fn publish_and_decode(fx: &Fixture) -> (Vec<(u32, u16)>, u64, Vec<u8>) {
     finish(&mut vfs, &mut w, fx).expect("finish");
     w.publish(&mut vfs, &probe).expect("publish");
     probe.mark(fxid, TxnVerdict::Committed);
-    let eff = effective_manifest(&mut vfs, &fx.dir, &probe)
+    let eff = effective_manifest(&mut vfs, &fx.dir, &probe, None)
         .expect("effective")
         .expect("gen1");
     let files = vfs.snapshot_dir(&fx.dir);
@@ -225,7 +225,7 @@ fn source_order_permutation_is_byte_stable() {
         finish_with_sources(&mut vfs, &mut w, &sources).expect("finish");
         w.publish(&mut vfs, &probe).expect("publish");
         probe.mark(fxid, TxnVerdict::Committed);
-        let eff = effective_manifest(&mut vfs, &fx.dir, &probe)
+        let eff = effective_manifest(&mut vfs, &fx.dir, &probe, None)
             .expect("effective")
             .expect("gen1");
         let files = vfs.snapshot_dir(&fx.dir);

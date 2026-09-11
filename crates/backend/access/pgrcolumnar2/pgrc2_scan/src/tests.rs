@@ -64,7 +64,7 @@ fn dict_text_bf(rows: u64, vocab: u64, relf: u64) -> BuiltFixture {
     w.publish(&mut vfs, &probe).expect("publish");
     probe.mark(fxid, TxnVerdict::Committed);
     let files = vfs.snapshot_dir(&fx.dir);
-    let manifest = pgrc2_write::publish::effective_manifest(&mut vfs, &fx.dir, &probe)
+    let manifest = pgrc2_write::publish::effective_manifest(&mut vfs, &fx.dir, &probe, None)
         .expect("effective")
         .expect("committed");
     BuiltFixture {

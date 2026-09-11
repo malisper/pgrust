@@ -474,6 +474,11 @@ fn recompress_additems(oldseg: &[u8], items: &[u8]) -> PgResult<Vec<u8>> {
             let mut delta = 0u64;
             let mut shift = 0u32;
             loop {
+                if pos >= nbytes {
+                    return Err(corrupt_err(format!(
+                        "GIN redo recompress: ADDITEMS segment ends inside a varbyte item at {nbytes} bytes"
+                    )));
+                }
                 let c = payload[pos] as u64;
                 pos += 1;
                 if shift == 42 {
@@ -999,6 +1004,17 @@ pub fn init_seams() {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn additems_decoder_refuses_truncated_varbyte_item() {
+        // 6-byte first item, nbytes = 1, payload = one byte with bit 7 set:
+        // the delta claims a continuation byte the segment does not hold.
+        let mut seg = vec![0u8; 9];
+        seg[6..8].copy_from_slice(&1u16.to_ne_bytes());
+        seg[8] = 0x80;
+        let err = super::recompress_additems(&seg, &[]).unwrap_err();
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+    }
+
     use super::*;
 
     // A short / truncated / size-inflated GIN record must surface as a

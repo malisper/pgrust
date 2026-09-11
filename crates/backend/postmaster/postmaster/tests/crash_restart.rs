@@ -149,7 +149,7 @@ fn crash_fans_out_sigquit_and_reinit_completes() {
     guc_tables::vars::remove_temp_files_after_crash.write(false);
 
     waiteventset::InitializeWaitEventSupport().unwrap();
-    miscinit::InitProcessLocalLatch();
+    miscinit::InitProcessLocalLatch().expect("local latch");
 
     let victim_slot =
         pmchild_seams::assign_postmaster_child_slot::call(BackendType::Backend).unwrap();

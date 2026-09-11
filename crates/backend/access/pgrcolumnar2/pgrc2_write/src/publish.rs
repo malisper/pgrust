@@ -101,17 +101,23 @@ fn read_manifest_opt(vfs: &mut dyn WriteVfs, dir: &str, gen: u64) -> Option<Mani
 /// The newest EFFECTIVE (committed-publisher) manifest generation, or None
 /// for an empty table. `CURRENT` is a hint + O(1) entry point; the chain
 /// walk and the scan fallback are the authority (spec §13.2).
+/// `own_fxid`: Some(f) for a publisher — its own in-progress generation is a
+/// valid base to chain on (a second publish in one transaction), and a
+/// FOREIGN in-progress head refuses the publish (reusing its generation and
+/// part numbers would overwrite that transaction's files); None for readers,
+/// which skip every non-committed generation.
 pub fn effective_manifest(
     vfs: &mut dyn WriteVfs,
     dir: &str,
     probe: &dyn TxnProbe,
+    own_fxid: Option<u64>,
 ) -> WriteResult<Option<Manifest>> {
     // Hint arm: CURRENT → candidate gen → walk prev_gen.
     let current_path = full_path(dir, CURRENT_FILE_NAME);
     if vfs.exists_path(&current_path)? {
         if let Ok(bytes) = vfs.read_full(&current_path) {
             if let Ok(cp) = CommitPointer::decode(&bytes) {
-                if let Some(m) = walk_chain(vfs, dir, cp.gen, probe) {
+                if let Some(m) = walk_chain(vfs, dir, cp.gen, probe, own_fxid)? {
                     return Ok(Some(m));
                 }
             }
@@ -129,6 +135,14 @@ pub fn effective_manifest(
         if let Some(m) = read_manifest_opt(vfs, dir, g) {
             match probe.verdict(m.header.publisher_fxid) {
                 TxnVerdict::Committed => return Ok(Some(m)),
+                TxnVerdict::InProgress if own_fxid == Some(m.header.publisher_fxid) => {
+                    return Ok(Some(m))
+                }
+                TxnVerdict::InProgress if own_fxid.is_some() => {
+                    return Err(WriteError::Contract {
+                        detail: "another transaction's publish of this table is in progress",
+                    })
+                }
                 _ => continue,
             }
         }
@@ -143,15 +157,25 @@ fn walk_chain(
     dir: &str,
     mut gen: u64,
     probe: &dyn TxnProbe,
-) -> Option<Manifest> {
+    own_fxid: Option<u64>,
+) -> WriteResult<Option<Manifest>> {
     while gen != 0 {
-        let m = read_manifest_opt(vfs, dir, gen)?;
-        if probe.verdict(m.header.publisher_fxid) == TxnVerdict::Committed {
-            return Some(m);
+        let Some(m) = read_manifest_opt(vfs, dir, gen) else { return Ok(None) };
+        match probe.verdict(m.header.publisher_fxid) {
+            TxnVerdict::Committed => return Ok(Some(m)),
+            TxnVerdict::InProgress if own_fxid == Some(m.header.publisher_fxid) => {
+                return Ok(Some(m))
+            }
+            TxnVerdict::InProgress if own_fxid.is_some() => {
+                return Err(WriteError::Contract {
+                    detail: "another transaction's publish of this table is in progress",
+                })
+            }
+            _ => {}
         }
         gen = m.header.prev_gen;
     }
-    None
+    Ok(None)
 }
 
 /// The sealed footer image's elected grain (SB-10): the footer is the
@@ -177,7 +201,7 @@ pub fn publish_parts(
             detail: "publish with zero sealed parts",
         });
     }
-    let base = effective_manifest(vfs, dir, probe)?;
+    let base = effective_manifest(vfs, dir, probe, Some(fxid))?;
     if let Some(b) = &base {
         if b.header.relfilenumber != spec.relfilenumber
             || b.header.schema_fingerprint != spec.schema_fingerprint
@@ -465,7 +489,7 @@ pub fn recover_and_clean(
     dir: &str,
     probe: &dyn TxnProbe,
 ) -> WriteResult<RecoveryReport> {
-    let eff = effective_manifest(vfs, dir, probe)?;
+    let eff = effective_manifest(vfs, dir, probe, None)?;
     let eff_gen = eff.as_ref().map(|m| m.header.gen).unwrap_or(0);
     let live_parts: std::collections::BTreeSet<u32> = eff
         .as_ref()

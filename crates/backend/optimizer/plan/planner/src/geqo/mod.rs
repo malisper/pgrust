@@ -115,7 +115,7 @@ pub fn geqo<'mcx>(
     let pool_size = gimme_pool_size(number_of_rels as i32);
     let number_generations = gimme_number_generations(pool_size);
 
-    let mut pool = pool::alloc_pool(pool_size, number_of_rels as i32);
+    let mut pool = pool::alloc_pool(pool_size, number_of_rels as i32)?;
     pool::random_init_pool(run, &mut state, initial_rels, &mut pool)?;
     // Sort once; kids thereafter displace the worst via spread_chromo.
     pool::sort_pool(&mut pool);

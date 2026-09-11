@@ -1513,7 +1513,7 @@ pub fn pg_get_partconstrdef_string<'mcx>(
     ctx.namespaces
         .push(std::rc::Rc::new(query::deparse_context_for(mcx, aliasname, partition_id)?));
     deparse::get_rule_expr(constr_expr, &mut ctx, false)?;
-    Ok(Some(ctx.buf))
+    Ok(Some(ctx.buf.into_inner()))
 }
 
 pub fn pg_get_partkeydef_worker(
@@ -1822,5 +1822,5 @@ pub fn pg_get_querydef<'mcx>(
 ) -> PgResult<String> {
     let mut ctx = deparse::DeparseContext::new(mcx, get_pretty_flags(pretty));
     query::get_query_def(query, &mut ctx, None, true)?;
-    Ok(ctx.buf)
+    Ok(ctx.buf.into_inner())
 }

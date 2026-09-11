@@ -146,6 +146,18 @@ where
         x
     };
 
+    // C dispatches index_build_range_scan through rd_tableam; this scan is
+    // heapam's. A columnar table's rows live outside its (empty) main fork, so
+    // scanning it here would record a valid, empty index (UNIQUE unenforced).
+    if heap_relation.rd_rel.relam != tableam_vocab::HEAP_TABLE_AM_OID {
+        return Err(Box::new(
+            types_error::PgError::error(format!(
+                "cannot build an index on table \"{}\": its table access method is not supported by the index build scan",
+                heap_relation.name()
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
     let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_PAGEMODE;
     if allow_sync {
         flags |= SO_ALLOW_SYNC;

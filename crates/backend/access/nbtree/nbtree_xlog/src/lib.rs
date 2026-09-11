@@ -146,6 +146,22 @@ fn unlock_release(buffer: Buffer) -> PgResult<()> {
 // ERRCODE_DATA_CORRUPTED error while leaving well-formed pages identical.
 const BtreeSpecialOffset: usize = BLCKSZ - maxalign(SizeOfBtreeOpaque);
 
+// The posting tuple a split/INSERT_POST redo rewrites is addressed through
+// the on-page line pointer and its own t_info size word; on a page restored
+// from a hostile FPI both are attacker-controlled, so the copy extent must
+// lie inside the line pointer's item and the page.
+fn check_posting_extent(off: usize, lp_len: usize, size: usize, ctx: &str) -> PgResult<()> {
+    let ok = off >= SizeOfPageHeaderData
+        && size <= lp_len
+        && off.checked_add(maxalign(size)).is_some_and(|end| end <= BLCKSZ);
+    if !ok {
+        return Err(corrupt_err(format!(
+            "{ctx}: posting tuple at offset {off} size {size} (lp_len {lp_len}) falls outside the page"
+        )));
+    }
+    Ok(())
+}
+
 fn check_special(pd_special: usize, ctx: &str) -> PgResult<()> {
     if pd_special != BtreeSpecialOffset {
         return Err(corrupt_err(format!(
@@ -384,8 +400,10 @@ fn btree_xlog_insert(
 
             let itemid = pm.as_ref().item_id(offnum - 1);
             let opos_off = itemid.lp_off() as usize;
+            check_posting_extent(opos_off, itemid.lp_len() as usize, 8, "btree_xlog_insert(posting)")?;
             let oposting_size =
                 (u16_le_native(pm.as_ref(), opos_off + 6) & INDEX_SIZE_MASK) as usize;
+            check_posting_extent(opos_off, itemid.lp_len() as usize, oposting_size, "btree_xlog_insert(posting)")?;
 
             #[repr(C, align(8))]
             struct ItupImage([u8; BLCKSZ]);
@@ -507,8 +525,10 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
             if postingoff != 0 {
                 let itemid = origpage.item_id(replacepostingoff);
                 let opos_off = itemid.lp_off() as usize;
+                check_posting_extent(opos_off, itemid.lp_len() as usize, 8, "btree_xlog_split(posting)")?;
                 nposting_sz =
                     (u16_le_native(origpage, opos_off + 6) & INDEX_SIZE_MASK) as usize;
+                check_posting_extent(opos_off, itemid.lp_len() as usize, nposting_sz, "btree_xlog_split(posting)")?;
                 let (ni, np) =
                     swap_imgs.insert((ItupImage([0u8; BLCKSZ]), ItupImage([0u8; BLCKSZ])));
                 ni.0[..newitemsz].copy_from_slice(newitem);

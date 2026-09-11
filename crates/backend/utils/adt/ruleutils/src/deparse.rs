@@ -55,9 +55,80 @@ pub(crate) const PRETTYINDENT_JOIN: i32 = 4;
 pub(crate) const PRETTYINDENT_VAR: i32 = 4;
 pub(crate) const PRETTYINDENT_LIMIT: i32 = 40;
 
+// C's StringInfo: growth is capped at MaxAllocSize and the overflow is an
+// ERROR (enlargeStringInfo), recovered at the statement boundary; a bare
+// String would grow until the allocator aborts the server.
+#[derive(Default)]
+pub(crate) struct DeparseBuf(String);
+
+impl DeparseBuf {
+    const LIMIT: usize = ::mcx::MAX_ALLOC_SIZE - 8;
+
+    #[cold]
+    #[inline(never)]
+    fn overflow(len: usize, more: usize) -> ! {
+        std::panic::panic_any(Box::new(
+            ::types_error::PgError::error(format!(
+                "string buffer exceeds maximum allowed length ({} bytes)",
+                ::mcx::MAX_ALLOC_SIZE
+            ))
+            .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .with_detail(format!(
+                "Cannot enlarge string buffer containing {len} bytes by {more} more bytes."
+            )),
+        ))
+    }
+
+    #[inline]
+    fn admit(&mut self, more: usize) {
+        if self.0.len().saturating_add(more) > Self::LIMIT {
+            Self::overflow(self.0.len(), more);
+        }
+        if self.0.try_reserve(more).is_err() {
+            std::panic::panic_any(Box::new(::mcx::oom_named("deparse", more)));
+        }
+    }
+
+    #[inline]
+    pub fn push_str(&mut self, s: &str) {
+        self.admit(s.len());
+        self.0.push_str(s);
+    }
+
+    #[inline]
+    pub fn push(&mut self, c: char) {
+        self.admit(c.len_utf8());
+        self.0.push(c);
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl core::ops::Deref for DeparseBuf {
+    type Target = String;
+    fn deref(&self) -> &String {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for DeparseBuf {
+    fn deref_mut(&mut self) -> &mut String {
+        &mut self.0
+    }
+}
+
+impl core::fmt::Write for DeparseBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.push_str(s);
+        Ok(())
+    }
+}
+
 pub(crate) struct DeparseContext<'mcx> {
     pub mcx: Mcx<'mcx>,
-    pub buf: String,
+    pub buf: DeparseBuf,
     pub namespaces: Vec<Rc<DeparseNamespace<'mcx>>>,
     pub result_desc: Option<Rc<Vec<String>>>,
     pub target_list: Option<&'mcx NodeList<'mcx>>,
@@ -76,7 +147,7 @@ impl<'mcx> DeparseContext<'mcx> {
     pub(crate) fn new(mcx: Mcx<'mcx>, pretty_flags: i32) -> Self {
         DeparseContext {
             mcx,
-            buf: String::new(),
+            buf: DeparseBuf::default(),
             namespaces: Vec::new(),
             result_desc: None,
             target_list: None,
@@ -154,7 +225,7 @@ pub fn deparse_expression_pretty<'mcx>(
         ctx.namespaces.push(Rc::new(query::deparse_context_for(mcx, &relname, relid)?));
     }
     get_rule_expr(expr, &mut ctx, showimplicit)?;
-    Ok(ctx.buf)
+    Ok(ctx.buf.into_inner())
 }
 
 pub(crate) fn get_rule_expr<'mcx>(
@@ -683,7 +754,7 @@ pub fn deparse_partbound_const<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> PgResu
     let c = expr.as_const().expect("range partition datum value is a Const");
     let mut ctx = DeparseContext::new(mcx, 0);
     get_const_expr(c, &mut ctx, -1)?;
-    Ok(ctx.buf)
+    Ok(ctx.buf.into_inner())
 }
 
 // C get_range_partbound_string (ruleutils.c); appends into ctx.buf instead of

@@ -87,6 +87,7 @@ pub fn fc_dsimple_init(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     let d = simple::dsimple_init(init)?;
     {
         let (ptr, _) = ::mcx::PgBox::into_raw_with_allocator(alloc_in(init.mcx, d)?);
+        init.drop_fn.set(Some(::ts_locale::dict_api::drop_dict_state::<simple::DictSimple>));
         Ok(Datum::from_usize(ptr as usize))
     }
 }
@@ -105,6 +106,7 @@ pub fn fc_dsynonym_init(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     let d = synonym::dsynonym_init(init)?;
     {
         let (ptr, _) = ::mcx::PgBox::into_raw_with_allocator(alloc_in(init.mcx, d)?);
+        init.drop_fn.set(Some(::ts_locale::dict_api::drop_dict_state::<synonym::DictSyn>));
         Ok(Datum::from_usize(ptr as usize))
     }
 }
@@ -123,6 +125,7 @@ pub fn fc_thesaurus_init(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     let d = thesaurus::thesaurus_init(init)?;
     {
         let (ptr, _) = ::mcx::PgBox::into_raw_with_allocator(alloc_in(init.mcx, d)?);
+        init.drop_fn.set(Some(::ts_locale::dict_api::drop_dict_state::<thesaurus::DictThesaurus>));
         Ok(Datum::from_usize(ptr as usize))
     }
 }

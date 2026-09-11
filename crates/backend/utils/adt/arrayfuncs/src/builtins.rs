@@ -449,7 +449,9 @@ fn array_to_text_common(
     let element_type = crate::foundation::arr_elemtype(&array);
     let (ndim, dims, _lb) = crate::foundation::read_dims_lbounds(&array);
     let nitems = ::arrayutils::array_get_n_items(ndim, &dims)?;
-    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // varlena.c array_to_text_internal: a StringInfo, so every append is
+    // admitted under MaxAllocSize and fails as an ERROR.
+    let mut out: ::mcx::PgVec<'_, u8> = ::mcx::PgVec::new_in(mcx);
     if nitems > 0 {
         let flinfo = flinfo.expect("array_to_text: NULL flinfo");
         let ams = cached_meta(flinfo, element_type, IOFuncSelector::IOFunc_output, false)?;
@@ -466,9 +468,9 @@ fn array_to_text_common(
             if nulls[i] {
                 if let Some(ns) = &null_string {
                     if printed {
-                        out.extend_from_slice(&sep);
+                        ::mcx::vec_append_bytes(&mut out, &sep)?;
                     }
-                    out.extend_from_slice(ns);
+                    ::mcx::vec_append_bytes(&mut out, ns)?;
                     printed = true;
                 }
                 continue;
@@ -479,9 +481,9 @@ fn array_to_text_common(
                 core::ffi::CStr::from_ptr(v.as_usize() as *const core::ffi::c_char)
             };
             if printed {
-                out.extend_from_slice(&sep);
+                ::mcx::vec_append_bytes(&mut out, &sep)?;
             }
-            out.extend_from_slice(cs.to_bytes());
+            ::mcx::vec_append_bytes(&mut out, cs.to_bytes())?;
             printed = true;
         }
     }

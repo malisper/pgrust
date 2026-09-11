@@ -31,6 +31,14 @@ pub(crate) fn decompress_page(
     uncompressed: usize,
 ) -> PgResult<()> {
     dst.clear();
+    // uncompressed_page_size is attacker-shaped file input: cap it at the
+    // MaxAllocSize class before committing a zero-filled buffer.
+    const MAX_PAGE_BYTES: usize = 0x3FFF_FFFF;
+    if uncompressed > MAX_PAGE_BYTES {
+        return Err(Box::new(PgError::error(format!(
+            "parquet page declares {uncompressed} uncompressed bytes, above the {MAX_PAGE_BYTES} byte limit"
+        ))));
+    }
     dst.try_reserve(uncompressed + PAD)
         .map_err(|_| Box::new(PgError::error("out of memory decompressing parquet page")))?;
     dst.resize(uncompressed, 0);

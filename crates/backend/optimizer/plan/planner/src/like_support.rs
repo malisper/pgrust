@@ -475,6 +475,9 @@ fn make_greater_string<'mcx>(
         mbutils::pg_database_encoding_character_incrementer()
     };
 
+    // like_support.c pfrees every rejected candidate; the statement arena
+    // cannot, so candidates are built in a scratch context reset per try.
+    let mut scratch = ::mcx::MemoryContext::new("make_greater_string");
     while len > 0 {
         let charlen = if datatype == BYTEAOID {
             1
@@ -482,11 +485,13 @@ fn make_greater_string<'mcx>(
             len - mbutils::pg_mbcliplen(&workstr[..len], len as i32, len as i32 - 1) as usize
         };
         while charinc(&mut workstr[len - charlen..len]) {
-            let cand = text_const(mcx, &workstr[..len], datatype)?;
-            if types_fmgr::function_call2_coll_in(ltproc, collation, mcx, cmpstr, cand.value)?
+            scratch.reset();
+            let smcx = scratch.mcx();
+            let cand = text_const(smcx, &workstr[..len], datatype)?;
+            if types_fmgr::function_call2_coll_in(ltproc, collation, smcx, cmpstr, cand.value)?
                 .as_bool()
             {
-                return Ok(Some(cand));
+                return Ok(Some(text_const(mcx, &workstr[..len], datatype)?));
             }
         }
         len -= charlen;

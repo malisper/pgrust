@@ -63,15 +63,37 @@ fn getattr(
 
 // int2vector datum body: i16 elements start after the 24-byte header; dim1
 // (element count) sits at offset 16. int2vector is never toasted.
-fn int2vector_values(p: *const u8) -> Vec<i16> {
-    // SAFETY: p is a live int2vector image (catalog-typed arg).
-    let dim1 = unsafe { core::ptr::read_unaligned(p.add(16).cast::<i32>()) };
-    let mut v = Vec::with_capacity(dim1.max(0) as usize);
-    for i in 0..dim1.max(0) as usize {
-        // SAFETY: dim1 elements follow the header contiguously.
+fn int2vector_values(p: *const u8) -> PgResult<Vec<i16>> {
+    // SAFETY: p is a live varlena image; the header is read within its
+    // declared size before any element is.
+    let (size, ndim, dataoffset, dim1) = unsafe {
+        let size = types_tuple::varatt::varsize_any(p);
+        if size < 24 {
+            (size, -1, 0, 0)
+        } else {
+            (
+                size,
+                core::ptr::read_unaligned(p.add(4).cast::<i32>()),
+                core::ptr::read_unaligned(p.add(8).cast::<i32>()),
+                core::ptr::read_unaligned(p.add(16).cast::<i32>()),
+            )
+        }
+    };
+    // A caller-supplied array must be the 1-D, null-free int2vector shape
+    // whose elements lie inside the datum (C's ARR_* assumptions).
+    let n = usize::try_from(dim1).unwrap_or(usize::MAX);
+    if ndim != 1 || dataoffset != 0 || n.checked_mul(2).is_none_or(|b| 24 + b > size) {
+        return Err(Box::new(
+            PgError::error("invalid int2vector argument")
+                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    let mut v = Vec::with_capacity(n);
+    for i in 0..n {
+        // SAFETY: bounded above against the datum size.
         v.push(unsafe { core::ptr::read_unaligned(p.add(24 + 2 * i).cast::<i16>()) });
     }
-    v
+    Ok(v)
 }
 
 // get_pkey_attnames: primary-key column names, or (0, empty) if none.
@@ -90,7 +112,7 @@ fn get_pkey_attnames<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<(i1
         let indnkeyatts = getattr(tup, ANUM_PG_INDEX_INDNKEYATTS, idesc).0.as_i16();
         if indnkeyatts > 0 {
             let indkey_ptr = getattr(tup, ANUM_PG_INDEX_INDKEY, idesc).0.as_usize() as *const u8;
-            let indkey = int2vector_values(indkey_ptr);
+            let indkey = int2vector_values(indkey_ptr)?;
             let mut names = Vec::with_capacity(indnkeyatts as usize);
             for i in 0..indnkeyatts as usize {
                 let attno = indkey[i];
@@ -439,7 +461,7 @@ pub fn fc_dblink_get_pkey(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 
 fn build_args<'mcx>(fcinfo: &Fcinfo, rel: &Relation<'mcx>) -> PgResult<(Vec<usize>, i32)> {
     // SAFETY: int2vector by-ref arg 1.
-    let pkattnums = int2vector_values(unsafe { fcinfo.arg_ptr(1) });
+    let pkattnums = int2vector_values(unsafe { fcinfo.arg_ptr(1) })?;
     let pknumatts_arg = fcinfo.arg_i32(2);
     let physical = validate_pkattnums(rel, &pkattnums, pknumatts_arg)?;
     let n = physical.len() as i32;
@@ -531,10 +553,22 @@ mod tests {
         // header: vl_len_, ndim=1, dataoffset=0, elemtype=INT2, dim1=3,
         // lbound1=0, then i16[3] = {2, 4, 6}.
         let mut buf = vec![0u8; 24 + 6];
+        buf[0..4].copy_from_slice(&((30u32) << 2).to_ne_bytes()); // varlena size
+        buf[4..8].copy_from_slice(&1i32.to_ne_bytes()); // ndim
         buf[16..20].copy_from_slice(&3i32.to_ne_bytes()); // dim1
         buf[24..26].copy_from_slice(&2i16.to_ne_bytes());
         buf[26..28].copy_from_slice(&4i16.to_ne_bytes());
         buf[28..30].copy_from_slice(&6i16.to_ne_bytes());
-        assert_eq!(int2vector_values(buf.as_ptr()), vec![2, 4, 6]);
+        assert_eq!(int2vector_values(buf.as_ptr()).unwrap(), vec![2, 4, 6]);
+        // dim1 past the datum, a null bitmap (dataoffset), 2-D: all refused.
+        let mut over = buf.clone();
+        over[16..20].copy_from_slice(&1000i32.to_ne_bytes());
+        assert!(int2vector_values(over.as_ptr()).is_err());
+        let mut nulls = buf.clone();
+        nulls[8..12].copy_from_slice(&24i32.to_ne_bytes());
+        assert!(int2vector_values(nulls.as_ptr()).is_err());
+        let mut twod = buf.clone();
+        twod[4..8].copy_from_slice(&2i32.to_ne_bytes());
+        assert!(int2vector_values(twod.as_ptr()).is_err());
     }
 }

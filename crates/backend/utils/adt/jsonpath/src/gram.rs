@@ -236,6 +236,12 @@ fn make_item_like_regex<'mcx>(
     if let Err(e) =
         regex_core::regex_compile::pg_regcomp(mcx, &wpattern, cflags, DEFAULT_COLLATION_OID)
     {
+        // REG_CANCEL is the engine's consumed-interrupt sentinel: the cancel
+        // or termination must propagate, never be downgraded to a syntax
+        // error (the regex seam's interception rule).
+        if e.0 == regex_core::regex_consts::REG_CANCEL {
+            return Err(regex_core::regex_error::take_cancel_error());
+        }
         let msg = regex_core::regex_export_free_error::pg_regerror(e.0);
         return ereturn(
             escontext.as_deref_mut(),

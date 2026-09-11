@@ -139,6 +139,26 @@ pub fn FinishPreparedTransaction(gid: &str, is_commit: bool) -> PgResult<()> {
         if hdr.initfileinval {
             relcache_seams::relation_cache_init_file_pre_invalidate::call()?;
         }
+        // Whoever queues catalog invalidations bumps the L2 generation of
+        // every domain they touch first (inval eoxact l2_bump_for_messages);
+        // the prepared-transaction sender must follow the same rule or the
+        // process-global image store serves the pre-commit catalog forever.
+        for msg in &invalmsgs {
+            match *msg {
+                SharedInvalidationMessage::Catcache(m) => {
+                    l2cache::bump(l2cache::Domain::Cat(m.id as i32));
+                }
+                SharedInvalidationMessage::Catalog(_) => l2cache::bump_all_cat(),
+                SharedInvalidationMessage::Relcache(m) => {
+                    if m.relId == types_core::InvalidOid {
+                        l2cache::bump_all_rel();
+                    } else {
+                        l2cache::bump(l2cache::Domain::Rel(m.relId));
+                    }
+                }
+                _ => {}
+            }
+        }
         sinval::SendSharedInvalidMessages(&invalmsgs)?;
         if hdr.initfileinval {
             relcache_seams::relation_cache_init_file_post_invalidate::call()?;

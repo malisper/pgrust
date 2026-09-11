@@ -202,20 +202,38 @@ fn unlock_release(buffer: Buffer) -> PgResult<()> {
     bufmgr_seams::release_buffer::call(buffer)
 }
 
-fn page_opaque(page: &PageRef<'_>) -> HashPageOpaqueData {
-    let off = page.pd_special() as usize;
-    debug_assert!(off == BLCKSZ - SIZEOF_OPAQUE);
-    // SAFETY: in-bounds 4-aligned special area of a hash page.
-    unsafe { page.as_ptr().add(off).cast::<HashPageOpaqueData>().read() }
+// Every hash page's special area is exactly one HashPageOpaqueData, so
+// PageInit fixes pd_special at this value. A redo buffer may hold a replayed
+// FPI or on-disk image whose header is attacker-controlled; validating the
+// offset at the single choke point turns an out-of-page access into
+// ERRCODE_DATA_CORRUPTED (the nbtree redo precedent).
+const HashSpecialOffset: usize = BLCKSZ - SIZEOF_OPAQUE;
+
+fn check_special(pd_special: usize, ctx: &str) -> PgResult<()> {
+    if pd_special != HashSpecialOffset {
+        return Err(corrupt_err(format!(
+            "{ctx}: page special offset {pd_special} is not the required {HashSpecialOffset} \
+             (BLCKSZ - sizeof(HashPageOpaqueData))"
+        )));
+    }
+    Ok(())
 }
 
-fn write_opaque(page: &mut PageMut<'_>, opaque: &HashPageOpaqueData) {
+fn page_opaque(page: &PageRef<'_>) -> PgResult<HashPageOpaqueData> {
+    let off = page.pd_special() as usize;
+    check_special(off, "hash redo: page_opaque")?;
+    // SAFETY: validated in-bounds 4-aligned special area of a hash page.
+    Ok(unsafe { page.as_ptr().add(off).cast::<HashPageOpaqueData>().read() })
+}
+
+fn write_opaque(page: &mut PageMut<'_>, opaque: &HashPageOpaqueData) -> PgResult<()> {
     let off = page.as_ref().pd_special() as usize;
-    debug_assert!(off == BLCKSZ - SIZEOF_OPAQUE);
-    // SAFETY: in-bounds 4-aligned special area; exclusive page access.
+    check_special(off, "hash redo: write_opaque")?;
+    // SAFETY: validated in-bounds 4-aligned special area; exclusive page access.
     unsafe {
         page.as_ref().as_ptr().cast_mut().add(off).cast::<HashPageOpaqueData>().write(*opaque)
     }
+    Ok(())
 }
 
 fn hash_pageinit(page: &mut PageMut<'_>) {
@@ -243,7 +261,7 @@ fn u16_at(b: &[u8], off: usize) -> u16 {
 }
 
 // _hash_init_metabuffer's redo twin, writing through the buffer.
-fn init_metabuffer(buffer: Buffer, num_tuples: f64, procid: u32, ffactor: u16) {
+fn init_metabuffer(buffer: Buffer, num_tuples: f64, procid: u32, ffactor: u16) -> PgResult<()> {
     // SAFETY: redo pin+lock contract.
     let mut pm = unsafe { page_mut(buffer) };
     hash_pageinit(&mut pm);
@@ -256,7 +274,7 @@ fn init_metabuffer(buffer: Buffer, num_tuples: f64, procid: u32, ffactor: u16) {
             hasho_flag: LH_META_PAGE,
             hasho_page_id: HASHO_PAGE_ID,
         },
-    );
+    )?;
 
     let dnumbuckets = num_tuples / ffactor as f64;
     let num_buckets = if dnumbuckets <= 2.0 {
@@ -293,6 +311,7 @@ fn init_metabuffer(buffer: Buffer, num_tuples: f64, procid: u32, ffactor: u16) {
         (*m).hashm_firstfree = 0;
     }
     pm.set_pd_lower((SizeOfPageHeaderData + core::mem::size_of::<HashMetaPageData>()) as u16);
+    Ok(())
 }
 
 fn init_bitmapbuffer(buffer: Buffer, bmsize: u16) -> PgResult<()> {
@@ -311,7 +330,7 @@ fn init_bitmapbuffer(buffer: Buffer, bmsize: u16) -> PgResult<()> {
             hasho_flag: LH_BITMAP_PAGE,
             hasho_page_id: HASHO_PAGE_ID,
         },
-    );
+    )?;
     // SAFETY: bitmap region in-page (bmsize_bytes <= MAX_BITMAP_SIZE).
     unsafe {
         core::ptr::write_bytes(
@@ -333,7 +352,7 @@ fn hash_xlog_init_meta_page(record: &mut XLogReaderState) -> PgResult<()> {
     let ffactor = u16_at(xlrec, 12);
 
     let metabuf = XLogInitBufferForRedo(record, 0)?;
-    init_metabuffer(metabuf, num_tuples, procid, ffactor);
+    init_metabuffer(metabuf, num_tuples, procid, ffactor)?;
     // SAFETY: redo pin+lock contract.
     unsafe { page_mut(metabuf) }.set_lsn(lsn);
     bufmgr_seams::mark_buffer_dirty::call(metabuf)?;
@@ -441,7 +460,7 @@ fn hash_xlog_add_ovfl_page(record: &mut XLogReaderState) -> PgResult<()> {
                 hasho_flag: LH_OVERFLOW_PAGE,
                 hasho_page_id: HASHO_PAGE_ID,
             },
-        );
+        )?;
         pm.set_lsn(lsn);
     }
     bufmgr_seams::mark_buffer_dirty::call(ovflbuf)?;
@@ -450,9 +469,9 @@ fn hash_xlog_add_ovfl_page(record: &mut XLogReaderState) -> PgResult<()> {
     if action == BLK_NEEDS_REDO {
         // SAFETY: redo pin+lock contract.
         let mut pm = unsafe { page_mut(leftbuf) };
-        let mut opaque = page_opaque(&pm.as_ref());
+        let mut opaque = page_opaque(&pm.as_ref())?;
         opaque.hasho_nextblkno = rightblk;
-        write_opaque(&mut pm, &opaque);
+        write_opaque(&mut pm, &opaque)?;
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(leftbuf)?;
     }
@@ -551,10 +570,10 @@ fn hash_xlog_split_allocate_page(record: &mut XLogReaderState) -> PgResult<()> {
     if action == BLK_NEEDS_REDO || action == BLK_RESTORED {
         // SAFETY: redo pin+cleanup-lock contract.
         let mut pm = unsafe { page_mut(oldbuf) };
-        let mut opaque = page_opaque(&pm.as_ref());
+        let mut opaque = page_opaque(&pm.as_ref())?;
         opaque.hasho_flag = old_bucket_flag;
         opaque.hasho_prevblkno = new_bucket;
-        write_opaque(&mut pm, &opaque);
+        write_opaque(&mut pm, &opaque)?;
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(oldbuf)?;
     }
@@ -574,7 +593,7 @@ fn hash_xlog_split_allocate_page(record: &mut XLogReaderState) -> PgResult<()> {
                 hasho_flag: new_bucket_flag,
                 hasho_page_id: HASHO_PAGE_ID,
             },
-        );
+        )?;
         pm.set_lsn(lsn);
     }
     bufmgr_seams::mark_buffer_dirty::call(newbuf)?;
@@ -657,9 +676,9 @@ fn hash_xlog_split_complete(record: &mut XLogReaderState) -> PgResult<()> {
         if action == BLK_NEEDS_REDO || action == BLK_RESTORED {
             // SAFETY: redo pin+lock contract.
             let mut pm = unsafe { page_mut(buf) };
-            let mut opaque = page_opaque(&pm.as_ref());
+            let mut opaque = page_opaque(&pm.as_ref())?;
             opaque.hasho_flag = flag;
-            write_opaque(&mut pm, &opaque);
+            write_opaque(&mut pm, &opaque)?;
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(buf)?;
         }
@@ -812,9 +831,9 @@ fn hash_xlog_squeeze_page(record: &mut XLogReaderState) -> PgResult<()> {
         if is_prev_bucket_same_wrt {
             // SAFETY: redo pin+lock contract.
             let mut pm = unsafe { page_mut(writebuf) };
-            let mut opaque = page_opaque(&pm.as_ref());
+            let mut opaque = page_opaque(&pm.as_ref())?;
             opaque.hasho_nextblkno = nextblkno;
-            write_opaque(&mut pm, &opaque);
+            write_opaque(&mut pm, &opaque)?;
             mod_wbuf = true;
         }
 
@@ -839,7 +858,7 @@ fn hash_xlog_squeeze_page(record: &mut XLogReaderState) -> PgResult<()> {
                 hasho_flag: LH_UNUSED_PAGE,
                 hasho_page_id: HASHO_PAGE_ID,
             },
-        );
+        )?;
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(ovflbuf)?;
     }
@@ -852,9 +871,9 @@ fn hash_xlog_squeeze_page(record: &mut XLogReaderState) -> PgResult<()> {
         if action == BLK_NEEDS_REDO {
             // SAFETY: redo pin+lock contract.
             let mut pm = unsafe { page_mut(prevbuf) };
-            let mut opaque = page_opaque(&pm.as_ref());
+            let mut opaque = page_opaque(&pm.as_ref())?;
             opaque.hasho_nextblkno = nextblkno;
-            write_opaque(&mut pm, &opaque);
+            write_opaque(&mut pm, &opaque)?;
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(prevbuf)?;
         }
@@ -868,9 +887,9 @@ fn hash_xlog_squeeze_page(record: &mut XLogReaderState) -> PgResult<()> {
         if action == BLK_NEEDS_REDO {
             // SAFETY: redo pin+lock contract.
             let mut pm = unsafe { page_mut(nextbuf) };
-            let mut opaque = page_opaque(&pm.as_ref());
+            let mut opaque = page_opaque(&pm.as_ref())?;
             opaque.hasho_prevblkno = prevblkno;
-            write_opaque(&mut pm, &opaque);
+            write_opaque(&mut pm, &opaque)?;
             pm.set_lsn(lsn);
             bufmgr_seams::mark_buffer_dirty::call(nextbuf)?;
         }
@@ -964,9 +983,9 @@ fn hash_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
         // SAFETY: redo pin+lock contract.
         let mut pm = unsafe { page_mut(deletebuf) };
         if clear_dead_marking {
-            let mut opaque = page_opaque(&pm.as_ref());
+            let mut opaque = page_opaque(&pm.as_ref())?;
             opaque.hasho_flag &= !LH_PAGE_HAS_DEAD_TUPLES;
-            write_opaque(&mut pm, &opaque);
+            write_opaque(&mut pm, &opaque)?;
         }
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(deletebuf)?;
@@ -986,9 +1005,9 @@ fn hash_xlog_split_cleanup(record: &mut XLogReaderState) -> PgResult<()> {
     if action == BLK_NEEDS_REDO {
         // SAFETY: redo pin+lock contract.
         let mut pm = unsafe { page_mut(buffer) };
-        let mut opaque = page_opaque(&pm.as_ref());
+        let mut opaque = page_opaque(&pm.as_ref())?;
         opaque.hasho_flag &= !LH_BUCKET_NEEDS_SPLIT_CLEANUP;
-        write_opaque(&mut pm, &opaque);
+        write_opaque(&mut pm, &opaque)?;
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(buffer)?;
     }
@@ -1042,9 +1061,9 @@ fn hash_xlog_vacuum_one_page(record: &mut XLogReaderState) -> PgResult<()> {
         // SAFETY: redo pin+cleanup-lock contract.
         let mut pm = unsafe { page_mut(buffer) };
         pm.index_multi_delete(&unused);
-        let mut opaque = page_opaque(&pm.as_ref());
+        let mut opaque = page_opaque(&pm.as_ref())?;
         opaque.hasho_flag &= !LH_PAGE_HAS_DEAD_TUPLES;
-        write_opaque(&mut pm, &opaque);
+        write_opaque(&mut pm, &opaque)?;
         pm.set_lsn(lsn);
         bufmgr_seams::mark_buffer_dirty::call(buffer)?;
     }
@@ -1096,7 +1115,7 @@ pub fn hash_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
     let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
     // SAFETY: pagedata is a full BLCKSZ page image, exclusively borrowed here.
     let pm = unsafe { PageMut::from_raw(ptr) };
-    let pagetype = page_opaque(&pm.as_ref()).hasho_flag & LH_PAGE_TYPE;
+    let pagetype = page_opaque(&pm.as_ref())?.hasho_flag & LH_PAGE_TYPE;
     drop(pm);
 
     if pagetype == LH_UNUSED_PAGE {
@@ -1111,9 +1130,9 @@ pub fn hash_mask(pagedata: &mut [u8], _blkno: BlockNumber) -> PgResult<()> {
     let ptr = core::ptr::NonNull::new(pagedata.as_mut_ptr()).unwrap();
     // SAFETY: as above.
     let mut pm = unsafe { PageMut::from_raw(ptr) };
-    let mut opaque = page_opaque(&pm.as_ref());
+    let mut opaque = page_opaque(&pm.as_ref())?;
     opaque.hasho_flag &= !LH_PAGE_HAS_DEAD_TUPLES;
-    write_opaque(&mut pm, &opaque);
+    write_opaque(&mut pm, &opaque)?;
     Ok(())
 }
 
@@ -1300,7 +1319,7 @@ mod audit_b004_tests {
                 hasho_flag: flag,
                 hasho_page_id: HASHO_PAGE_ID,
             },
-        );
+        ).unwrap();
         p
     }
 
@@ -1329,7 +1348,7 @@ mod audit_b004_tests {
         hash_mask(&mut page.0, 5).unwrap();
         let ptr = core::ptr::NonNull::new(page.0.as_mut_ptr()).unwrap();
         // SAFETY: owned BLCKSZ page.
-        let opaque = page_opaque(&unsafe { PageRef::from_raw(ptr) });
+        let opaque = page_opaque(&unsafe { PageRef::from_raw(ptr) }).unwrap();
         assert_eq!(
             opaque,
             HashPageOpaqueData {

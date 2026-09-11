@@ -1072,7 +1072,7 @@ pub fn apply_child_basequals<'mcx>(
             )
         };
         let childqual = adjust_appendrel_attrs(run, clause, appinfo)?;
-        let childqual = clauses::eval_const_expressions(mcx, childqual)?;
+        let childqual = crate::setrefs::fold_with_deps(run, childqual)?;
         if let Some(c) = childqual.as_const() {
             if c.constisnull || !c.constvalue.as_bool() {
                 return Ok(false);

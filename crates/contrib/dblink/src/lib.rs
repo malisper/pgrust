@@ -58,7 +58,16 @@ fn arg_text(fcinfo: &Fcinfo, i: usize) -> PgResult<String> {
 }
 
 fn arg_is_bool(flinfo: Option<&FmgrInfo>, i: usize) -> bool {
-    funcapi::get_fn_expr_argtype(flinfo, i) == types_core::BOOLOID
+    match funcapi::get_fn_expr_argtype(flinfo, i) {
+        types_core::BOOLOID => true,
+        // dblink.c: "could not determine argument type" when no fn_expr is
+        // available (fastpath); reading a by-value bool as text would fault.
+        types_core::InvalidOid => std::panic::panic_any(Box::new(
+            PgError::error(format!("could not determine data type of dblink argument {i}"))
+                .with_sqlstate(types_error::ERRCODE_INDETERMINATE_DATATYPE),
+        )),
+        _ => false,
+    }
 }
 
 // prepTuplestoreResult (dblink.c): every tuplestore-returning entry point

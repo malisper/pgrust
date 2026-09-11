@@ -57,6 +57,16 @@ thread_local! {
 
 // proc_exit / PANIC payloads must keep unwinding (main_loop.rs precedent).
 // Shared with the launcher (launcher.rs sigsetjmp-equivalent boundary).
+// C's errfinish zeroes the holdoff/crit-section counters before longjmp to
+// any PG_CATCH and promotes an ERROR inside a critical section to PANIC; the
+// catching frame does both here (tcop error_recovery precedent).
+pub(crate) fn recover_error_state(err: &PgError) {
+    elog::panic_on_crit_section_escape(err);
+    g::SetInterruptHoldoffCount(0);
+    g::SetQueryCancelHoldoffCount(0);
+    g::SetCritSectionCount(0);
+}
+
 pub(crate) fn pg_error_from_panic(
     payload: Box<dyn std::any::Any + Send>,
     fallback_msg: &str,
@@ -646,6 +656,7 @@ pub fn do_autovacuum() -> PgResult<()> {
                     if err.level() >= FATAL {
                         return Err(err);
                     }
+                    recover_error_state(&err);
                     g::HoldInterrupts();
                     let what = if tab.at_params.options & VACOPT_VACUUM != 0 {
                         "automatic vacuum of table"
@@ -855,6 +866,7 @@ fn perform_work_item(workitem: &shmem::WorkItem) -> PgResult<()> {
         if err.level() >= FATAL {
             return Err(err);
         }
+        recover_error_state(&err);
         g::HoldInterrupts();
         err.add_context_line(format!(
             "processing work entry for relation \"{cur_datname}.{cur_nspname}.{cur_relname}\""

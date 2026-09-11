@@ -234,8 +234,7 @@ pub fn zoneabbrevtbl() -> Option<&'static ZoneAbbrevTable> {
 }
 
 // DIVERGENCE: C guc_mallocs one chunk freed with the superseded GUC extra;
-// here the table leaks (cold, once per SET of timezone_abbreviations —
-// pgtz's permanent-entry precedent).
+// here the table is permanent, so tzparser interns one per file name.
 #[allow(non_snake_case)]
 pub fn ConvertTimeZoneAbbrevs(abbrevs: &[TzEntry<'_>]) -> &'static ZoneAbbrevTable {
     let mut tokens: Vec<DateTkn> = Vec::with_capacity(abbrevs.len());

@@ -419,7 +419,17 @@ pub fn DefineRelation<'mcx>(
     let inherit_oids = inheritance::lookup_inherit_oids(mcx, stmt, parent_lockmode)?;
     let parent_oid = if stmt.partbound.is_some() {
         assert_eq!(inherit_oids.len(), 1);
-        Some(inherit_oids[0])
+        // tablecmds.c MergeAttributes: object_ownercheck(RelationRelationId,
+        // parent) applies to PARTITION OF exactly as to INHERITS.
+        let parent = inherit_oids[0];
+        if !aclchk::object_ownercheck(types_core::RELATION_RELATION_ID, parent, miscinit::GetUserId())? {
+            let relkind = lsyscache::get_rel_relkind(parent)?;
+            let relname = lsyscache::get_rel_name(mcx, parent)?
+                .map(|n| n.as_str().to_owned())
+                .unwrap_or_default();
+            aclchk::aclcheck_error(aclchk::ACLCHECK_NOT_OWNER, get_relkind_objtype(relkind as u8), &relname)?;
+        }
+        Some(parent)
     } else {
         None
     };

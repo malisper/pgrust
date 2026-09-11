@@ -159,7 +159,15 @@ pub fn PathNameOpenTemporaryFile(path: &str, mode: i32) -> PgResult<File> {
     }
 
     if file.0 > 0 {
-        with_fd(|fd| RegisterTemporaryFile(fd, file));
+        with_fd(|fd| {
+            RegisterTemporaryFile(fd, file);
+            // C reserves this entry point for readers; a writer reopening its
+            // own segment (sqe_spill's per-event reopen) must still be
+            // charged against temp_file_limit like the creating VFD was.
+            if mode & libc::O_RDWR != 0 {
+                fd.vfd_cache[file.0 as usize].fdstate |= FD_TEMP_FILE_LIMIT;
+            }
+        });
     }
 
     Ok(file)

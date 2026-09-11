@@ -292,6 +292,10 @@ pub fn variable_paramref_hook<'mcx>(
     // Growth zero-fills the new slots (palloc0_array/repalloc0_array;
     // InvalidOid == 0).
     if paramno as usize > param_types.len() {
+        let extra = paramno as usize - param_types.len();
+        param_types.try_reserve_exact(extra).map_err(|_| {
+            Box::new(mcx::oom_named("variable_paramref_hook", extra * core::mem::size_of::<Oid>()))
+        })?;
         param_types.resize(paramno as usize, InvalidOid);
     }
     let idx = (paramno - 1) as usize;

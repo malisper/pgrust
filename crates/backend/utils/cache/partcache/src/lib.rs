@@ -9,7 +9,7 @@ use core::mem::ManuallyDrop;
 use std::rc::Rc;
 
 use datum::Datum;
-use mcx::{Mcx, PgHashMap, PgVec};
+use mcx::{Mcx, PgHashMap, PgVec, MemoryContext};
 use types_core::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR};
 use types_fmgr::{FmgrInfo, LocalFcinfo};
@@ -58,6 +58,11 @@ pub struct PartitionKeyData {
     pub parttypbyval: PgVec<'static, bool>,
     pub parttypalign: PgVec<'static, i8>,
     pub parttypcoll: PgVec<'static, Oid>,
+    // C's rd_partkeycxt: every allocation of the build (node tree, list
+    // cells, datum copies, detoast buffer) dies with the key. Declared last so
+    // the arena outlives the PgVec fields' deallocation.
+    // None only for test-built keys.
+    pub _ctx: Option<std::boxed::Box<MemoryContext>>,
 }
 
 impl PartitionKeyData {
@@ -83,6 +88,7 @@ impl PartitionKeyData {
 }
 
 struct PartCacheState {
+    root: &'static MemoryContext,
     mcx: Mcx<'static>,
     keys: PgHashMap<'static, Oid, Rc<PartitionKeyData>>,
     callbacks_registered: bool,
@@ -96,7 +102,8 @@ fn with_state<R>(f: impl FnOnce(&mut PartCacheState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("PartCacheContext").mcx();
+            let root = ::mcx::session_root("PartCacheContext");
+            let mcx = root.mcx();
             // LIFO: drop the state properly before the context free (any
             // global-heap entry contents are released by the drop glue).
             ::mcx::register_session_cleanup(Box::new(|| {
@@ -107,6 +114,7 @@ fn with_state<R>(f: impl FnOnce(&mut PartCacheState) -> R) -> R {
                 });
             }));
             ManuallyDrop::new(PartCacheState {
+                root,
                 mcx,
                 keys: PgHashMap::with_capacity_in(8, mcx),
                 callbacks_registered: false,
@@ -143,7 +151,7 @@ fn vector_values(d: Datum, elmlen: usize) -> (usize, *const u8) {
 // compressed ones detoast into the partcache mcx (C RelationBuildPartitionKey
 // reads partexprs via TextDatumGetCString = pg_detoast_datum; very long
 // expression lists compress inline).
-fn text_to_str(d: Datum) -> PgResult<&'static str> {
+fn text_to_str(mcx: Mcx<'static>, d: Datum) -> PgResult<&'static str> {
     let p = d.as_usize() as *const u8;
     // SAFETY: syscache text attribute, readable through its varsize_any.
     unsafe {
@@ -151,14 +159,14 @@ fn text_to_str(d: Datum) -> PgResult<&'static str> {
         let (len, off) = if b0 & 0x01 != 0 {
             if b0 == 0x01 {
                 // 1B_E external/indirect toast pointer.
-                return detoast_text(p);
+                return detoast_text(mcx, p);
             }
             ((((b0 as usize) >> 1) & 0x7F) - 1, 1)
         } else {
             let w = u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap());
             if w & 0x02 != 0 {
                 // 4B_C inline-compressed image.
-                return detoast_text(p);
+                return detoast_text(mcx, p);
             }
             ((w as usize >> 2) - 4, 4)
         };
@@ -174,11 +182,10 @@ fn text_to_str(d: Datum) -> PgResult<&'static str> {
 // `p` heads a live toasted/compressed varlena readable through varsize_any.
 #[cold]
 #[inline(never)]
-unsafe fn detoast_text(p: *const u8) -> PgResult<&'static str> {
+unsafe fn detoast_text(mcx: Mcx<'static>, p: *const u8) -> PgResult<&'static str> {
     // SAFETY: forwarded caller contract.
     let raw =
         unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
-    let mcx = with_state(|st| st.mcx);
     let flat = detoast_seams::detoast_attr::call(mcx, raw)?.leak();
     // detoast_attr returns a plain 4B-header image.
     Ok(core::str::from_utf8(&flat[4..]).expect("non-UTF-8 partexprs"))
@@ -212,7 +219,12 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
     )?
     .ok_or_else(|| partition_key_lookup_failed(relid))?;
 
-    let mcx = with_state(|st| st.mcx);
+    // partcache.c:275 AllocSetContextCreate(CurTransactionContext, "partition
+    // key") reparented under CacheMemoryContext once the key is complete.
+    let ctx = std::boxed::Box::new(with_state(|st| st.root).new_child("partition key"));
+    // SAFETY: 'static stands for "as long as the Box in _ctx lives"; the box
+    // pins the context address across the move into the key.
+    let mcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
     let (strategy, partnatts);
     let mut partattrs: PgVec<'static, AttrNumber>;
     let mut partclass: PgVec<'static, Oid> = PgVec::new_in(mcx);
@@ -293,7 +305,7 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
             // Parsed and folded directly in the cache mcx (C parses in a temp
             // context and copyObjects into partkeycxt; fold garbage persists
             // here the way C's partkeycxt allocations do).
-            let parsed = readfuncs::stringToNode(mcx, text_to_str(exprs_d)?)?;
+            let parsed = readfuncs::stringToNode(mcx, text_to_str(mcx, exprs_d)?)?;
             let list = parsed.as_list().expect("partexprs is a List");
             for e in list.iter() {
                 let folded = clauses::eval_const_expressions(mcx, e)?;
@@ -323,6 +335,7 @@ fn RelationBuildPartitionKey(rel: &Relation<'_>) -> PgResult<Rc<PartitionKeyData
         parttypbyval: mcx::vec_with_capacity_in(mcx, n)?,
         parttypalign: mcx::vec_with_capacity_in(mcx, n)?,
         parttypcoll: mcx::vec_with_capacity_in(mcx, n)?,
+        _ctx: Some(ctx),
     };
 
     let mut partexprs_item = partexprs.iter();
@@ -478,6 +491,10 @@ pub fn get_default_partition_oid(parent_relid: Oid) -> PgResult<Oid> {
 mod tests {
     use super::*;
 
+    fn test_mcx() -> Mcx<'static> {
+        std::boxed::Box::leak(std::boxed::Box::new(MemoryContext::new("partcache test"))).mcx()
+    }
+
     // partexprs images: short and plain read in place; compressed/external
     // detoast (C TextDatumGetCString). Pre-fix the toast arms panicked.
     #[test]
@@ -487,7 +504,7 @@ mod tests {
         let mut img = vec![(((payload.len() + 1) as u8) << 1) | 0x01];
         img.extend_from_slice(payload);
         assert_eq!(
-            text_to_str(Datum::from_usize(img.as_ptr() as usize)).unwrap(),
+            text_to_str(test_mcx(), Datum::from_usize(img.as_ptr() as usize)).unwrap(),
             core::str::from_utf8(payload).unwrap()
         );
     }
@@ -498,7 +515,7 @@ mod tests {
         let mut img = ((payload.len() as u32 + 4) << 2).to_ne_bytes().to_vec();
         img.extend_from_slice(payload);
         assert_eq!(
-            text_to_str(Datum::from_usize(img.as_ptr() as usize)).unwrap(),
+            text_to_str(test_mcx(), Datum::from_usize(img.as_ptr() as usize)).unwrap(),
             core::str::from_utf8(payload).unwrap()
         );
     }
@@ -525,7 +542,7 @@ mod tests {
         let mut img = (((plain.len() as u32 + 4) << 2) | 0x02).to_ne_bytes().to_vec();
         img.extend_from_slice(&plain);
         assert_eq!(
-            text_to_str(Datum::from_usize(img.as_ptr() as usize)).unwrap(),
+            text_to_str(test_mcx(), Datum::from_usize(img.as_ptr() as usize)).unwrap(),
             core::str::from_utf8(payload).unwrap()
         );
     }

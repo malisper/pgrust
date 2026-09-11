@@ -321,13 +321,19 @@ pub fn call_template_init<'mcx>(
             _ => None,
         });
     }
-    let initdata = ts_locale::dict_api::DictInitData { mcx, dict_options: options, int_options };
+    let initdata = ts_locale::dict_api::DictInitData::new(mcx, options, int_options);
     let mut flinfo = fmgr_seams::fmgr_info::call(initmethod)?;
-    types_fmgr::function_call1_coll(
+    let d = types_fmgr::function_call1_coll(
         &mut flinfo,
         InvalidOid,
         Datum::from_usize(&initdata as *const _ as usize),
-    )
+    )?;
+    if let Some(f) = initdata.drop_fn.get() {
+        // SAFETY: d is the state the init method just built in `mcx`; the
+        // verification callers discard it, so release it here.
+        unsafe { f(d.as_usize()) }
+    }
+    Ok(d)
 }
 
 fn make_dictionary_dependencies(

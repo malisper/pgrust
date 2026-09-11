@@ -59,8 +59,9 @@ pub(crate) fn ginHeapTupleFastCollect<'s>(
 
     // ginfast.c:503: protect against integer overflow in the collector's
     // allocation calculations (MaxAllocSize / sizeof(IndexTuple)).
+    // The collector's element is an ItupBuf handle, not C's 8-byte pointer.
     if collector.tuples.len() + entries.len()
-        > ::mcx::MAX_ALLOC_SIZE / core::mem::size_of::<*const u8>()
+        > ::mcx::MAX_ALLOC_SIZE / core::mem::size_of::<ItupBuf>().max(8)
     {
         return Err(Box::new(PgError::error("too many entries for GIN index")));
     }

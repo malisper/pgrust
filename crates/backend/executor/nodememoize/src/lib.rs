@@ -568,13 +568,21 @@ fn probe_equal<'mcx>(
     }
 }
 
-fn build_hash_table(node: &mut MemoizeState<'_>) {
+fn build_hash_table(node: &mut MemoizeState<'_>) -> PgResult<()> {
     let mut size = node.plan.est_entries;
     if size == 0 {
         size = 1024;
     }
-    node.hashtab.reserve(size as usize, |_| unreachable!("empty table rehash"));
+    // C memoize_create(..., est_entries): a planner estimate inflated by the
+    // session's hash_mem GUCs is an ERROR (palloc MaxAllocSize), never an
+    // abort; the table grows on demand past this reservation anyway.
+    let bytes = (size as usize).saturating_mul(core::mem::size_of::<u32>() + 1);
+    ::mcx::check_alloc_size(bytes)?;
+    node.hashtab
+        .try_reserve(size as usize, |_| unreachable!("empty table rehash"))
+        .map_err(|_| ::mcx::oom_named("Memoize hash table", bytes))?;
     node.built = true;
+    Ok(())
 }
 
 fn empty_entry_bytes(params_len: u32) -> u64 {
@@ -868,7 +876,7 @@ pub fn exec_memoize<'mcx, C: MemoizeChild<'mcx>>(
             MemoStatus::CacheLookup => {
                 debug_assert!(node.entry == INVALID);
                 if !node.built {
-                    build_hash_table(node);
+                    build_hash_table(node)?;
                 }
                 let mut found = false;
                 let entry = cache_lookup(node, estate, &mut found)?;

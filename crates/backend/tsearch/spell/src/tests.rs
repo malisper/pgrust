@@ -26,6 +26,7 @@ fn static_mcx() -> Mcx<'static> {
 fn try_dict(mcx: Mcx<'static>, dictfile: &str, afffile: &str) -> PgResult<DictISpell> {
     let init = DictInitData {
         mcx,
+        drop_fn: core::cell::Cell::new(None),
         dict_options: opts(mcx, &[("dictfile", dictfile), ("afffile", afffile)]),
         int_options: {
             let mut v = PgVec::new_in(mcx);

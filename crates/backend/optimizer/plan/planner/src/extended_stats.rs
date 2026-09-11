@@ -77,7 +77,7 @@ pub fn get_relation_statistics<'mcx>(
             let node = readfuncs::stringToNode(mcx, src.as_str())?;
             let list = node.as_list().expect("stxexprs is a List");
             for e in list.iter() {
-                let e = clauses::eval_const_expressions(mcx, e)?;
+                let e = crate::setrefs::fold_with_deps(run, e)?;
                 if varno != 1 {
                     crate::plancat::change_var_nodes(e, varno)?;
                 }

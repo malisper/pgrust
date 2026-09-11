@@ -813,21 +813,23 @@ pub fn replace_text<'mcx>(
     }
     let mut curr_ptr = text_position_get_match_off(&state);
     let mut start_ptr = 0usize;
-    let mut str: Vec<u8> = Vec::new();
+    // varlena.c builds into a StringInfo: every append is admitted under
+    // MaxAllocSize and fails as an ERROR.
+    let mut str: PgVec<'mcx, u8> = PgVec::new_in(mcx);
 
     loop {
         // varlena.c:4295: CHECK_FOR_INTERRUPTS() per match.
         check_for_interrupts()?;
 
-        str.extend_from_slice(&src[start_ptr..curr_ptr]);
-        str.extend_from_slice(to_sub);
+        ::mcx::vec_append_bytes(&mut str, &src[start_ptr..curr_ptr])?;
+        ::mcx::vec_append_bytes(&mut str, to_sub)?;
         start_ptr = curr_ptr + state.last_match_len;
         if !text_position_next(&mut state)? {
             break;
         }
         curr_ptr = text_position_get_match_off(&state);
     }
-    str.extend_from_slice(&src[start_ptr..]);
+    ::mcx::vec_append_bytes(&mut str, &src[start_ptr..])?;
 
     cstring_to_text(mcx, &str)
 }

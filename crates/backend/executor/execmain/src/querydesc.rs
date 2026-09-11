@@ -30,6 +30,14 @@ pub struct ExecData<'mcx> {
 // owners (relation refs, tuplesorts, Rc'd descriptors) leak past the query.
 impl Drop for ExecData<'_> {
     fn drop(&mut self) {
+        // Worker threads read this executor's arena by pointer (share-by-
+        // pointer execParallel); C's estate memory survives until the abort
+        // path has destroyed every parallel context (AtEOXact_Parallel), but
+        // a caller-owned QueryDesc drops on the unwind before that. Join the
+        // workers first so no worker outlives the memory it dereferences.
+        if parallel::ParallelContextActive() {
+            let _ = parallel::AtEOXact_Parallel(false);
+        }
         for i in 0..self.estate.es_subplanstates.len() {
             let cell = self.estate.es_subplanstates[i];
             // SAFETY: init_plan created this arena cell; the cell (and the

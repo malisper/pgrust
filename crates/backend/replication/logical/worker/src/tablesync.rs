@@ -739,6 +739,17 @@ pub(crate) fn LogicalRepSyncTableStart(
     // user has opted out of that behavior (tablesync.c:1515).
     let ucxt = crate::apply::maybe_switch_to_table_owner(mcx, rel.rd_rel.relowner)?;
 
+    // tablesync.c: the acting user needs INSERT on the target before the
+    // copy (pg_class_aclcheck + aclcheck_error).
+    let aclresult = aclchk::pg_class_aclcheck(rel.rd_id, miscinit::GetUserId(), types_nodes::parsenodes::ACL_INSERT)?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        aclchk::aclcheck_error(
+            aclresult,
+            tablecmds::get_relkind_objtype(rel.rd_rel.relkind),
+            &relname,
+        )?;
+    }
+
     // RLS-enabled targets refuse (recorded divergence: C refuses only when
     // the acting user does not bypass RLS, check_enable_rls).
     if rel.rd_rel.relrowsecurity {

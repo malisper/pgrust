@@ -24,10 +24,15 @@ fn orig_next_xid() -> TransactionId {
     .xid()
 }
 
-fn decode_gid(buf: &[u8], layout: &BufferLayout, gidlen: u16) -> String {
+// A lossy conversion would expand invalid bytes to U+FFFD past the
+// GIDSIZE bound try_of checked on the raw bytes; hostile input is corrupt.
+fn decode_gid(buf: &[u8], layout: &BufferLayout, gidlen: u16, func: &'static str) -> PgResult<String> {
     let g = &buf[layout.gid..layout.gid + gidlen as usize];
     let end = g.iter().position(|&b| b == 0).unwrap_or(g.len());
-    String::from_utf8_lossy(&g[..end]).into_owned()
+    match core::str::from_utf8(&g[..end]) {
+        Ok(s) if s.len() < crate::state::GIDSIZE => Ok(s.to_owned()),
+        _ => Err(corrupt_guard(None, func).unwrap_err()),
+    }
 }
 
 fn decode_children(buf: &[u8], layout: &BufferLayout, n: usize) -> Vec<TransactionId> {
@@ -51,7 +56,7 @@ pub(crate) fn prepare_redo_add_locked(
     debug_assert!(transam_xlog::RecoveryInProgress());
     let hdr = corrupt_guard(TwoPhaseFileHeader::from_bytes(buf), "PrepareRedoAdd")?;
     let layout = buffer_layout(&hdr, buf, "PrepareRedoAdd")?;
-    let gid = decode_gid(buf, &layout, hdr.gidlen);
+    let gid = decode_gid(buf, &layout, hdr.gidlen, "PrepareRedoAdd")?;
 
     // 2PC data that already reached disk was restored by restoreTwoPhaseData;
     // skip the WAL copy to avoid duplicates.
@@ -376,7 +381,7 @@ pub fn RecoverPreparedTransactions() -> PgResult<()> {
                 corrupt_guard(TwoPhaseFileHeader::from_bytes(&buf), "RecoverPreparedTransactions")?;
             debug_assert_eq!(hdr.xid, xid);
             let layout = buffer_layout(&hdr, &buf, "RecoverPreparedTransactions")?;
-            let gid = decode_gid(&buf, &layout, hdr.gidlen);
+            let gid = decode_gid(&buf, &layout, hdr.gidlen, "RecoverPreparedTransactions")?;
             let subxids = decode_children(&buf, &layout, hdr.nsubxacts as usize);
 
             mark_as_preparing_guts(idx, xid, &gid, hdr.prepared_at, hdr.owner, hdr.database);

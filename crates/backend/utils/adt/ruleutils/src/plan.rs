@@ -119,7 +119,7 @@ pub fn deparse_expression<'mcx>(
     dctx.namespaces = vec![Rc::clone(&ctx.ns)];
     dctx.varprefix = forceprefix;
     get_rule_expr(expr, &mut dctx, showimplicit)?;
-    Ok(dctx.buf)
+    Ok(dctx.buf.into_inner())
 }
 
 pub(crate) fn set_deparse_plan<'mcx>(

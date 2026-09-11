@@ -634,7 +634,7 @@ pub fn prsd_headline_impl<'mcx>(
         };
         ts_execute_locations(mcx, query, &mut chk)?
     } else {
-        Vec::new()
+        ::mcx::PgVec::new_in(mcx)
     };
 
     if max_fragments == 0 {

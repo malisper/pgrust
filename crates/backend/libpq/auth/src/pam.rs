@@ -269,6 +269,23 @@ impl Drop for PamHandle {
 // C CheckPAMAuth (auth.c:2029). `password` is always "" from dispatch: the
 // conversation fetches the real one from the client.
 pub(crate) fn CheckPAMAuth(port: &Port, user: &str, password: &[u8]) -> PgResult<i32> {
+    // The conversation would read the client's PasswordMessage while the
+    // process-global PAM lock is held, letting one idle peer stall every
+    // PAM login; fetch it up front instead (same wire exchange).
+    let prefetched: Vec<u8>;
+    let password: &[u8] = if password.is_empty() {
+        sendAuthRequest(port, AUTH_REQ_PASSWORD, &[])?;
+        match crate::recv_password_packet(port)? {
+            // Client didn't want to send a password: log nothing.
+            None => return Ok(STATUS_EOF),
+            Some(p) => {
+                prefetched = p;
+                &prefetched
+            }
+        }
+    } else {
+        password
+    };
     // Serialize the whole transaction: at most one thread may drive the
     // non-reentrant system libpam / module stack at a time (see PAM_LOCK).
     // Recover from poisoning — the conversation callback catches unwinds, but

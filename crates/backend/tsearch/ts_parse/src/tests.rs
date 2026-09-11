@@ -258,3 +258,28 @@ fn overlong_dictionary_output_is_skipped_with_notice() {
     let notices = LONG_NOTICES.lock().unwrap();
     assert_eq!(notices.as_slice(), ["word is too long to be indexed"]);
 }
+
+// Consumed tokens leave the queue (C's moveToWaste + pfree): a long document
+// of retired tokens must not retain every token until the call ends.
+#[test]
+fn lexize_queue_drains_consumed_tokens() {
+    let ctx = MemoryContext::new("ts-parse-test");
+    let mcx = ctx.mcx();
+    let mut env = MockEnv::new(mcx, Vec::new(), vec![D_STOP, D_STEM]);
+    let buf = b"the ";
+    env.prs_start(buf).unwrap();
+    let mut ld = crate::parse::LexizeData::new(mcx);
+    let mut max_len = 0;
+    for _ in 0..20_000 {
+        ld.add_lemm_pub(1, 0, 3);
+        while crate::parse::lexize_exec(&mut ld, &mut env, buf).unwrap().is_some() {}
+        max_len = max_len.max(ld.queue_len());
+    }
+    assert!(max_len <= 2048, "queue retained {max_len} consumed tokens");
+    // A stop-word token still lexizes to an empty (stopword) result once.
+    ld.add_lemm_pub(1, 0, 3);
+    assert_eq!(
+        crate::parse::lexize_exec(&mut ld, &mut env, buf).unwrap().map(|v| v.len()),
+        Some(0)
+    );
+}

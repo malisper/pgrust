@@ -39,6 +39,7 @@ fn english_stem_oracle() {
     let mcx = static_mcx();
     let init = DictInitData {
         mcx,
+        drop_fn: core::cell::Cell::new(None),
         dict_options: opts(mcx, &[("language", "english"), ("stopwords", "english")]),
         int_options: {
             let mut v = PgVec::new_in(mcx);
@@ -196,6 +197,7 @@ const KOI8R_ORACLE: &[(&str, &[u8], &[u8])] = &[
 fn init_lang(mcx: Mcx<'static>, lang: &str) -> DictSnowball {
     let init = DictInitData {
         mcx,
+        drop_fn: core::cell::Cell::new(None),
         dict_options: opts(mcx, &[("language", lang)]),
         int_options: {
             let mut v = PgVec::new_in(mcx);

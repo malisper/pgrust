@@ -482,12 +482,13 @@ pub fn xmltotext_with_options(
     }
 
     let mut esc = SoftErrorContext::new(false);
-    let parsed = xml_parse_doc(
+    let parsed = xml_parse_doc_ext(
         data,
         xmloption_arg,
         !indent,
         GetDatabaseEncoding(),
         Some(&mut esc),
+        indent,
     )?;
     let Some(parsed) = parsed else {
         // A soft error must be failure to conform to XMLOPTION_DOCUMENT.
@@ -1044,7 +1045,21 @@ pub fn xml_parse_doc(
     xmloption_arg: XmlOptionType,
     preserve_whitespace: bool,
     encoding: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<ParsedXml>> {
+    xml_parse_doc_ext(data, xmloption_arg, preserve_whitespace, encoding, escontext, false)
+}
+
+// `want_nodes`: libxml2 hands ownership of the CONTENT node list to a
+// non-NULL `lst` and xmlFreeDoc never reaches it (C passes NULL unless
+// parsed_nodes is wanted); only XMLSERIALIZE INDENT attaches it.
+pub fn xml_parse_doc_ext(
+    data: &[u8],
+    xmloption_arg: XmlOptionType,
+    preserve_whitespace: bool,
+    encoding: i32,
     mut escontext: Option<&mut SoftErrorContext>,
+    want_nodes: bool,
 ) -> PgResult<Option<ParsedXml>> {
     let x = xml2();
 
@@ -1159,7 +1174,7 @@ pub fn xml_parse_doc(
                     core::ptr::null_mut(),
                     0,
                     tail.as_ptr(),
-                    &mut nodes,
+                    if want_nodes { &mut nodes } else { core::ptr::null_mut() },
                 );
                 if rc != 0 || xml_err_occurred() {
                     (x.xmlKeepBlanksDefault)(save);
@@ -1213,13 +1228,32 @@ pub fn xml_parse_ok(
 
 /// C `escape_xml` (xml.c:2593).
 pub fn escape_xml(str: &[u8]) -> Vec<u8> {
-    let mut buf: Vec<u8> = Vec::with_capacity(str.len());
+    // xml.c escape_xml appends to a StringInfo: enlargeStringInfo's
+    // MaxAllocSize ceiling is an ERROR, never an allocator abort.
+    let mut buf: Vec<u8> = Vec::new();
+    if ::mcx::check_alloc_size(str.len()).is_err() || buf.try_reserve(str.len()).is_err() {
+        std::panic::panic_any(::mcx::oom_named("escape_xml", str.len()));
+    }
+    let mut expand = |buf: &mut Vec<u8>, s: &[u8]| {
+        if buf.len().saturating_add(s.len()) > ::mcx::MAX_ALLOC_SIZE
+            || buf.try_reserve(s.len()).is_err()
+        {
+            std::panic::panic_any(Box::new(
+                ::types_error::PgError::error(format!(
+                    "string buffer exceeds maximum allowed length ({} bytes)",
+                    ::mcx::MAX_ALLOC_SIZE
+                ))
+                .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            ));
+        }
+        buf.extend_from_slice(s);
+    };
     for &b in str {
         match b {
-            b'&' => buf.extend_from_slice(b"&amp;"),
-            b'<' => buf.extend_from_slice(b"&lt;"),
-            b'>' => buf.extend_from_slice(b"&gt;"),
-            b'\r' => buf.extend_from_slice(b"&#x0d;"),
+            b'&' => expand(&mut buf, b"&amp;"),
+            b'<' => expand(&mut buf, b"&lt;"),
+            b'>' => expand(&mut buf, b"&gt;"),
+            b'\r' => expand(&mut buf, b"&#x0d;"),
             other => buf.push(other),
         }
     }

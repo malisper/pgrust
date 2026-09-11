@@ -40,7 +40,7 @@ fn header_first_abort_leaves_no_readable_part() {
     // Not readable: no manifest exists at all.
     let probe = Probe::new(TxnVerdict::Aborted);
     assert!(
-        crate::publish::effective_manifest(&mut vfs, DIR, &probe)
+        crate::publish::effective_manifest(&mut vfs, DIR, &probe, None)
             .expect("eff")
             .is_none()
     );

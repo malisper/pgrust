@@ -1032,6 +1032,7 @@ mod acct_pool {
             live_chunk_bytes: Cell::new(0),
             free_chunks: Cell::new(0),
             is_bump: false,
+            wholesale_reset: Cell::new(false),
             kind: "AllocSet",
             parent: None,
             children: RefCell::new(alloc::vec::Vec::new()),
@@ -1402,10 +1403,10 @@ fn allocator_rejects_over_ceiling_allocate() {
     let layout = core::alloc::Layout::from_size_align(MAX_ALLOC_SIZE + 1, 1).unwrap();
     for ctx in [MemoryContext::new("t"), MemoryContext::new_bump("t")] {
         let mcx = ctx.mcx();
-        assert!(
-            Allocator::allocate(&mcx, layout).is_err(),
-            "allocate above MaxAllocSize must fail deterministically"
-        );
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Allocator::allocate(&mcx, layout).map(|_| ()).map_err(|_| ())
+        }));
+        assert_ceiling_error(refused, Some(MAX_ALLOC_SIZE + 1));
         assert_eq!(ctx.used(), 0, "the refused request must not be charged");
         // At the ceiling itself the request is admitted (parity: palloc
         // accepts MaxAllocSize exactly).
@@ -1423,11 +1424,34 @@ fn allocator_rejects_over_ceiling_grow() {
     let ctx = MemoryContext::new("t");
     let mut v: PgVec<u8> = vec_with_capacity_in(ctx.mcx(), 16).unwrap();
     v.extend_from_slice(b"payload");
-    assert!(
-        v.try_reserve(MAX_ALLOC_SIZE + 1).is_err(),
-        "growth above MaxAllocSize must fail deterministically"
-    );
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        v.try_reserve(MAX_ALLOC_SIZE + 1).map_err(|_| ())
+    }));
+    assert_ceiling_error(refused, None);
     assert_eq!(&v[..], b"payload", "failed growth leaves the vec intact");
+    // The infallible lane is the one that used to abort the server.
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        v.resize(MAX_ALLOC_SIZE + 1, 0);
+    }));
+    assert!(refused.is_err(), "resize above MaxAllocSize must unwind, not abort");
+}
+
+// Over-ceiling requests unwind with C's MemoryContextSizeFailure message so
+// the statement boundary recovers them as ERROR.
+fn assert_ceiling_error<T: core::fmt::Debug>(
+    r: Result<Result<T, ()>, std::boxed::Box<dyn core::any::Any + Send>>,
+    size: Option<usize>,
+) {
+    let payload = r.expect_err("over-ceiling request must unwind, not return");
+    let msg = payload
+        .downcast_ref::<std::string::String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| std::string::String::from(*s)))
+        .unwrap_or_default();
+    match size {
+        Some(size) => assert_eq!(msg, alloc::format!("invalid memory alloc request size {size}")),
+        None => assert!(msg.starts_with("invalid memory alloc request size "), "{msg}"),
+    }
 }
 
 #[test]

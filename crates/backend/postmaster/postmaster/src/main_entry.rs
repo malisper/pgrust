@@ -190,7 +190,7 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     // for it to invoke).
 
     waiteventset::InitializeWaitEventSupport()?;
-    miscinit::InitProcessLocalLatch();
+    miscinit::InitProcessLocalLatch()?;
     if let Some(l) = init_small::globals::MyLatch() {
         crate::publish_pm_latch(l);
     }

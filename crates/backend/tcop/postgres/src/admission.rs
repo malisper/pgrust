@@ -139,9 +139,11 @@ pub fn stats() -> (i32, i32, u64, u64) {
 /// set by exec_execute_message before the implicit block is materialized
 /// by the next start_xact_command, so blockstate alone is not enough).
 fn txn_still_open() -> bool {
-    xact::IsTransactionBlock()
-        || (crate::xact_started()
-            && (xact::MyXactFlags() & types_core::xact::XACT_FLAGS_PIPELINING) != 0)
+    // An extended-protocol Execute arrives with the transaction command
+    // already started by Parse/Bind (relation locks and a registered
+    // snapshot held): parking a lock holder behind the gate is the deadlock
+    // the deadlock detector cannot see, so any started command bypasses.
+    xact::IsTransactionBlock() || crate::xact_started()
 }
 
 fn release_slot() {
