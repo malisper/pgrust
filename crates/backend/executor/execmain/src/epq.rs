@@ -51,9 +51,12 @@ pub fn eval_plan_qual<'mcx>(
     );
     let saved_subs = core::mem::replace(&mut estate.es_epq, subs.take());
     let saved_active = estate.es_epq_active;
+    let saved_param = estate.es_epq_param;
     estate.es_epq_active = true;
+    estate.es_epq_param = epq.epq_param;
     let r = eval_plan_qual_guts(epq, estate, inputslot);
     estate.es_epq_active = saved_active;
+    estate.es_epq_param = saved_param;
     *subs = core::mem::replace(&mut estate.es_epq, saved_subs);
     r
 }
@@ -223,10 +226,11 @@ pub(crate) fn eval_plan_qual_start<'mcx>(
 // loud-admission-list deliverable, one reviewed act per shape, each tied to
 // census evidence (docs/design/lane-epq.md §5/§6). Wave-7 tightenings, both
 // loud-refusal-only (nothing newly admitted):
-//   * scanrelid == 0 pushed-down-join scans refuse LOUDLY until a spec
-//     exercises them (lane-epq.md §2's recorded FDW gap; the refused-tag
-//     arm already catches ForeignScan/CustomScan, this pins the invariant
-//     for every ADMITTED scan tag too);
+//   * scanrelid == 0 scans other than a ForeignScan refuse LOUDLY (C's
+//     "unexpected scan node"); the pushed-down-join ForeignScan itself is
+//     since ported (walker-arms-unported lane: RecheckForeignScan drives
+//     the fdw_outerpath subplan, execscan::epq_fetch gates on
+//     es_epq_param ∈ extParam — lane-epq.md §2);
 //   * SubqueryScan recurses into its subplan (the tag whitelist previously
 //     stopped at the SubqueryScan node, silently admitting any shape
 //     underneath — an honesty gap in the loud list, not a new admission).
@@ -306,12 +310,13 @@ pub(crate) fn eval_plan_qual_start<'mcx>(
 //     custom-scan provider API (zero planner path-creation sites; the
 //     executor arm is in unported_nodes!), so no plan can contain one.
 //   * scanrelid == 0 pushed-down-join ForeignScan — ADMITTED (audit-18.6
-//     b076, scripts/execscan-epq-rowmark-e2e.sh leg B): a postgres_fdw
-//     join pushed down inside a non-pullup subquery of an UPDATE sits in
-//     the recheck tree under the SubqueryScan whose ROW_MARK_COPY serves
-//     the row; the rescan resets every fs_base_relids rti
-//     (execscan::exec_scan_rescan_relids, ExecScanReScan execScan.c:127)
-//     and the scan itself is never fetched. Any OTHER zero-scanrelid scan
+//     b076, scripts/execscan-epq-rowmark-e2e.sh leg B; recheck through the
+//     fdw_outerpath outer subplan: scripts/walker-arms-unported-e2e.sh): a
+//     postgres_fdw join pushed down inside a non-pullup subquery of an
+//     UPDATE sits in the recheck tree under the SubqueryScan whose
+//     ROW_MARK_COPY serves the row; the rescan resets every
+//     fs_base_relids rti (execscan::exec_scan_rescan_relids, ExecScanReScan
+//     execScan.c:127). Any OTHER zero-scanrelid scan
 //     tag still refuses below: C's ExecScanReScan errors on it
 //     ("unexpected scan node", execScan.c:145).
 pub(crate) fn check_epq_plan(plan: Node<'_>) {

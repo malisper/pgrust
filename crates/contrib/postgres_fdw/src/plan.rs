@@ -1677,9 +1677,7 @@ fn foreign_join_ok<'mcx>(
     Ok(true)
 }
 
-// postgresGetForeignJoinPaths. Divergence: C builds an EPQ-capable pushed
-// path via GetExistingLocalJoinPath for UPDATE/DELETE/row-locked queries;
-// that lane is unported, so those queries keep local join plans.
+// postgresGetForeignJoinPaths (postgres_fdw.c:6362).
 fn postgres_get_foreign_join_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinrel: RelId,
@@ -1696,18 +1694,33 @@ fn postgres_get_foreign_join_paths<'mcx>(
     if !types_pathnodes::relids::relids_is_empty(&run.root.rel(joinrel).lateral_relids) {
         return Ok(());
     }
-    {
+    let mut fp = PgFdwRelationInfo::new(mcx);
+    fp.pushdown_safe = false;
+    attach_fpinfo(mcx, run.root.rel_mut(joinrel), fp)?;
+
+    // If there is a possibility that EvalPlanQual will be executed, we need
+    // to be able to reconstruct the row using scans of the base relations.
+    // GetExistingLocalJoinPath will find a suitable path for this purpose in
+    // the path list of the joinrel, if one exists. We must be careful to
+    // call it before adding any ForeignPath, since the ForeignPath might
+    // dominate the only suitable local path available. We also do it before
+    // calling foreign_join_ok(), since that function updates fpinfo and
+    // marks it as pushable if the join is found to be pushable.
+    let epq_path: Option<PathId> = {
         use types_nodes::CmdType;
         let ct = run.parse().commandType;
         if ct == CmdType::CMD_DELETE || ct == CmdType::CMD_UPDATE || !run.root.rowMarks.is_empty()
         {
-            return Ok(());
+            let Some(p) = planner::pathnode::get_existing_local_join_path(run, joinrel) else {
+                // elog(DEBUG3, "could not push down foreign join because a
+                // local path suitable for EPQ checks was not found")
+                return Ok(());
+            };
+            Some(p)
+        } else {
+            None
         }
-    }
-
-    let mut fp = PgFdwRelationInfo::new(mcx);
-    fp.pushdown_safe = false;
-    attach_fpinfo(mcx, run.root.rel_mut(joinrel), fp)?;
+    };
 
     if !foreign_join_ok(run, joinrel, jointype, outerrel, innerrel, restrictlist)? {
         return Ok(());
@@ -1777,17 +1790,14 @@ fn postgres_get_foreign_join_paths<'mcx>(
         total_cost,
         PgVec::new_in(mcx),
         &required_outer,
-        None,
+        epq_path,
         fdw_restrictinfo,
         PgVec::new_in(mcx),
     )?;
     planner::pathnode::add_path(run, joinrel, path);
 
-    // Consider pathkeys for the join relation (postgres_fdw.c:6496). No
-    // EPQ-capable local join path exists on this lane
-    // (GetExistingLocalJoinPath is unported; see the CMD_UPDATE/DELETE and
-    // rowMarks refusal above), so the sorted paths carry no fdw_outerpath.
-    add_paths_with_pathkeys_for_rel(run, joinrel, None, restrictlist)?;
+    // Consider pathkeys for the join relation (postgres_fdw.c:6496).
+    add_paths_with_pathkeys_for_rel(run, joinrel, epq_path, restrictlist)?;
     Ok(())
 }
 
@@ -2512,7 +2522,7 @@ fn postgres_get_foreign_plan<'mcx>(
     best_path: PathId,
     tlist: NodeList<'mcx>,
     scan_clauses: PgVec<'mcx, RinfoId>,
-    outer_plan: Option<Node<'mcx>>,
+    mut outer_plan: Option<Node<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     let reloptkind = run.root.rel(rel_id).reloptkind;
@@ -2581,9 +2591,6 @@ fn postgres_get_foreign_plan<'mcx>(
         // Join relation: conditions come from the fpinfo, not scan_clauses.
         scan_relid = 0;
         debug_assert!(scan_clauses.is_empty());
-        // No EPQ-capable join paths are generated (see get_foreign_join_paths),
-        // so there is never an outer (EPQ) subplan to fix up here.
-        debug_assert!(outer_plan.is_none());
         let (remote, local): (Vec<RinfoId>, Vec<RinfoId>) = {
             let fp = fpinfo(run.root.rel(rel_id)).borrow();
             (fp.remote_conds.iter().copied().collect(), fp.local_conds.iter().copied().collect())
@@ -2597,9 +2604,81 @@ fn postgres_get_foreign_plan<'mcx>(
             let clause = run.root.rinfo(ri).clause;
             local_exprs.lappend(mcx, *run.root.expr_node(clause))?;
         }
-        // EPQ recheck is handled by the local join alternative in C; none here.
+        // EPQ recheck is handled by the local join alternative (outer_plan).
         fdw_recheck_quals = NodeList::nil();
         fdw_scan_tlist = build_tlist_to_deparse(run, rel_id)?;
+
+        // Ensure that the outer plan produces a tuple whose descriptor
+        // matches our scan tuple slot. Also, remove the local conditions
+        // from the outer plan's quals, lest they be evaluated twice, once by
+        // the local plan and once by the scan.
+        if let Some(op) = outer_plan {
+            // Right now, we only consider grouping and aggregation beyond
+            // joins. Queries involving aggregates or grouping do not require
+            // the EPQ mechanism, hence should not have an outer plan here.
+            debug_assert!(!matches!(
+                reloptkind,
+                types_pathnodes::RELOPT_UPPER_REL | types_pathnodes::RELOPT_OTHER_UPPER_REL
+            ));
+            // First, update the plan's qual list if possible. In some cases
+            // the quals might be enforced below the topmost plan level, in
+            // which case we'll fail to remove them; it's not worth working
+            // harder than this.
+            for qual in local_exprs.iter() {
+                let new_qual =
+                    list_delete_equal(mcx, &op.as_plan().expect("plan node").qual, qual)?;
+                // SAFETY: the outer plan was built by create_plan_recurse for
+                // this ForeignScan alone (exclusive plan-tree ownership).
+                unsafe { op.with_plan_mut(|p| p.qual = new_qual) }.expect("plan node");
+                // For an inner join the local conditions of the foreign scan
+                // plan can be part of the joinquals as well. (They might also
+                // be in the mergequals or hashquals, but we can't touch those
+                // without breaking the plan.)
+                let join_inner = match op.node_tag() {
+                    types_nodes::NodeTag::T_NestLoop => {
+                        op.as_nest_loop().map(|j| (j.join.jointype, &j.join.joinqual))
+                    }
+                    types_nodes::NodeTag::T_MergeJoin => {
+                        op.as_merge_join().map(|j| (j.join.jointype, &j.join.joinqual))
+                    }
+                    types_nodes::NodeTag::T_HashJoin => {
+                        op.as_hash_join().map(|j| (j.join.jointype, &j.join.joinqual))
+                    }
+                    _ => None,
+                };
+                if let Some((jt, joinqual)) = join_inner {
+                    if jt == types_nodes::jointype::JoinType::JOIN_INNER {
+                        let new_joinqual = list_delete_equal(mcx, joinqual, qual)?;
+                        // SAFETY: as above.
+                        unsafe {
+                            match op.node_tag() {
+                                types_nodes::NodeTag::T_NestLoop => op
+                                    .with_mut::<types_nodes::plannodes::NestLoop, _>(|j| {
+                                        j.join.joinqual = new_joinqual
+                                    }),
+                                types_nodes::NodeTag::T_MergeJoin => op
+                                    .with_mut::<types_nodes::plannodes::MergeJoin, _>(|j| {
+                                        j.join.joinqual = new_joinqual
+                                    }),
+                                _ => op.with_mut::<types_nodes::plannodes::HashJoin, _>(|j| {
+                                    j.join.joinqual = new_joinqual
+                                }),
+                            }
+                        }
+                        .expect("join plan node");
+                    }
+                }
+            }
+            // Now fix the subplan's tlist --- this might result in inserting
+            // a Result node atop the plan tree.
+            let parallel_safe = run.root.path(best_path).base().parallel_safe;
+            outer_plan = Some(planner::createplan::change_plan_targetlist(
+                mcx,
+                op,
+                fdw_scan_tlist.clone_in(mcx)?,
+                parallel_safe,
+            )?);
+        }
     }
 
     // Deparse the remote SELECT, collecting params.
@@ -2661,6 +2740,24 @@ fn postgres_get_foreign_plan<'mcx>(
         fdw_recheck_quals,
         outer_plan,
     )
+}
+
+// list_delete (list.c): the list without the first cell equal() to `datum`.
+fn list_delete_equal<'mcx>(
+    mcx: Mcx<'mcx>,
+    list: &NodeList<'mcx>,
+    datum: Node<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    let mut out: NodeList<'mcx> = NodeList::nil();
+    let mut deleted = false;
+    for n in list.iter() {
+        if !deleted && types_nodes::equal::equal(n, datum) {
+            deleted = true;
+            continue;
+        }
+        out.lappend(mcx, n)?;
+    }
+    Ok(out)
 }
 
 // build_tlist_to_deparse (deparse.c): Vars needed from the foreign server —
@@ -2883,6 +2980,7 @@ static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {
     async_request: Some(crate::exec::foreign_async_request),
     async_configure_wait: Some(crate::exec::foreign_async_configure_wait),
     async_notify: Some(crate::exec::foreign_async_notify),
+    recheck: Some(crate::exec::recheck_foreign_scan),
 };
 
 // _PG_init (option.c:588-599): runs when the library is loaded (the first

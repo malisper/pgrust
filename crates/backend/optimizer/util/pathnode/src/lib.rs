@@ -1507,6 +1507,106 @@ pub fn create_foreign_join_path<'mcx>(
     })))
 }
 
+// GetExistingLocalJoinPath (foreign.c): find (and copy) an unparameterized
+// local join path in `joinrel`'s pathlist that can execute EPQ checks for a
+// pushed-down foreign join. A ForeignPath child that is itself a pushed-down
+// join is replaced by its fdw_outerpath, so the copy is built entirely of
+// local join strategies.
+pub fn get_existing_local_join_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    joinrel: RelId,
+) -> Option<PathId> {
+    debug_assert!(matches!(
+        run.root.rel(joinrel).reloptkind,
+        types_pathnodes::RELOPT_JOINREL | types_pathnodes::RELOPT_OTHER_JOINREL
+    ));
+    let candidates: Vec<PathId> = run.root.rel(joinrel).pathlist.iter().copied().collect();
+    for path in candidates {
+        // Skip parameterized paths.
+        if run.root.path(path).base().param_info.is_some() {
+            continue;
+        }
+        // Just skip anything but a hash/nest/merge join: we don't know if
+        // the corresponding plan would build the output row from whole-row
+        // references of base relations and execute the EPQ checks.
+        let mut joinpath = match run.root.path(path) {
+            p @ (PathNode::HashPath(_) | PathNode::NestPath(_) | PathNode::MergePath(_)) => {
+                p.clone()
+            }
+            _ => continue,
+        };
+        let is_foreign_join_child = |run: &PlannerRun<'mcx>, child: Option<PathId>| {
+            child.and_then(|c| match run.root.path(c) {
+                PathNode::ForeignPath(fp)
+                    if matches!(
+                        run.root.rel(fp.path.parent).reloptkind,
+                        types_pathnodes::RELOPT_JOINREL | types_pathnodes::RELOPT_OTHER_JOINREL
+                    ) =>
+                {
+                    Some(fp.fdw_outerpath)
+                }
+                _ => None,
+            })
+        };
+        let jpath = match &mut joinpath {
+            PathNode::HashPath(hp) => &mut hp.jpath,
+            PathNode::NestPath(np) => &mut np.jpath,
+            PathNode::MergePath(mp) => &mut mp.jpath,
+            _ => unreachable!(),
+        };
+        // If either inner or outer path is a ForeignPath corresponding to a
+        // pushed down join, replace it with the fdw_outerpath, so that we
+        // maintain a path for EPQ checks built entirely of local join
+        // strategies.
+        if let Some(new_outer) = is_foreign_join_child(run, jpath.outerjoinpath) {
+            jpath.outerjoinpath = new_outer;
+            if let PathNode::MergePath(mp) = &mut joinpath {
+                // If the new outer path is already well enough ordered for
+                // the mergejoin, we can skip doing an explicit sort.
+                if !mp.outersortkeys.is_empty() {
+                    let outer_keys: Vec<PathKey> = new_outer
+                        .map(|o| run.root.path(o).base().pathkeys.iter().copied().collect())
+                        .unwrap_or_default();
+                    let (contained, n) = types_pathnodes::pathkeys_count_contained_in(
+                        mp.outersortkeys.as_slice(),
+                        &outer_keys,
+                    );
+                    mp.outer_presorted_keys = n as i32;
+                    if contained {
+                        mp.outersortkeys = PgVec::new_in(run.mcx);
+                    }
+                }
+            }
+        }
+        let jpath = match &mut joinpath {
+            PathNode::HashPath(hp) => &mut hp.jpath,
+            PathNode::NestPath(np) => &mut np.jpath,
+            PathNode::MergePath(mp) => &mut mp.jpath,
+            _ => unreachable!(),
+        };
+        if let Some(new_inner) = is_foreign_join_child(run, jpath.innerjoinpath) {
+            jpath.innerjoinpath = new_inner;
+            if let PathNode::MergePath(mp) = &mut joinpath {
+                // If the new inner path is already well enough ordered for
+                // the mergejoin, we can skip doing an explicit sort.
+                if !mp.innersortkeys.is_empty() {
+                    let inner_keys: Vec<PathKey> = new_inner
+                        .map(|i| run.root.path(i).base().pathkeys.iter().copied().collect())
+                        .unwrap_or_default();
+                    if types_pathnodes::pathkeys_contained_in(
+                        mp.innersortkeys.as_slice(),
+                        &inner_keys,
+                    ) {
+                        mp.innersortkeys = PgVec::new_in(run.mcx);
+                    }
+                }
+            }
+        }
+        return Some(run.root.alloc_path(joinpath));
+    }
+    None
+}
+
 // create_foreign_upper_path (pathnode.c): ForeignPath for a pushed-down
 // upper (grouping/ordering/final) relation; never parameterized.
 #[allow(clippy::too_many_arguments)]

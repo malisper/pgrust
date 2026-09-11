@@ -1,0 +1,356 @@
+-- postgres_fdw join pushdown under row locking / UPDATE / DELETE (walker-arms
+-- audit, PR #2102 row "postgresGetForeignPlan T_HashJoin,T_MergeJoin,
+-- T_NestLoop"): C keeps an EPQ-capable local join path
+-- (GetExistingLocalJoinPath) as the ForeignPath's fdw_outerpath, so a
+-- pushed-down foreign join can still be rechecked by EvalPlanQual. pgrust
+-- used to refuse the pushdown whenever rowMarks / UPDATE / DELETE were
+-- present and planned local joins instead. Loopback server on this very
+-- backend (C postgres_fdw regress recipe). Expected output captured from C
+-- PG 18.
+CREATE EXTENSION postgres_fdw;
+DO $d$
+BEGIN
+  EXECUTE format('CREATE SERVER epq_loopback FOREIGN DATA WRAPPER postgres_fdw OPTIONS (dbname %L, port %L, host %L)',
+                 current_database(), current_setting('port'), current_setting('unix_socket_directories'));
+  EXECUTE format('CREATE USER MAPPING FOR CURRENT_USER SERVER epq_loopback OPTIONS (user %L)', current_user);
+END
+$d$;
+CREATE TABLE epq_t1 (c1 int PRIMARY KEY, c2 int, c3 text);
+CREATE TABLE epq_t2 (c1 int PRIMARY KEY, c2 int, c3 text);
+CREATE TABLE epq_lt (id int PRIMARY KEY, v int);
+INSERT INTO epq_t1 SELECT i, i % 5, 'a' || i FROM generate_series(1, 20) i;
+INSERT INTO epq_t2 SELECT i, i % 3, 'b' || i FROM generate_series(1, 20) i;
+INSERT INTO epq_lt SELECT i, i * 10 FROM generate_series(1, 20) i;
+ANALYZE epq_t1;
+ANALYZE epq_t2;
+ANALYZE epq_lt;
+CREATE FOREIGN TABLE epq_ft1 (c1 int, c2 int, c3 text) SERVER epq_loopback OPTIONS (table_name 'epq_t1');
+CREATE FOREIGN TABLE epq_ft2 (c1 int, c2 int, c3 text) SERVER epq_loopback OPTIONS (table_name 'epq_t2');
+-- SELECT FOR SHARE: the join is pushed down with a local (EPQ) join subplan
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c2 = 1 ORDER BY t1.c1 FOR SHARE;
+                                                                                                                                                       QUERY PLAN                                                                                                                                                       
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ LockRows
+   Output: t1.c1, t2.c1, t1.*, t2.*
+   ->  Sort
+         Output: t1.c1, t2.c1, t1.*, t2.*
+         Sort Key: t1.c1
+         ->  Foreign Scan
+               Output: t1.c1, t2.c1, t1.*, t2.*
+               Relations: (public.epq_ft1 t1) INNER JOIN (public.epq_ft2 t2)
+               Remote SQL: SELECT r1.c1, r2.c1, CASE WHEN (r1.*)::text IS NOT NULL THEN ROW(r1.c1, r1.c2, r1.c3) END, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2.c1, r2.c2, r2.c3) END FROM (public.epq_t1 r1 INNER JOIN public.epq_t2 r2 ON (((r1.c1 = r2.c1)) AND ((r1.c2 = 1)))) FOR SHARE OF r1 FOR SHARE OF r2
+               ->  Merge Join
+                     Output: t1.c1, t2.c1, t1.*, t2.*
+                     Merge Cond: (t1.c1 = t2.c1)
+                     ->  Foreign Scan on public.epq_ft1 t1
+                           Output: t1.c1, t1.*
+                           Remote SQL: SELECT c1, c2, c3 FROM public.epq_t1 WHERE ((c2 = 1)) ORDER BY c1 ASC NULLS LAST FOR SHARE
+                     ->  Materialize
+                           Output: t2.c1, t2.*
+                           ->  Foreign Scan on public.epq_ft2 t2
+                                 Output: t2.c1, t2.*
+                                 Remote SQL: SELECT c1, c2, c3 FROM public.epq_t2 ORDER BY c1 ASC NULLS LAST FOR SHARE
+(20 rows)
+
+SELECT t1.c1, t2.c1 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c2 = 1 ORDER BY t1.c1 FOR SHARE;
+ c1 | c1 
+----+----
+  1 |  1
+  6 |  6
+ 11 | 11
+ 16 | 16
+(4 rows)
+
+-- FOR UPDATE OF one side only
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c3 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) WHERE t2.c2 = 0 ORDER BY t1.c1 FOR UPDATE OF t1;
+                                                                                                                                               QUERY PLAN                                                                                                                                                
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ LockRows
+   Output: t1.c1, t2.c3, t1.*, t2.*
+   ->  Sort
+         Output: t1.c1, t2.c3, t1.*, t2.*
+         Sort Key: t1.c1
+         ->  Foreign Scan
+               Output: t1.c1, t2.c3, t1.*, t2.*
+               Relations: (public.epq_ft1 t1) INNER JOIN (public.epq_ft2 t2)
+               Remote SQL: SELECT r1.c1, r2.c3, CASE WHEN (r1.*)::text IS NOT NULL THEN ROW(r1.c1, r1.c2, r1.c3) END, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2.c1, r2.c2, r2.c3) END FROM (public.epq_t1 r1 INNER JOIN public.epq_t2 r2 ON (((r1.c1 = r2.c1)) AND ((r2.c2 = 0)))) FOR UPDATE OF r1
+               ->  Hash Join
+                     Output: t1.c1, t2.c3, t1.*, t2.*
+                     Hash Cond: (t1.c1 = t2.c1)
+                     ->  Foreign Scan on public.epq_ft1 t1
+                           Output: t1.c1, t1.*
+                           Remote SQL: SELECT c1, c2, c3 FROM public.epq_t1 FOR UPDATE
+                     ->  Hash
+                           Output: t2.c3, t2.*, t2.c1
+                           ->  Foreign Scan on public.epq_ft2 t2
+                                 Output: t2.c3, t2.*, t2.c1
+                                 Remote SQL: SELECT c1, c2, c3 FROM public.epq_t2 WHERE ((c2 = 0))
+(20 rows)
+
+SELECT t1.c1, t2.c3 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) WHERE t2.c2 = 0 ORDER BY t1.c1 FOR UPDATE OF t1;
+ c1 | c3  
+----+-----
+  3 | b3
+  6 | b6
+  9 | b9
+ 12 | b12
+ 15 | b15
+ 18 | b18
+(6 rows)
+
+-- a local condition that stays on the ForeignScan is removed from the outer
+-- plan's quals (postgresGetForeignPlan outer_plan fixup)
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c3 || t2.c3 LIKE 'a1%' ORDER BY t1.c1 FOR SHARE;
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ LockRows
+   Output: t1.c1, t2.c1, t1.*, t2.*
+   ->  Merge Join
+         Output: t1.c1, t2.c1, t1.*, t2.*
+         Merge Cond: (t1.c1 = t2.c1)
+         Join Filter: ((t1.c3 || t2.c3) ~~ 'a1%'::text)
+         ->  Foreign Scan on public.epq_ft1 t1
+               Output: t1.c1, t1.*, t1.c3
+               Remote SQL: SELECT c1, c2, c3 FROM public.epq_t1 ORDER BY c1 ASC NULLS LAST FOR SHARE
+         ->  Materialize
+               Output: t2.c1, t2.*, t2.c3
+               ->  Foreign Scan on public.epq_ft2 t2
+                     Output: t2.c1, t2.*, t2.c3
+                     Remote SQL: SELECT c1, c2, c3 FROM public.epq_t2 ORDER BY c1 ASC NULLS LAST FOR SHARE
+(14 rows)
+
+SELECT t1.c1, t2.c1 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c3 || t2.c3 LIKE 'a1%' ORDER BY t1.c1 FOR SHARE;
+ c1 | c1 
+----+----
+  1 |  1
+ 10 | 10
+ 11 | 11
+ 12 | 12
+ 13 | 13
+ 14 | 14
+ 15 | 15
+ 16 | 16
+ 17 | 17
+ 18 | 18
+ 19 | 19
+(11 rows)
+
+-- local table locked, foreign join pushed down beside it (join order pinned
+-- and the local join strategies disabled so the ForeignPath, which carries
+-- no disabled nodes, is chosen and sits under the LockRows; the EPQ
+-- alternative is the disabled local join)
+SET join_collapse_limit = 1;
+SET enable_mergejoin = off;
+SET enable_hashjoin = off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT lt.id, lt.v, f1.c1, f2.c3 FROM epq_lt lt JOIN (epq_ft1 f1 JOIN epq_ft2 f2 ON f2.c1 = f1.c1) ON f1.c1 = lt.id WHERE lt.id < 4 ORDER BY lt.id FOR UPDATE OF lt;
+                                                                                                                                    QUERY PLAN                                                                                                                                     
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ LockRows
+   Output: lt.id, lt.v, f1.c1, f2.c3, lt.ctid, f1.*, f2.*
+   ->  Nested Loop
+         Output: lt.id, lt.v, f1.c1, f2.c3, lt.ctid, f1.*, f2.*
+         Join Filter: (lt.id = f2.c1)
+         ->  Index Scan using epq_lt_pkey on public.epq_lt lt
+               Output: lt.id, lt.v, lt.ctid
+               Index Cond: (lt.id < 4)
+         ->  Materialize
+               Output: f1.c1, f1.*, f2.c3, f2.*, f2.c1
+               ->  Foreign Scan
+                     Output: f1.c1, f1.*, f2.c3, f2.*, f2.c1
+                     Relations: (public.epq_ft1 f1) INNER JOIN (public.epq_ft2 f2)
+                     Remote SQL: SELECT r2.c1, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2.c1, r2.c2, r2.c3) END, r3.c3, CASE WHEN (r3.*)::text IS NOT NULL THEN ROW(r3.c1, r3.c2, r3.c3) END, r3.c1 FROM (public.epq_t1 r2 INNER JOIN public.epq_t2 r3 ON (((r2.c1 = r3.c1))))
+                     ->  Nested Loop
+                           Output: f1.c1, f1.*, f2.c3, f2.*, f2.c1
+                           Join Filter: (f1.c1 = f2.c1)
+                           ->  Foreign Scan on public.epq_ft1 f1
+                                 Output: f1.c1, f1.*
+                                 Remote SQL: SELECT c1, c2, c3 FROM public.epq_t1 ORDER BY c1 ASC NULLS LAST
+                           ->  Materialize
+                                 Output: f2.c3, f2.*, f2.c1
+                                 ->  Foreign Scan on public.epq_ft2 f2
+                                       Output: f2.c3, f2.*, f2.c1
+                                       Remote SQL: SELECT c1, c2, c3 FROM public.epq_t2
+(25 rows)
+
+SELECT lt.id, lt.v, f1.c1, f2.c3 FROM epq_lt lt JOIN (epq_ft1 f1 JOIN epq_ft2 f2 ON f2.c1 = f1.c1) ON f1.c1 = lt.id WHERE lt.id < 4 ORDER BY lt.id FOR UPDATE OF lt;
+ id | v  | c1 | c3 
+----+----+----+----
+  1 | 10 |  1 | b1
+  2 | 20 |  2 | b2
+  3 | 30 |  3 | b3
+(3 rows)
+
+RESET join_collapse_limit;
+RESET enable_mergejoin;
+RESET enable_hashjoin;
+-- UPDATE / DELETE with a pushed-down foreign join in FROM / USING
+EXPLAIN (VERBOSE, COSTS OFF)
+UPDATE epq_lt SET v = v + 1 FROM epq_ft1 f1 JOIN epq_ft2 f2 ON (f1.c1 = f2.c1) WHERE epq_lt.id = f1.c1 AND f2.c2 = 0;
+                                                                                                                                       QUERY PLAN                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Update on public.epq_lt
+   ->  Nested Loop
+         Output: (epq_lt.v + 1), epq_lt.ctid, f1.*, f2.*
+         Inner Unique: true
+         ->  Foreign Scan
+               Output: f1.*, f1.c1, f2.*, f2.c1
+               Relations: (public.epq_ft1 f1) INNER JOIN (public.epq_ft2 f2)
+               Remote SQL: SELECT CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2.c1, r2.c2, r2.c3) END, r2.c1, CASE WHEN (r3.*)::text IS NOT NULL THEN ROW(r3.c1, r3.c2, r3.c3) END, r3.c1 FROM (public.epq_t1 r2 INNER JOIN public.epq_t2 r3 ON (((r2.c1 = r3.c1)) AND ((r3.c2 = 0))))
+               ->  Hash Join
+                     Output: f1.*, f1.c1, f2.*, f2.c1
+                     Hash Cond: (f1.c1 = f2.c1)
+                     ->  Foreign Scan on public.epq_ft1 f1
+                           Output: f1.*, f1.c1
+                           Remote SQL: SELECT c1, c2, c3 FROM public.epq_t1
+                     ->  Hash
+                           Output: f2.*, f2.c1
+                           ->  Foreign Scan on public.epq_ft2 f2
+                                 Output: f2.*, f2.c1
+                                 Remote SQL: SELECT c1, c2, c3 FROM public.epq_t2 WHERE ((c2 = 0))
+         ->  Index Scan using epq_lt_pkey on public.epq_lt
+               Output: epq_lt.v, epq_lt.ctid, epq_lt.id
+               Index Cond: (epq_lt.id = f1.c1)
+(22 rows)
+
+UPDATE epq_lt SET v = v + 1 FROM epq_ft1 f1 JOIN epq_ft2 f2 ON (f1.c1 = f2.c1) WHERE epq_lt.id = f1.c1 AND f2.c2 = 0;
+SELECT id, v FROM epq_lt WHERE v % 10 = 1 ORDER BY id;
+ id |  v  
+----+-----
+  3 |  31
+  6 |  61
+  9 |  91
+ 12 | 121
+ 15 | 151
+ 18 | 181
+(6 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+DELETE FROM epq_lt USING epq_ft1 f1 JOIN epq_ft2 f2 ON (f1.c1 = f2.c1) WHERE epq_lt.id = f1.c1 AND f1.c2 = 4;
+                                                                                                                                       QUERY PLAN                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Delete on public.epq_lt
+   ->  Hash Join
+         Output: epq_lt.ctid, f1.*, f2.*
+         Inner Unique: true
+         Hash Cond: (f1.c1 = epq_lt.id)
+         ->  Foreign Scan
+               Output: f1.*, f1.c1, f2.*, f2.c1
+               Relations: (public.epq_ft1 f1) INNER JOIN (public.epq_ft2 f2)
+               Remote SQL: SELECT CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2.c1, r2.c2, r2.c3) END, r2.c1, CASE WHEN (r3.*)::text IS NOT NULL THEN ROW(r3.c1, r3.c2, r3.c3) END, r3.c1 FROM (public.epq_t1 r2 INNER JOIN public.epq_t2 r3 ON (((r2.c1 = r3.c1)) AND ((r2.c2 = 4))))
+               ->  Hash Join
+                     Output: f1.*, f1.c1, f2.*, f2.c1
+                     Hash Cond: (f1.c1 = f2.c1)
+                     ->  Foreign Scan on public.epq_ft1 f1
+                           Output: f1.*, f1.c1
+                           Remote SQL: SELECT c1, c2, c3 FROM public.epq_t1 WHERE ((c2 = 4))
+                     ->  Hash
+                           Output: f2.*, f2.c1
+                           ->  Foreign Scan on public.epq_ft2 f2
+                                 Output: f2.*, f2.c1
+                                 Remote SQL: SELECT c1, c2, c3 FROM public.epq_t2
+         ->  Hash
+               Output: epq_lt.ctid, epq_lt.id
+               ->  Seq Scan on public.epq_lt
+                     Output: epq_lt.ctid, epq_lt.id
+(24 rows)
+
+DELETE FROM epq_lt USING epq_ft1 f1 JOIN epq_ft2 f2 ON (f1.c1 = f2.c1) WHERE epq_lt.id = f1.c1 AND f1.c2 = 4;
+SELECT count(*) FROM epq_lt;
+ count 
+-------
+    16
+(1 row)
+
+-- merge-join EPQ alternative: presorted-key bookkeeping in GetExistingLocalJoinPath
+SET enable_hashjoin = off;
+SET enable_nestloop = off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c2 = 2 ORDER BY t1.c1 FOR UPDATE;
+                                                                                                                                                        QUERY PLAN                                                                                                                                                        
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ LockRows
+   Output: t1.c1, t2.c1, t1.*, t2.*
+   ->  Sort
+         Output: t1.c1, t2.c1, t1.*, t2.*
+         Sort Key: t1.c1
+         ->  Foreign Scan
+               Output: t1.c1, t2.c1, t1.*, t2.*
+               Relations: (public.epq_ft1 t1) INNER JOIN (public.epq_ft2 t2)
+               Remote SQL: SELECT r1.c1, r2.c1, CASE WHEN (r1.*)::text IS NOT NULL THEN ROW(r1.c1, r1.c2, r1.c3) END, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2.c1, r2.c2, r2.c3) END FROM (public.epq_t1 r1 INNER JOIN public.epq_t2 r2 ON (((r1.c1 = r2.c1)) AND ((r1.c2 = 2)))) FOR UPDATE OF r1 FOR UPDATE OF r2
+               ->  Merge Join
+                     Output: t1.c1, t2.c1, t1.*, t2.*
+                     Merge Cond: (t1.c1 = t2.c1)
+                     ->  Foreign Scan on public.epq_ft1 t1
+                           Output: t1.c1, t1.*
+                           Remote SQL: SELECT c1, c2, c3 FROM public.epq_t1 WHERE ((c2 = 2)) ORDER BY c1 ASC NULLS LAST FOR UPDATE
+                     ->  Materialize
+                           Output: t2.c1, t2.*
+                           ->  Foreign Scan on public.epq_ft2 t2
+                                 Output: t2.c1, t2.*
+                                 Remote SQL: SELECT c1, c2, c3 FROM public.epq_t2 ORDER BY c1 ASC NULLS LAST FOR UPDATE
+(20 rows)
+
+SELECT t1.c1, t2.c1 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) WHERE t1.c2 = 2 ORDER BY t1.c1 FOR UPDATE;
+ c1 | c1 
+----+----
+  2 |  2
+  7 |  7
+ 12 | 12
+ 17 | 17
+(4 rows)
+
+-- three-way: a foreign join whose child is itself a pushed-down join
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1, t3.c1 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) JOIN epq_ft1 t3 ON (t3.c1 = t2.c1) WHERE t1.c2 = 3 ORDER BY t1.c1 FOR SHARE;
+                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ LockRows
+   Output: t1.c1, t2.c1, t3.c1, t1.*, t2.*, t3.*
+   ->  Sort
+         Output: t1.c1, t2.c1, t3.c1, t1.*, t2.*, t3.*
+         Sort Key: t1.c1
+         ->  Foreign Scan
+               Output: t1.c1, t2.c1, t3.c1, t1.*, t2.*, t3.*
+               Relations: ((public.epq_ft1 t1) INNER JOIN (public.epq_ft2 t2)) INNER JOIN (public.epq_ft1 t3)
+               Remote SQL: SELECT r1.c1, r2.c1, r4.c1, CASE WHEN (r1.*)::text IS NOT NULL THEN ROW(r1.c1, r1.c2, r1.c3) END, CASE WHEN (r2.*)::text IS NOT NULL THEN ROW(r2.c1, r2.c2, r2.c3) END, CASE WHEN (r4.*)::text IS NOT NULL THEN ROW(r4.c1, r4.c2, r4.c3) END FROM ((public.epq_t1 r1 INNER JOIN public.epq_t2 r2 ON (((r1.c1 = r2.c1)) AND ((r1.c2 = 3)))) INNER JOIN public.epq_t1 r4 ON (((r1.c1 = r4.c1)))) FOR SHARE OF r1 FOR SHARE OF r2 FOR SHARE OF r4
+               ->  Merge Join
+                     Output: t1.c1, t2.c1, t3.c1, t1.*, t2.*, t3.*
+                     Merge Cond: (t1.c1 = t3.c1)
+                     ->  Merge Join
+                           Output: t1.c1, t1.*, t2.c1, t2.*
+                           Merge Cond: (t1.c1 = t2.c1)
+                           ->  Foreign Scan on public.epq_ft1 t1
+                                 Output: t1.c1, t1.*
+                                 Remote SQL: SELECT c1, c2, c3 FROM public.epq_t1 WHERE ((c2 = 3)) ORDER BY c1 ASC NULLS LAST FOR SHARE
+                           ->  Materialize
+                                 Output: t2.c1, t2.*
+                                 ->  Foreign Scan on public.epq_ft2 t2
+                                       Output: t2.c1, t2.*
+                                       Remote SQL: SELECT c1, c2, c3 FROM public.epq_t2 ORDER BY c1 ASC NULLS LAST FOR SHARE
+                     ->  Materialize
+                           Output: t3.c1, t3.*
+                           ->  Foreign Scan on public.epq_ft1 t3
+                                 Output: t3.c1, t3.*
+                                 Remote SQL: SELECT c1, c2, c3 FROM public.epq_t1 ORDER BY c1 ASC NULLS LAST FOR SHARE
+(28 rows)
+
+SELECT t1.c1, t2.c1, t3.c1 FROM epq_ft1 t1 JOIN epq_ft2 t2 ON (t1.c1 = t2.c1) JOIN epq_ft1 t3 ON (t3.c1 = t2.c1) WHERE t1.c2 = 3 ORDER BY t1.c1 FOR SHARE;
+ c1 | c1 | c1 
+----+----+----
+  3 |  3 |  3
+  8 |  8 |  8
+ 13 | 13 | 13
+ 18 | 18 | 18
+(4 rows)
+
+RESET enable_hashjoin;
+RESET enable_nestloop;
+DROP FOREIGN TABLE epq_ft1, epq_ft2;
+DROP TABLE epq_t1, epq_t2, epq_lt;
+DROP USER MAPPING FOR CURRENT_USER SERVER epq_loopback;
+DROP SERVER epq_loopback;
+DROP EXTENSION postgres_fdw;

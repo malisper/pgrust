@@ -4127,7 +4127,7 @@ fn create_nestloop_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
 
 // change_plan_targetlist (createplan.c): a non-projecting plan node whose
 // tlist must change gets a Result on top.
-fn change_plan_targetlist<'mcx>(
+pub fn change_plan_targetlist<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     subplan: Node<'mcx>,
     tlist: NodeList<'mcx>,

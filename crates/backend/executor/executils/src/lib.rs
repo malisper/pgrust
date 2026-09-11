@@ -1014,6 +1014,11 @@ pub struct EStateData<'mcx> {
     pub es_epq: Option<EpqSubs<'mcx>>,
     // C `es_epq_active != NULL`; scan nodes select their EPQ variant on it.
     pub es_epq_active: bool,
+    /// C `es_epq_active->epqParam` while a recheck runs (-1 otherwise):
+    /// ExecScanFetch's scanrelid == 0 arm runs a pushed-down join's
+    /// recheck method only for nodes inside the recheck tree
+    /// (`bms_is_member(epqParam, plan->extParam)`).
+    pub es_epq_param: i32,
     /// se-delegtax SH-F: the row-mode LEAF fast-admit byte — true iff the
     /// lane master GUC is on AND no per-execution diagnostics are armed
     /// (es_epq_active false, es_instrument == 0, no ENGINE capture, lane
@@ -1405,6 +1410,7 @@ impl<'mcx> EStateData<'mcx> {
             es_execute_acl_funcs: Vec::new(),
             es_epq: None,
             es_epq_active: false,
+            es_epq_param: -1,
         }
     }
 
@@ -1955,7 +1961,7 @@ mcx::forget_safe_struct!(
         es_sourceText, es_use_parallel_mode, es_parallel_scan_wired,
         es_parallel_workers_to_launch,
         es_parallel_workers_launched, es_jit_flags, es_jit_instr, es_epq,
-        es_epq_active, es_lane_leaf_fast, es_lane_trace_owned, es_cursor_run_budget,
+        es_epq_active, es_epq_param, es_lane_leaf_fast, es_lane_trace_owned, es_cursor_run_budget,
         es_lane_cursor_parked,
         es_spi_run_budget, es_rowmarks;
         // [sqe-cursors] es_sqe_spool: droppy Box owner, released in

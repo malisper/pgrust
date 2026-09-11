@@ -18,7 +18,7 @@ pub(crate) fn exec_async_request<'mcx>(
 ) -> PgResult<()> {
     match node {
         PlanStateNode::ForeignScan(fs) => {
-            ::nodeforeignscan::exec_async_foreign_scan_request(fs, estate, areq)
+            ::nodeforeignscan::exec_async_foreign_scan_request(&mut fs.state, estate, areq)
         }
         PlanStateNode::Instrumented(w) => {
             let idx = w.instr_idx as usize;
@@ -43,7 +43,7 @@ pub(crate) fn exec_async_configure_wait<'mcx>(
 ) -> PgResult<()> {
     match node {
         PlanStateNode::ForeignScan(fs) => {
-            ::nodeforeignscan::exec_async_foreign_scan_configure_wait(fs, estate, areq, wait)
+            ::nodeforeignscan::exec_async_foreign_scan_configure_wait(&mut fs.state, estate, areq, wait)
         }
         PlanStateNode::Instrumented(w) => {
             let idx = w.instr_idx as usize;
@@ -65,7 +65,7 @@ pub(crate) fn exec_async_notify<'mcx>(
 ) -> PgResult<()> {
     match node {
         PlanStateNode::ForeignScan(fs) => {
-            ::nodeforeignscan::exec_async_foreign_scan_notify(fs, estate, areq)
+            ::nodeforeignscan::exec_async_foreign_scan_notify(&mut fs.state, estate, areq)
         }
         PlanStateNode::Instrumented(w) => {
             let idx = w.instr_idx as usize;

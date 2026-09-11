@@ -1217,12 +1217,16 @@ fn get_update_query_targetlist_def<'mcx>(
         sep = ", ";
 
         if next_ma < ma_sublinks.len() && cur_ma_sublink.is_none() {
-            // Dig for a PARAM_MULTIEXPR Param under assignment decoration and
-            // implicit coercions (C tolerates FieldStores here; that
-            // vocabulary is absent, so only the two live wrappers descend).
+            // Dig for a PARAM_MULTIEXPR Param buried under FieldStores,
+            // SubscriptingRefs and implicit CoerceToDomains (cf
+            // process_indirection), then under implicit coercions.
             let mut expr = Some(tle.expr);
             while let Some(e) = expr {
                 match e.node_tag() {
+                    NodeTag::T_FieldStore => {
+                        let fstore = e.as_field_store().unwrap();
+                        expr = fstore.newvals.first();
+                    }
                     NodeTag::T_SubscriptingRef => {
                         let sbsref = e.as_subscripting_ref().unwrap();
                         match sbsref.refassgnexpr {

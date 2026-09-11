@@ -11,7 +11,7 @@ use ::execscan::{exec_scan, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{AsyncRequest, AsyncWaitCtx, EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox};
 use ::types_core::{InvalidOid, Oid};
-use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::PgResult;
 use ::types_nodes::plannodes::ForeignScan;
 use ::types_nodes::{CmdType, FdwExplainFlags, FdwExplainProp, FdwKind, NUM_FDW_KINDS};
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -84,6 +84,52 @@ pub struct FdwExecRoutine {
             &mut AsyncRequest,
         ) -> PgResult<()>,
     >,
+    /// RecheckForeignScan (fdwapi.h); None = the provider relies on
+    /// fdw_recheck_quals alone. The provider may store a different tuple
+    /// in `slot` (a pushed-down outer join can NULL a different column set
+    /// on recheck). `outer` drives the local EPQ subplan (C's
+    /// outerPlanState(node)); None when the ForeignScan has no outer plan.
+    pub recheck: Option<
+        for<'mcx> fn(
+            &mut ForeignScanState<'mcx>,
+            &mut EStateData<'mcx>,
+            ExecSlotId,
+            Option<&mut OuterPlanDrive<'_, 'mcx>>,
+        ) -> PgResult<bool>,
+    >,
+}
+
+/// `ExecProcNode(outerPlanState(node))` handed to RecheckForeignScan without
+/// naming the executor's PlanStateNode from this crate.
+pub type OuterPlanDrive<'a, 'mcx> =
+    dyn FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> + 'a;
+
+/// The ForeignScan's outer (EPQ alternative) subplan, owned by the executor
+/// wrapper node (MaterialChild precedent).
+pub trait ForeignScanOuter<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>;
+    /// `ExecReScan(outerPlan)`.
+    fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()>;
+}
+
+/// Drive with no outer subplan reachable (async requests: nodeAppend.c:205
+/// registers async subplans only when es_epq_active == NULL, so no recheck
+/// can run the EPQ subplan there).
+pub enum NoOuter {}
+
+impl<'mcx> ForeignScanOuter<'mcx> for NoOuter {
+    fn exec_proc(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        match *self {}
+    }
+    fn rescan(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        match *self {}
+    }
+}
+
+/// ForeignScanState plus its optional outer subplan for one ExecScan drive.
+pub struct ForeignScanDrive<'a, 'mcx, C: ForeignScanOuter<'mcx>> {
+    pub fs: &'a mut ForeignScanState<'mcx>,
+    pub outer: Option<&'a mut C>,
 }
 
 /// `ExecAsyncForeignScanRequest` (nodeForeignscan.c).
@@ -142,66 +188,83 @@ fn fdw_exec_routine(kind: FdwKind) -> &'static FdwExecRoutine {
     unsafe { &*p }
 }
 
-impl<'mcx> ScanNode<'mcx> for ForeignScanState<'mcx> {
+impl<'a, 'mcx, C: ForeignScanOuter<'mcx>> ScanNode<'mcx> for ForeignScanDrive<'a, 'mcx, C> {
     #[inline(always)]
     fn ss_mut(&mut self) -> &mut ScanState<'mcx> {
-        &mut self.ss
+        &mut self.fs.ss
     }
 
-    /// `ForeignRecheck` (RecheckForeignScan callback unmodeled: no provider).
+    /// `ForeignRecheck` (nodeForeignscan.c).
     fn epq_recheck(
         &mut self,
         estate: &mut EStateData<'mcx>,
         slot: ExecSlotId,
     ) -> PgResult<bool> {
-        let ecxt = self.ss.ps_ExprContext;
+        let ForeignScanDrive { fs, outer } = self;
+        let ecxt = fs.ss.ps_ExprContext;
+        // Does the tuple meet the remote qual condition?
         let e = estate.ecxt_mut(ecxt);
         e.ecxt_scantuple = Some(slot);
         e.reset();
-        ::executils::exec_qual_with_subplans(self.fdw_recheck_quals.as_deref_mut(), estate, ecxt)
+        // If an outer join is pushed down, RecheckForeignScan may need to
+        // store a different tuple in the slot, because a different set of
+        // columns may go to NULL upon recheck. Otherwise, it shouldn't need
+        // to change the slot contents, just return true or false to indicate
+        // whether the quals still pass.
+        if let Some(recheck) = fdw_exec_routine(fs.fdwroutine).recheck {
+            let ok = match outer.as_deref_mut() {
+                Some(o) => {
+                    let mut drive = |estate: &mut EStateData<'mcx>| o.exec_proc(estate);
+                    recheck(fs, estate, slot, Some(&mut drive))?
+                }
+                None => recheck(fs, estate, slot, None)?,
+            };
+            if !ok {
+                return Ok(false);
+            }
+        }
+        ::executils::exec_qual_with_subplans(fs.fdw_recheck_quals.as_deref_mut(), estate, ecxt)
+    }
+
+    fn plan_ext_param(&self) -> Option<&::types_nodes::bitmapset::Bitmapset<'mcx>> {
+        Some(&self.fs.plan.scan.plan.extParam)
     }
 
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
-        let routine = fdw_exec_routine(self.fdwroutine);
-        let found = if self.plan.operation != CmdType::CMD_SELECT {
-            (routine.iterate_direct.expect("direct-modify provider"))(self, estate)?
+        let fs = &mut *self.fs;
+        let routine = fdw_exec_routine(fs.fdwroutine);
+        let found = if fs.plan.operation != CmdType::CMD_SELECT {
+            (routine.iterate_direct.expect("direct-modify provider"))(fs, estate)?
         } else {
-            (routine.iterate)(self, estate)?
+            (routine.iterate)(fs, estate)?
         };
-        if found && self.table_oid != InvalidOid {
-            estate.slot_mut(self.ss.ss_ScanTupleSlot).base_mut().tts_tableOid = self.table_oid;
+        if found && fs.table_oid != InvalidOid {
+            estate.slot_mut(fs.ss.ss_ScanTupleSlot).base_mut().tts_tableOid = fs.table_oid;
         }
         Ok(found)
     }
 }
 
-pub fn exec_foreign_scan<'mcx>(
+pub fn exec_foreign_scan<'mcx, C: ForeignScanOuter<'mcx>>(
     node: &mut ForeignScanState<'mcx>,
+    outer: Option<&mut C>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     // Direct modifications cannot be re-evaluated by EvalPlanQual.
     if node.plan.operation != CmdType::CMD_SELECT && estate.es_epq_active {
         return Ok(None);
     }
+    let (has_qual, has_proj) = (node.ss.qual.is_some(), node.ss.ps_ProjInfo.is_some());
+    let mut drive = ForeignScanDrive { fs: node, outer };
     if estate.es_epq_active {
-        return exec_scan(node, estate);
+        return exec_scan(&mut drive, estate);
     }
-    match (node.ss.qual.is_some(), node.ss.ps_ProjInfo.is_some()) {
-        (false, false) => exec_scan_extended::<_, false, false>(node, estate),
-        (true, false) => exec_scan_extended::<_, true, false>(node, estate),
-        (false, true) => exec_scan_extended::<_, false, true>(node, estate),
-        (true, true) => exec_scan_extended::<_, true, true>(node, estate),
+    match (has_qual, has_proj) {
+        (false, false) => exec_scan_extended::<_, false, false>(&mut drive, estate),
+        (true, false) => exec_scan_extended::<_, true, false>(&mut drive, estate),
+        (false, true) => exec_scan_extended::<_, false, true>(&mut drive, estate),
+        (true, true) => exec_scan_extended::<_, true, true>(&mut drive, estate),
     }
-}
-
-#[track_caller]
-#[cold]
-#[inline(never)]
-fn foreign_scan_unported(what: &str) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!("{what} is not yet implemented"))
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
 }
 
 pub fn exec_init_foreign_scan<'mcx>(
@@ -211,11 +274,8 @@ pub fn exec_init_foreign_scan<'mcx>(
     eflags: i32,
 ) -> PgResult<ForeignScanState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
-    // FDW outer subplans (EPQ alternative paths) are never generated: no
-    // provider passes fdw_outerpath. Clean refusal, never a mis-run.
-    if node.scan.plan.lefttree.is_some() {
-        return Err(foreign_scan_unported("a foreign scan with an outer subplan"));
-    }
+    // The outer (EPQ) subplan, if any, is initialized by the executor
+    // wrapper (procnode ForeignScanNode) before this runs.
     let direct = node.operation != CmdType::CMD_SELECT;
     debug_assert_eq!(direct, node.resultRelation != 0);
 
@@ -316,14 +376,27 @@ pub fn exec_end_foreign_scan<'mcx>(
     Ok(())
 }
 
-/// `ExecReScanForeignScan` (outerPlan arm dead: init refuses pushdown plans).
-/// A pushed-down join (scanrelid == 0) resets the EPQ state of every base
-/// rti in fs_base_relids (ExecScanReScan execScan.c:127-151).
-pub fn exec_rescan_foreign_scan<'mcx>(
+/// `ExecReScanForeignScan`. A pushed-down join (scanrelid == 0) resets the
+/// EPQ state of every base rti in fs_base_relids (ExecScanReScan
+/// execScan.c:127-151). `outer` is the EPQ subplan; the caller (execami)
+/// already folded any chgParam of the child into its rescan.
+pub fn exec_rescan_foreign_scan<'mcx, C: ForeignScanOuter<'mcx>>(
     node: &mut ForeignScanState<'mcx>,
+    outer: Option<&mut C>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    // Ignore direct modifications when EvalPlanQual is active --- they are
+    // irrelevant for EvalPlanQual rechecking.
+    if estate.es_epq_active && node.plan.operation != CmdType::CMD_SELECT {
+        return Ok(());
+    }
     (fdw_exec_routine(node.fdwroutine).rescan)(node, estate)?;
+    // If chgParam of subnode is not null then plan will be re-scanned by
+    // first ExecProcNode. outerPlan may also be NULL, in which case there is
+    // nothing to rescan at all.
+    if let Some(o) = outer {
+        o.rescan(estate)?;
+    }
     if node.plan.scan.scanrelid > 0 {
         execscan::exec_scan_rescan(&mut node.ss, estate);
     } else {

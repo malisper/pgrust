@@ -981,6 +981,7 @@ static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {
     async_request: None,
     async_configure_wait: None,
     async_notify: None,
+    recheck: None,
 };
 
 static ANALYZE_ROUTINE: FdwAnalyzeRoutine =

@@ -63,6 +63,11 @@ pub trait ScanNode<'mcx> {
             core::any::type_name::<Self>()
         );
     }
+    /// `node->ps.plan->extParam` for the scanrelid == 0 (pushed-down join)
+    /// EPQ arm; None for scans that always carry a scanrelid.
+    fn plan_ext_param(&self) -> Option<&::types_nodes::bitmapset::Bitmapset<'mcx>> {
+        None
+    }
 }
 
 #[cold]
@@ -87,17 +92,6 @@ enum EpqFetch {
     FallThrough,
 }
 
-#[cold]
-#[inline(never)]
-fn scanrelid_zero_recheck_unsupported() -> Box<::types_error::PgError> {
-    Box::new(
-        ::types_error::PgError::error(
-            "EvalPlanQual recheck of a pushed-down foreign join is not supported",
-        )
-        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
-}
-
 // ExecScanFetch's es_epq_active arm: test-tuple substitution.
 fn epq_fetch<'mcx, N: ScanNode<'mcx>>(
     node: &mut N,
@@ -105,15 +99,27 @@ fn epq_fetch<'mcx, N: ScanNode<'mcx>>(
 ) -> PgResult<EpqFetch> {
     let scanrelid = node.ss_mut().scanrelid;
     if scanrelid == 0 {
-        // C (execScan.h:48-70): a pushed-down-join ForeignScan/CustomScan
-        // that is a descendant of the recheck tree runs its recheckMtd,
-        // which for postgres_fdw replays the local outer subplan
-        // (fdw_outerpath). pgrust generates no such subplan (the planner
-        // declines join pushdown at any level with rowmarks or a DML
-        // target, plan.rs; a pushed-down join can only sit under a
-        // SubqueryScan whose ROW_MARK_COPY serves the recheck row without
-        // running this scan), so a fetch here has no C-exact answer.
-        return Err(scanrelid_zero_recheck_unsupported());
+        // This is a ForeignScan or CustomScan which has pushed down a join
+        // to the remote side. If it is a descendant node in the EPQ recheck
+        // plan tree, run the recheck method function. Otherwise, run the
+        // access method function below.
+        let epq_param = estate.es_epq_param;
+        let in_recheck_tree =
+            epq_param >= 0 && node.plan_ext_param().is_some_and(|ep| ep.is_member(epq_param));
+        if in_recheck_tree {
+            // The recheck method is responsible not only for rechecking the
+            // scan/join quals but also for storing the correct tuple in the
+            // slot.
+            let ss_slot = node.ss_mut().ss_ScanTupleSlot;
+            if !node.epq_recheck(estate, ss_slot)? {
+                // would not be returned by scan
+                let mcx = estate.es_query_cxt;
+                exectuples::exec_clear_tuple(estate.slot_mut(ss_slot), mcx);
+                return Ok(EpqFetch::Empty);
+            }
+            return Ok(EpqFetch::Tuple(ss_slot));
+        }
+        return Ok(EpqFetch::FallThrough);
     }
     let idx = (scanrelid - 1) as usize;
     let mcx = estate.es_query_cxt;
