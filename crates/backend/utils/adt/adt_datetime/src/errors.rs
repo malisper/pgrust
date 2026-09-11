@@ -21,40 +21,56 @@ pub fn DateTimeParseError(
     datatype: &str,
     escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<()> {
+    // Each arm's location is that errsave's closing line in datetime.c
+    // (18.6), routine DateTimeParseError — the wire F/L/R fields C sends.
+    let at = |e: PgError, line: i32| e.with_location("datetime.c", line, "DateTimeParseError");
     let err = match dterr {
-        DTERR_FIELD_OVERFLOW => {
+        DTERR_FIELD_OVERFLOW => at(
+            PgError::error(format!("date/time field value out of range: \"{str_}\""))
+                .with_sqlstate(ERRCODE_DATETIME_FIELD_OVERFLOW),
+            4224,
+        ),
+        DTERR_MD_FIELD_OVERFLOW => at(
             PgError::error(format!("date/time field value out of range: \"{str_}\""))
                 .with_sqlstate(ERRCODE_DATETIME_FIELD_OVERFLOW)
-        }
-        DTERR_MD_FIELD_OVERFLOW => {
-            PgError::error(format!("date/time field value out of range: \"{str_}\""))
-                .with_sqlstate(ERRCODE_DATETIME_FIELD_OVERFLOW)
-                .with_hint("Perhaps you need a different \"DateStyle\" setting.")
-        }
-        DTERR_INTERVAL_OVERFLOW => {
+                .with_hint("Perhaps you need a different \"DateStyle\" setting."),
+            4232,
+        ),
+        DTERR_INTERVAL_OVERFLOW => at(
             PgError::error(format!("interval field value out of range: \"{str_}\""))
-                .with_sqlstate(ERRCODE_INTERVAL_FIELD_OVERFLOW)
-        }
-        DTERR_TZDISP_OVERFLOW => {
+                .with_sqlstate(ERRCODE_INTERVAL_FIELD_OVERFLOW),
+            4238,
+        ),
+        DTERR_TZDISP_OVERFLOW => at(
             PgError::error(format!("time zone displacement out of range: \"{str_}\""))
-                .with_sqlstate(ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE)
-        }
+                .with_sqlstate(ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE),
+            4244,
+        ),
         DTERR_BAD_TIMEZONE => {
             let zone = lossy(extra.and_then(|e| e.dtee_timezone));
-            PgError::error(format!("time zone \"{zone}\" not recognized"))
-                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+            at(
+                PgError::error(format!("time zone \"{zone}\" not recognized"))
+                    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+                4250,
+            )
         }
         DTERR_BAD_ZONE_ABBREV => {
             let zone = lossy(extra.and_then(|e| e.dtee_timezone));
             let abbr = lossy(extra.and_then(|e| e.dtee_abbrev));
-            PgError::error(format!("time zone \"{zone}\" not recognized"))
-                .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
-                .with_detail(format!(
-                    "This time zone name appears in the configuration file for time zone abbreviation \"{abbr}\"."
-                ))
+            at(
+                PgError::error(format!("time zone \"{zone}\" not recognized"))
+                    .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
+                    .with_detail(format!(
+                        "This time zone name appears in the configuration file for time zone abbreviation \"{abbr}\"."
+                    )),
+                4258,
+            )
         }
-        _ => PgError::error(format!("invalid input syntax for type {datatype}: \"{str_}\""))
-            .with_sqlstate(ERRCODE_INVALID_DATETIME_FORMAT),
+        _ => at(
+            PgError::error(format!("invalid input syntax for type {datatype}: \"{str_}\""))
+                .with_sqlstate(ERRCODE_INVALID_DATETIME_FORMAT),
+            4265,
+        ),
     };
     ereturn(escontext, (), err)
 }

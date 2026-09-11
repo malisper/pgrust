@@ -26,6 +26,7 @@ pub mod crash_primitive;
 // CPU affinity for pool threads (cpuaff increment A; default OFF). Hosted
 // here because this crate owns every pool spawn site the policy binds.
 pub mod cpuaff;
+pub mod logctx;
 
 fn is_external_connection_backend(backend_type: BackendType) -> bool {
     backend_type == BackendType::Backend || backend_type == BackendType::WalSender
@@ -548,7 +549,10 @@ fn release_crash_held_lwlocks(payload: &(dyn std::any::Any + Send)) {
     }
     // unwind-ok: log-then-die
     if std::panic::catch_unwind(::lwlock::LWLockReleaseAll).is_err() {
-        eprintln!("LWLockReleaseAll panicked on the crash path; locks left held");
+        log_or_stderr(
+            types_error::LOG,
+            "LWLockReleaseAll panicked on the crash path; locks left held",
+        );
     }
 }
 
@@ -631,6 +635,11 @@ fn run_child_task(
         // shutdown and the next start ran crash recovery).
         procsignal::PreIdentitySignalAdopt(child_pid);
     }
+
+    // The log_line_prefix / csvlog provider reads this thread's identity
+    // live (MyProcPid, MyProcPort, MyBackendType); every server-log line
+    // this task writes carries the session's pid, not the OS process's.
+    logctx::install();
 
     // !shmem_attach detach + context switch: no-ops (module doc).
     init_small::globals::SetMyPMChildSlot(child_slot);
@@ -1453,9 +1462,12 @@ pub mod wpool {
                 {
                     std::panic::resume_unwind(payload);
                 }
-                eprintln!(
-                    "wpool: parallel worker pool dispatch panicked (slot {slot}); \
-                     falling back to postmaster launch"
+                crate::log_or_stderr(
+                    types_error::LOG,
+                    &format!(
+                        "wpool: parallel worker pool dispatch panicked (slot {slot}); \
+                         falling back to postmaster launch"
+                    ),
                 );
                 0
             }
@@ -2653,5 +2665,21 @@ pub mod rtgang {
 
     fn gang_entry_never(_arg: u64) -> types_error::PgResult<()> {
         unreachable!("standing executor entry is never dispatched")
+    }
+}
+
+/// A pgrust-only diagnostic on a path that may be mid-panic: report it
+/// through elog so the line carries log_line_prefix like every other
+/// server-log line, and only if THAT unwinds fall back to raw stderr (the
+/// message must not be lost). elog itself takes no LWLocks on the stderr
+/// route, so the crash path is safe to try.
+fn log_or_stderr(level: types_error::ErrorLevel, msg: &str) {
+    // unwind-ok: log-then-die
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = elog::elog(level, msg.to_string());
+    }))
+    .is_err()
+    {
+        elog::write_stderr(&format!("{}:  {msg}\n", elog::error_severity(level)));
     }
 }

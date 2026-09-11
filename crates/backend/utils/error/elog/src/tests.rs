@@ -486,26 +486,26 @@ impl BackendLogContext for TestContext {
     fn has_client_port(&self) -> bool {
         true
     }
-    fn application_name(&self) -> Option<&str> {
-        Some("psql")
+    fn application_name(&self) -> Option<String> {
+        Some("psql".to_owned())
     }
-    fn user_name(&self) -> Option<&str> {
-        Some("postgres")
+    fn user_name(&self) -> Option<String> {
+        Some("postgres".to_owned())
     }
-    fn database_name(&self) -> Option<&str> {
-        Some("postgres")
+    fn database_name(&self) -> Option<String> {
+        Some("postgres".to_owned())
     }
-    fn remote_host(&self) -> Option<&str> {
-        Some("127.0.0.1")
+    fn remote_host(&self) -> Option<String> {
+        Some("127.0.0.1".to_owned())
     }
-    fn remote_port(&self) -> Option<&str> {
-        Some("5432")
+    fn remote_port(&self) -> Option<String> {
+        Some("5432".to_owned())
     }
-    fn local_host(&self) -> Option<&str> {
-        Some("127.0.0.1")
+    fn local_host(&self) -> Option<String> {
+        Some("127.0.0.1".to_owned())
     }
-    fn backend_type(&self) -> Option<&str> {
-        Some("client backend")
+    fn backend_type(&self) -> Option<String> {
+        Some("client backend".to_owned())
     }
     fn process_id(&self) -> u32 {
         1234
@@ -522,14 +522,14 @@ impl BackendLogContext for TestContext {
     fn query_id(&self) -> i64 {
         42
     }
-    fn query_string(&self) -> Option<&str> {
-        Some("select 1")
+    fn query_string(&self) -> Option<String> {
+        Some("select 1".to_owned())
     }
     fn session_start_time(&self) -> i64 {
         1_700_000_000
     }
-    fn ps_display(&self) -> Option<&str> {
-        Some("postgres: session")
+    fn ps_display(&self) -> Option<String> {
+        Some("postgres: session".to_owned())
     }
 }
 

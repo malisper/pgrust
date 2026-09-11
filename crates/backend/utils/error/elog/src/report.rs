@@ -66,35 +66,51 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
-fn format_timestamp_seconds(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let sod = secs.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} GMT",
-        year,
-        month,
-        day,
-        sod / 3_600,
-        (sod % 3_600) / 60,
-        sod % 60
-    )
+/// C's setup_formatted_log_time / the `%t` and `%s` formatters: the wall
+/// time rendered in `log_timezone` (pg_localtime + pg_strftime, `%Z` the
+/// zone abbreviation), not GMT. `pg_timezone_initialize` pins log_timezone
+/// to GMT before GUC init, so the None arm only covers threads that never
+/// ran it (and prints the same GMT text C would).
+fn format_in_log_timezone(secs: i64, fmt: &[u8]) -> Option<String> {
+    let tz = ::localtime::globals::log_timezone()?;
+    let tm = ::localtime::pg_localtime(secs, tz)?;
+    let mut buf = [0u8; 128];
+    let n = ::strftime::pg_strftime(&mut buf, fmt, &tm)?;
+    Some(String::from_utf8_lossy(&buf[..n]).into_owned())
 }
 
-fn format_timestamp_millis(secs: i64, micros: u32) -> String {
+fn format_gmt(secs: i64, sod_extra: &str) -> String {
     let days = secs.div_euclid(86_400);
     let sod = secs.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} GMT",
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}{} GMT",
         year,
         month,
         day,
         sod / 3_600,
         (sod % 3_600) / 60,
         sod % 60,
-        micros / 1_000
+        sod_extra
     )
+}
+
+fn format_timestamp_seconds(secs: i64) -> String {
+    // C: pg_strftime(..., "%Y-%m-%d %H:%M:%S %Z", pg_localtime(&stamp_time, log_timezone))
+    format_in_log_timezone(secs, b"%Y-%m-%d %H:%M:%S %Z").unwrap_or_else(|| format_gmt(secs, ""))
+}
+
+fn format_timestamp_millis(secs: i64, micros: u32) -> String {
+    // C setup_formatted_log_time: "%Y-%m-%d %H:%M:%S     %Z" leaves room for
+    // the ".mmm" spliced in at offset 19.
+    let millis = format!(".{:03}", micros / 1_000);
+    match format_in_log_timezone(secs, b"%Y-%m-%d %H:%M:%S     %Z") {
+        Some(mut s) if s.len() >= 23 && s.is_char_boundary(23) => {
+            s.replace_range(19..23, &millis);
+            s
+        }
+        _ => format_gmt(secs, &millis),
+    }
 }
 
 pub fn get_formatted_log_time() -> String {
@@ -121,7 +137,8 @@ pub fn reset_formatted_start_time() {
 }
 
 pub fn get_formatted_start_time() -> String {
-    let start = sink::backend_log_context().map_or(0, |c| c.session_start_time());
+    let start = sink::backend_log_context()
+        .map_or_else(init_small::globals::MyStartTime, |c| c.session_start_time());
     with_log_state(|state| {
         if let Some(formatted) = &state.formatted_start_time {
             return formatted.clone();
@@ -157,8 +174,7 @@ pub fn current_query_string() -> Option<String> {
 pub fn get_backend_type_for_log() -> String {
     sink::backend_log_context()
         .and_then(|c| c.backend_type())
-        .unwrap_or("not initialized")
-        .to_owned()
+        .unwrap_or_else(|| "not initialized".to_owned())
 }
 
 pub fn unpack_sql_state(sql_state: SqlState) -> String {
@@ -311,10 +327,8 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
         match chars[p] {
             'a' => {
                 if has_port {
-                    let appname = context
-                        .and_then(|c| c.application_name())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("[unknown]");
+                    let appname = context.and_then(|c| c.application_name());
+                    let appname = appname.as_deref().filter(|s| !s.is_empty()).unwrap_or("[unknown]");
                     append_padded(buf, appname, padding);
                 } else if padding != 0 {
                     append_spaces(buf, padding);
@@ -326,10 +340,8 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
             }
             'u' => {
                 if has_port {
-                    let username = context
-                        .and_then(|c| c.user_name())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("[unknown]");
+                    let username = context.and_then(|c| c.user_name());
+                    let username = username.as_deref().filter(|s| !s.is_empty()).unwrap_or("[unknown]");
                     append_padded(buf, username, padding);
                 } else if padding != 0 {
                     append_spaces(buf, padding);
@@ -337,17 +349,16 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
             }
             'd' => {
                 if has_port {
-                    let dbname = context
-                        .and_then(|c| c.database_name())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("[unknown]");
+                    let dbname = context.and_then(|c| c.database_name());
+                    let dbname = dbname.as_deref().filter(|s| !s.is_empty()).unwrap_or("[unknown]");
                     append_padded(buf, dbname, padding);
                 } else if padding != 0 {
                     append_spaces(buf, padding);
                 }
             }
             'c' => {
-                let start = context.map_or(0, |c| c.session_start_time());
+                let start =
+                    context.map_or_else(init_small::globals::MyStartTime, |c| c.session_start_time());
                 let value = format!("{:x}.{:x}", start, my_pid);
                 append_padded(buf, &value, padding);
             }
@@ -392,8 +403,8 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
             }
             'i' => {
                 if has_port {
-                    let psdisp = context.and_then(|c| c.ps_display()).unwrap_or("");
-                    append_padded(buf, psdisp, padding);
+                    let psdisp = context.and_then(|c| c.ps_display());
+                    append_padded(buf, psdisp.as_deref().unwrap_or(""), padding);
                 } else if padding != 0 {
                     append_spaces(buf, padding);
                 }
@@ -401,9 +412,8 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
             'L' => {
                 let local_host = context
                     .filter(|c| c.has_client_port())
-                    .and_then(|c| c.local_host())
-                    .unwrap_or("[none]");
-                append_padded(buf, local_host, padding);
+                    .and_then(|c| c.local_host());
+                append_padded(buf, local_host.as_deref().unwrap_or("[none]"), padding);
             }
             'r' => {
                 match context
@@ -411,12 +421,13 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
                     .and_then(|c| c.remote_host())
                 {
                     Some(remote_host) => {
-                        let remote_port = context.and_then(|c| c.remote_port()).unwrap_or("");
+                        let remote_port = context.and_then(|c| c.remote_port());
+                        let remote_port = remote_port.as_deref().unwrap_or("");
                         if !remote_port.is_empty() {
                             let hostport = format!("{}({})", remote_host, remote_port);
                             append_padded(buf, &hostport, padding);
                         } else {
-                            append_padded(buf, remote_host, padding);
+                            append_padded(buf, &remote_host, padding);
                         }
                     }
                     None => {
@@ -431,7 +442,7 @@ pub fn log_status_format(buf: &mut String, format: Option<&str>, edata: &PgError
                     .filter(|c| c.has_client_port())
                     .and_then(|c| c.remote_host())
                 {
-                    Some(remote_host) => append_padded(buf, remote_host, padding),
+                    Some(remote_host) => append_padded(buf, &remote_host, padding),
                     None => {
                         if padding != 0 {
                             append_spaces(buf, padding);

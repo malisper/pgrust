@@ -33,11 +33,11 @@
 //! to any per-tuple, per-morsel, or per-query code. Its own cost is one
 //! /proc read + a handful of atomic loads per second.
 //!
-//! The watchdog's own lines go to stderr via `elog::write_stderr` (the
-//! C MemoryContextStats channel — allocation-light, capturable by the log
-//! collector, and unfiltered by log_min_messages: when this fires you are
-//! about to be killed). The fanned-out per-backend dumps ride the normal
-//! ereport LOG path on each backend thread.
+//! The watchdog's own lines go through elog at LOG on its own thread (so
+//! they carry log_line_prefix like every other server-log line; the
+//! postmaster's prefix and log_timezone are carried over at spawn). The
+//! fanned-out per-backend dumps ride the normal ereport LOG path on each
+//! backend thread.
 
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -228,7 +228,19 @@ fn physical_memory() -> Option<u64> {
 }
 
 fn log_line(msg: &str) {
-    elog::write_stderr(&format!("LOG:  memory watchdog: {msg}\n"));
+    // Through elog so the line carries log_line_prefix (timestamp in
+    // log_timezone, pid, ...) like every other server-log line; raw stderr
+    // only if reporting itself unwinds — the watchdog's lines must not
+    // vanish, they are the only witness of a memory incident.
+    let line = format!("memory watchdog: {msg}");
+    // unwind-ok: log-then-die
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = elog::elog(types_error::LOG, line.clone());
+    }))
+    .is_err()
+    {
+        elog::write_stderr(&format!("LOG:  {line}\n"));
+    }
 }
 
 fn fire(l: &Ledger, pct: u64, tier_pct: u64) {
@@ -362,11 +374,25 @@ fn tick(state: &mut WatchState) {
 /// rtpool::start_if_enabled). The thread is unconditional and near-free; the
 /// master switch is read every tick, so `pgrust.memory_watchdog` can arm and
 /// disarm a running server via SIGHUP.
-pub fn start() {
+/// `thread_init` runs first on the watchdog thread: the postmaster hands
+/// over its log identity (MyProcPid/MyStartTime, the log-context provider)
+/// so the watchdog's lines read as the postmaster's — C has no such thread,
+/// and the closest C analogue of "the process noticed its memory" is the
+/// postmaster speaking.
+pub fn start(thread_init: impl FnOnce() + Send + 'static) {
+    // elog's per-thread config (C's globals, inherited at fork) is
+    // thread-local here and the watchdog thread binds no GUC store: carry
+    // the postmaster's log_line_prefix and log_timezone over at spawn so
+    // its lines print with the same prefix as everyone else's.
+    let log_line_prefix = elog::config::log_line_prefix_format();
+    let log_tz = localtime::globals::log_timezone();
     let _ = std::thread::Builder::new()
         .name("pg:memwatchdog".into())
         .stack_size(256 * 1024)
-        .spawn(|| {
+        .spawn(move || {
+            elog::config::set_log_line_prefix(log_line_prefix);
+            localtime::globals::set_log_timezone(log_tz);
+            thread_init();
             let mut state = WatchState::default();
             loop {
                 let ms = guc_tables::backing::pgrust_memory_watchdog_interval().clamp(100, 60_000);

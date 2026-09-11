@@ -88,7 +88,12 @@ pub fn read_objtype_from_string(objtype: &str) -> PgResult<Option<ObjectType>> {
             return Ok(*ty);
         }
     }
-    Err(param_err(format!("unrecognized object type \"{objtype}\"")))
+    // objectaddress.c:2620 (18.6): the wire F/L/R fields C sends.
+    Err(Box::new(
+        PgError::error(format!("unrecognized object type \"{objtype}\""))
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+            .with_location("objectaddress.c", 2620, "read_objtype_from_string"),
+    ))
 }
 
 #[track_caller]

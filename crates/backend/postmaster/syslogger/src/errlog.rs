@@ -85,7 +85,7 @@ fn route(buf: &str, destination: i32) {
 /// load-bearing for anyone ingesting the .csv files; keep it byte-exact.
 pub fn write_csvlog(edata: &PgError) {
     let context = backend_log_context();
-    let my_pid = context.map_or_else(init_small::globals::process_id, |c| c.process_id());
+    let my_pid = context.map_or_else(elog::sink::current_pid, |c| c.process_id());
     let has_port = context.is_some_and(|c| c.has_client_port());
 
     let line_number = CSV_LOG_LINE_NUMBER.with(|c| {
@@ -101,13 +101,13 @@ pub fn write_csvlog(edata: &PgError) {
 
     // username
     if has_port {
-        append_csv_literal(&mut buf, context.and_then(|c| c.user_name()));
+        append_csv_literal(&mut buf, context.and_then(|c| c.user_name()).as_deref());
     }
     buf.push(',');
 
     // database name
     if has_port {
-        append_csv_literal(&mut buf, context.and_then(|c| c.database_name()));
+        append_csv_literal(&mut buf, context.and_then(|c| c.database_name()).as_deref());
     }
     buf.push(',');
 
@@ -121,11 +121,11 @@ pub fn write_csvlog(edata: &PgError) {
     if let Some(remote_host) = context.filter(|c| c.has_client_port()).and_then(|c| c.remote_host())
     {
         buf.push('"');
-        buf.push_str(remote_host);
+        buf.push_str(&remote_host);
         if let Some(remote_port) = context.and_then(|c| c.remote_port()) {
             if !remote_port.is_empty() {
                 buf.push(':');
-                buf.push_str(remote_port);
+                buf.push_str(&remote_port);
             }
         }
         buf.push('"');
@@ -133,7 +133,7 @@ pub fn write_csvlog(edata: &PgError) {
     buf.push(',');
 
     // session id (MyStartTime.MyProcPid, both hex)
-    let start = context.map_or(0, |c| c.session_start_time());
+    let start = context.map_or_else(init_small::globals::MyStartTime, |c| c.session_start_time());
     buf.push_str(&format!("{:x}.{:x}", start, my_pid));
     buf.push(',');
 
@@ -143,7 +143,7 @@ pub fn write_csvlog(edata: &PgError) {
 
     // PS display
     if has_port {
-        append_csv_literal(&mut buf, Some(context.and_then(|c| c.ps_display()).unwrap_or("")));
+        append_csv_literal(&mut buf, Some(context.and_then(|c| c.ps_display()).as_deref().unwrap_or("")));
     }
     buf.push(',');
 
@@ -233,7 +233,7 @@ pub fn write_csvlog(edata: &PgError) {
 
     // application name
     if let Some(appname) = context.and_then(|c| c.application_name()) {
-        append_csv_literal(&mut buf, Some(appname));
+        append_csv_literal(&mut buf, Some(&appname));
     }
     buf.push(',');
 
@@ -260,7 +260,7 @@ pub fn write_csvlog(edata: &PgError) {
 /// write_jsonlog (jsonlog.c) — one JSON object per line; keys match C's.
 pub fn write_jsonlog(edata: &PgError) {
     let context = backend_log_context();
-    let my_pid = context.map_or_else(init_small::globals::process_id, |c| c.process_id());
+    let my_pid = context.map_or_else(elog::sink::current_pid, |c| c.process_id());
     let has_port = context.is_some_and(|c| c.has_client_port());
 
     let line_number = JSON_LOG_LINE_NUMBER.with(|c| {
@@ -277,8 +277,8 @@ pub fn write_jsonlog(edata: &PgError) {
     append_escaped_json(&mut buf, &get_formatted_log_time());
 
     if has_port {
-        append_json_key_value(&mut buf, "user", context.and_then(|c| c.user_name()), true);
-        append_json_key_value(&mut buf, "dbname", context.and_then(|c| c.database_name()), true);
+        append_json_key_value(&mut buf, "user", context.and_then(|c| c.user_name()).as_deref(), true);
+        append_json_key_value(&mut buf, "dbname", context.and_then(|c| c.database_name()).as_deref(), true);
     }
 
     if my_pid != 0 {
@@ -287,15 +287,15 @@ pub fn write_jsonlog(edata: &PgError) {
 
     if let Some(remote_host) = context.filter(|c| c.has_client_port()).and_then(|c| c.remote_host())
     {
-        append_json_key_value(&mut buf, "remote_host", Some(remote_host), true);
+        append_json_key_value(&mut buf, "remote_host", Some(&remote_host), true);
         if let Some(remote_port) = context.and_then(|c| c.remote_port()) {
             if !remote_port.is_empty() {
-                append_json_key_value(&mut buf, "remote_port", Some(remote_port), false);
+                append_json_key_value(&mut buf, "remote_port", Some(&remote_port), false);
             }
         }
     }
 
-    let start = context.map_or(0, |c| c.session_start_time());
+    let start = context.map_or_else(init_small::globals::MyStartTime, |c| c.session_start_time());
     append_json_key_value(&mut buf, "session_id", Some(&format!("{:x}.{:x}", start, my_pid)), true);
     append_json_key_value(&mut buf, "line_num", Some(&line_number.to_string()), false);
 
@@ -303,7 +303,7 @@ pub fn write_jsonlog(edata: &PgError) {
         append_json_key_value(
             &mut buf,
             "ps",
-            Some(context.and_then(|c| c.ps_display()).unwrap_or("")),
+            Some(context.and_then(|c| c.ps_display()).as_deref().unwrap_or("")),
             true,
         );
     }
@@ -364,7 +364,7 @@ pub fn write_jsonlog(edata: &PgError) {
 
     if let Some(appname) = context.and_then(|c| c.application_name()) {
         if !appname.is_empty() {
-            append_json_key_value(&mut buf, "application_name", Some(appname), true);
+            append_json_key_value(&mut buf, "application_name", Some(&appname), true);
         }
     }
 

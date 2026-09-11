@@ -5397,11 +5397,13 @@ dependencies = [
  "init_small_seams",
  "ipc_seams",
  "libc",
+ "localtime",
  "mbutils_seams",
  "mcx",
  "pg_clock",
  "pgstat_seams",
  "pqcomm_seams",
+ "strftime",
  "syslogger_seams",
  "types_core",
  "types_dest",
@@ -8643,6 +8645,7 @@ version = "0.0.0"
 dependencies = [
  "autovacuum",
  "backend_startup",
+ "backend_status",
  "bgjobs",
  "bgworker",
  "bgwriter",
@@ -8674,6 +8677,7 @@ dependencies = [
  "postmaster_startup",
  "pqcomm_seams",
  "procsignal",
+ "ps_status",
  "runtime",
  "scalar_seams",
  "sinval",
@@ -8693,6 +8697,7 @@ dependencies = [
  "walreceiver",
  "walsummarizer",
  "walwriter",
+ "xact",
  "xact_seams",
 ]
 
@@ -9513,9 +9518,11 @@ dependencies = [
  "guc_tables",
  "libc",
  "lmgr_proc",
+ "localtime",
  "mcx",
  "procsignal",
  "types_core",
+ "types_error",
  "types_storage",
 ]
 

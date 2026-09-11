@@ -1318,6 +1318,11 @@ pub struct CapturedGuc {
     scontext: GucContext,
     source: GucSource,
     srole: Oid,
+    // set_config_sourcefile's record (pg_settings.sourcefile/sourceline): C
+    // backends inherit it from the postmaster at fork; the base snapshot is
+    // pgrust's fork, so it travels with the value.
+    sourcefile: Option<String>,
+    sourceline: i32,
 }
 
 impl CapturedGuc {
@@ -1422,6 +1427,8 @@ pub(crate) fn capture_session_gucs(reg: &GucRegistry) -> Vec<CapturedGuc> {
             scontext: v.gen().scontext,
             source: v.gen().source,
             srole: v.gen().srole,
+            sourcefile: v.gen().sourcefile.clone(),
+            sourceline: v.gen().sourceline,
         })
         .collect()
 }
@@ -1514,6 +1521,14 @@ pub(crate) fn bind_captured_guc(
         reg.set_source(idx, cap.source);
         if newly_stacked {
             reg.note_stacked(idx);
+        }
+        // guc.c set_config_sourcefile, as the postmaster's ProcessConfigFile
+        // pass recorded it (F3: pg_settings.sourcefile was NULL on every
+        // backend because the snapshot carried the value without it).
+        if let Some(file) = &cap.sourcefile {
+            let gen = reg.vars[idx].gen_mut();
+            gen.sourcefile = Some(file.clone());
+            gen.sourceline = cap.sourceline;
         }
     }
     if make_default {

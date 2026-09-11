@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 
 use ::types_error::PgError;
 
-pub(crate) fn current_pid() -> u32 {
+fn os_pid() -> u32 {
     // wasm32: std::process::id() PANICS on WASI (no pids); 1 is the synthetic
     // single-process pid (init_small::globals::process_id's convention —
     // elog sits below init_small in the crate DAG, hence the local twin).
@@ -24,36 +24,57 @@ pub(crate) fn current_pid() -> u32 {
     }
 }
 
+/// C's `MyProcPid` as the log writers see it: the per-backend pid every
+/// backend thread gets at InitProcessGlobals (the value `pg_backend_pid()`
+/// returns and `pg_terminate_backend()` accepts), so `%p`, `%c` and the
+/// csvlog/jsonlog `pid` columns attribute a line to its session rather than
+/// to the one OS process every session shares. Before InitProcessGlobals
+/// (early boot, threads outside the child model) it is 0 and the OS pid —
+/// the postmaster's own MyProcPid — stands in.
+pub fn current_pid() -> u32 {
+    let pid = init_small::globals::MyProcPid();
+    if pid > 0 {
+        pid as u32
+    } else {
+        os_pid()
+    }
+}
+
+/// The per-session facts log_line_prefix and the csvlog/jsonlog writers
+/// print (C reads them straight off MyProcPort/MyProc/MyBackendType). The
+/// string accessors return owned values: the provider reads thread-local
+/// session state (MyProcPort) that cannot be borrowed out of the slot, and
+/// a log line is never a hot path. Defaults mirror the C boot state.
 pub trait BackendLogContext: Sync {
     fn has_client_port(&self) -> bool {
         false
     }
 
-    fn application_name(&self) -> Option<&str> {
+    fn application_name(&self) -> Option<String> {
         None
     }
 
-    fn user_name(&self) -> Option<&str> {
+    fn user_name(&self) -> Option<String> {
         None
     }
 
-    fn database_name(&self) -> Option<&str> {
+    fn database_name(&self) -> Option<String> {
         None
     }
 
-    fn remote_host(&self) -> Option<&str> {
+    fn remote_host(&self) -> Option<String> {
         None
     }
 
-    fn remote_port(&self) -> Option<&str> {
+    fn remote_port(&self) -> Option<String> {
         None
     }
 
-    fn local_host(&self) -> Option<&str> {
+    fn local_host(&self) -> Option<String> {
         None
     }
 
-    fn backend_type(&self) -> Option<&str> {
+    fn backend_type(&self) -> Option<String> {
         None
     }
 
@@ -77,15 +98,17 @@ pub trait BackendLogContext: Sync {
         0
     }
 
-    fn query_string(&self) -> Option<&str> {
+    fn query_string(&self) -> Option<String> {
         None
     }
 
+    /// C's `MyStartTime` (session id `%c`/`%s` and the csvlog/jsonlog
+    /// session_id column derive from it).
     fn session_start_time(&self) -> i64 {
-        0
+        init_small::globals::MyStartTime()
     }
 
-    fn ps_display(&self) -> Option<&str> {
+    fn ps_display(&self) -> Option<String> {
         None
     }
 }

@@ -140,6 +140,20 @@ fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
+/// `err` pinned to the C report site (18.6 ereport closing line + routine):
+/// the wire F/L/R fields and psql's verbose LOCATION line match C. C raises
+/// some of these lookups in other units (parse_type.c, foreign.c, ...), so
+/// the file is explicit rather than this crate's mapped default.
+fn err_at(
+    sqlstate: types_error::SqlState,
+    msg: String,
+    file: &'static str,
+    line: i32,
+    funcname: &'static str,
+) -> Box<PgError> {
+    Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate).with_location(file, line, funcname))
+}
+
 fn fill_range_var<'mcx>(parts: &[&'mcx str]) -> PgResult<RangeVar<'mcx>> {
     let mut rv = RangeVar {
         catalogname: None,
@@ -266,12 +280,15 @@ pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
         let attnum = lsyscache::get_attnum(relid, field)?;
         if attnum == 0 {
             if !missing_ok {
-                return Err(err(
+                return Err(err_at(
                     ERRCODE_UNDEFINED_COLUMN,
                     format!(
                         "column \"{field}\" of relation \"{}\" does not exist",
                         rv.relname
                     ),
+                    "parse_type.c",
+                    146,
+                    "LookupTypeNameExtended",
                 ));
             }
             typoid = InvalidOid;
@@ -330,9 +347,12 @@ pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
         };
     }
     if typoid == InvalidOid && !missing_ok {
-        return Err(err(
+        return Err(err_at(
             ERRCODE_UNDEFINED_OBJECT,
             format!("type \"{}\" does not exist", TypeNameToString(tn)),
+            "parse_type.c",
+            245,
+            "LookupTypeNameOid",
         ));
     }
     // C LookupTypeNameExtended validates typmod decoration on every found
@@ -425,9 +445,12 @@ fn get_object_address_attribute<'mcx>(
     let attnum = lsyscache::get_attnum(reloid, attname)?;
     if attnum == 0 {
         if !missing_ok {
-            return Err(err(
+            return Err(err_at(
                 ERRCODE_UNDEFINED_COLUMN,
                 format!("column \"{attname}\" of relation \"{relname_str}\" does not exist"),
+                "objectaddress.c",
+                1529,
+                "get_object_address_attribute",
             ));
         }
         let address = ObjectAddress::sub_set(RELATION_RELATION_ID, InvalidOid, 0);
@@ -447,9 +470,19 @@ fn get_object_address_type(
     missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
     let mut address = ObjectAddress::set(TYPE_RELATION_ID, InvalidOid);
-    let typoid = LookupTypeNameOid(tn, missing_ok)?;
+    // C: LookupTypeNameExtended(missing_ok) then its own ereport — the
+    // LOCATION is get_object_address_type, not the parse_type.c lookup.
+    let typoid = LookupTypeNameOid(tn, true)?;
     if typoid == InvalidOid {
-        debug_assert!(missing_ok);
+        if !missing_ok {
+            return Err(err_at(
+                ERRCODE_UNDEFINED_OBJECT,
+                format!("type \"{}\" does not exist", TypeNameToString(tn)),
+                "objectaddress.c",
+                1624,
+                "get_object_address_type",
+            ));
+        }
         return Ok(address);
     }
     address.objectId = typoid;
@@ -552,9 +585,12 @@ fn get_event_trigger_oid(trigname: &str, missing_ok: bool) -> PgResult<Oid> {
         cache_syscache::SysCacheKey::UNUSED,
     )?;
     if !OidIsValid(oid) && !missing_ok {
-        return Err(err(
+        return Err(err_at(
             ERRCODE_UNDEFINED_OBJECT,
             format!("event trigger \"{trigname}\" does not exist"),
+            "event_trigger.c",
+            588,
+            "get_event_trigger_oid",
         ));
     }
     Ok(oid)
@@ -572,9 +608,12 @@ fn get_foreign_data_wrapper_oid(fdwname: &str, missing_ok: bool) -> PgResult<Oid
         cache_syscache::SysCacheKey::UNUSED,
     )?;
     if !OidIsValid(oid) && !missing_ok {
-        return Err(err(
+        return Err(err_at(
             ERRCODE_UNDEFINED_OBJECT,
             format!("foreign-data wrapper \"{fdwname}\" does not exist"),
+            "foreign.c",
+            693,
+            "get_foreign_data_wrapper_oid",
         ));
     }
     Ok(oid)
@@ -590,9 +629,12 @@ fn get_foreign_server_oid(servername: &str, missing_ok: bool) -> PgResult<Oid> {
         cache_syscache::SysCacheKey::UNUSED,
     )?;
     if !OidIsValid(oid) && !missing_ok {
-        return Err(err(
+        return Err(err_at(
             ERRCODE_UNDEFINED_OBJECT,
             format!("server \"{servername}\" does not exist"),
+            "foreign.c",
+            714,
+            "get_foreign_server_oid",
         ));
     }
     Ok(oid)
@@ -636,12 +678,15 @@ fn get_object_address_publication_rel<'mcx>(
     )?;
     if !OidIsValid(address.objectId) {
         if !missing_ok {
-            return Err(err(
+            return Err(err_at(
                 ERRCODE_UNDEFINED_OBJECT,
                 format!(
                     "publication relation \"{}\" in publication \"{pubname}\" does not exist",
                     relation.name()
                 ),
+                "objectaddress.c",
+                1907,
+                "get_object_address_publication_rel",
             ));
         }
         relation.close(types_rel::AccessShareLock)?;
@@ -684,11 +729,14 @@ fn get_object_address_publication_schema(
         cache_syscache::SysCacheKey::UNUSED,
     )?;
     if !OidIsValid(address.objectId) && !missing_ok {
-        return Err(err(
+        return Err(err_at(
             ERRCODE_UNDEFINED_OBJECT,
             format!(
                 "publication schema \"{schemaname}\" in publication \"{pubname}\" does not exist"
             ),
+            "objectaddress.c",
+            1954,
+            "get_object_address_publication_schema",
         ));
     }
     Ok(address)
@@ -837,9 +885,12 @@ fn get_relation_policy_oid<'mcx>(
                 let relname = lsyscache::relation::get_rel_name(mcx, relid)?
                     .map(|n| n.as_str().to_string())
                     .unwrap_or_default();
-                return Err(err(
+                return Err(err_at(
                     ERRCODE_UNDEFINED_OBJECT,
                     format!("policy \"{policy_name}\" for table \"{relname}\" does not exist"),
+                    "policy.c",
+                    1246,
+                    "get_relation_policy_oid",
                 ));
             }
             InvalidOid
@@ -880,11 +931,14 @@ fn get_object_address_attrdef<'mcx>(
     };
     if !OidIsValid(defoid) {
         if !missing_ok {
-            return Err(err(
+            return Err(err_at(
                 ERRCODE_UNDEFINED_COLUMN,
                 format!(
                     "default value for column \"{attname}\" of relation \"{relname_str}\" does not exist"
                 ),
+                "objectaddress.c",
+                1587,
+                "get_object_address_attrdef",
             ));
         }
         rel.close(lockmode)?;
@@ -910,12 +964,15 @@ fn get_transform_oid(
         cache_syscache::SysCacheKey::UNUSED,
     )?;
     if !OidIsValid(oid) && !missing_ok {
-        return Err(err(
+        return Err(err_at(
             ERRCODE_UNDEFINED_OBJECT,
             format!(
                 "transform for type {} language \"{langname}\" does not exist",
                 format_type::format_type_be(type_id)?
             ),
+            "functioncmds.c",
+            2049,
+            "get_transform_oid",
         ));
     }
     Ok(oid)
@@ -950,11 +1007,14 @@ fn get_object_address_usermapping(
         )?;
         if !OidIsValid(oid) {
             if !missing_ok {
-                return Err(err(
+                return Err(err_at(
                     ERRCODE_UNDEFINED_OBJECT,
                     format!(
                         "user mapping for user \"{username}\" on server \"{servername}\" does not exist"
                     ),
+                    "objectaddress.c",
+                    1825,
+                    "get_object_address_usermapping",
                 ));
             }
             return Ok(address);
@@ -964,9 +1024,12 @@ fn get_object_address_usermapping(
     let serverid = foreigncmds_seams::get_foreign_server_oid::call(servername, true)?;
     if !OidIsValid(serverid) {
         if !missing_ok {
-            return Err(err(
+            return Err(err_at(
                 ERRCODE_UNDEFINED_OBJECT,
                 format!("server \"{servername}\" does not exist"),
+                "objectaddress.c",
+                1839,
+                "get_object_address_usermapping",
             ));
         }
         return Ok(address);
@@ -981,11 +1044,14 @@ fn get_object_address_usermapping(
     )?;
     if !OidIsValid(oid) {
         if !missing_ok {
-            return Err(err(
+            return Err(err_at(
                 ERRCODE_UNDEFINED_OBJECT,
                 format!(
                     "user mapping for user \"{username}\" on server \"{servername}\" does not exist"
                 ),
+                "objectaddress.c",
+                1851,
+                "get_object_address_usermapping",
             ));
         }
         return Ok(address);
@@ -1032,16 +1098,24 @@ fn get_object_address_defacl(
     let address = ObjectAddress::set(DefaultAclRelationId, InvalidOid);
     let not_found = || -> PgResult<ObjectAddress> {
         if !missing_ok {
-            return Err(err(
-                ERRCODE_UNDEFINED_OBJECT,
-                match schema {
-                    Some(s) => format!(
+            let (msg, line) = match schema {
+                Some(s) => (
+                    format!(
                         "default ACL for user \"{username}\" in schema \"{s}\" on {objtype_str} does not exist"
                     ),
-                    None => format!(
-                        "default ACL for user \"{username}\" on {objtype_str} does not exist"
-                    ),
-                },
+                    2068,
+                ),
+                None => (
+                    format!("default ACL for user \"{username}\" on {objtype_str} does not exist"),
+                    2073,
+                ),
+            };
+            return Err(err_at(
+                ERRCODE_UNDEFINED_OBJECT,
+                msg,
+                "objectaddress.c",
+                line,
+                "get_object_address_defacl",
             ));
         }
         Ok(address)
@@ -1157,13 +1231,16 @@ fn get_object_address_opf_member<'mcx>(
     )?;
     if !OidIsValid(oid) && !missing_ok {
         let famdesc = getObjectDescription(mcx, &famaddr, false)?.expect("missing_ok=false");
-        return Err(err(
+        return Err(err_at(
             ERRCODE_UNDEFINED_OBJECT,
             format!(
                 "{noun} {membernum} ({}, {}) of {famdesc} does not exist",
                 typenames[0].map(TypeNameToString).unwrap_or_default(),
                 typenames[1].map(TypeNameToString).unwrap_or_default(),
             ),
+            "objectaddress.c",
+            if noun == "operator" { 1746 } else { 1777 },
+            "get_object_address_opf_member",
         ));
     }
     Ok(ObjectAddress::set(class_id, oid))
@@ -1354,9 +1431,12 @@ pub fn get_object_address<'mcx>(
             OBJECT_LARGEOBJECT => {
                 let loid = oidparse(object)?;
                 if !pg_largeobject::LargeObjectExists(mcx, loid)? && !missing_ok {
-                    return Err(err(
+                    return Err(err_at(
                         ERRCODE_UNDEFINED_OBJECT,
                         format!("large object {loid} does not exist"),
+                        "objectaddress.c",
+                        1056,
+                        "get_object_address",
                     ));
                 }
                 (ObjectAddress::set(LargeObjectRelationId, loid), None)

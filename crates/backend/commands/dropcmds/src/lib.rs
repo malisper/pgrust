@@ -6,7 +6,7 @@ use mcx::Mcx;
 use types_core::primitive::OidIsValid;
 use types_core::InvalidOid;
 use types_core::xact::XACT_FLAGS_ACCESSEDTEMPNAMESPACE;
-use types_error::{PgResult, NOTICE};
+use types_error::{PgError, PgResult, NOTICE};
 use types_nodes::parsenodes::{DropStmt, ObjectType, ObjectWithArgs};
 use types_nodes::rawnodes::TypeName;
 use types_nodes::{Node, NodeList};
@@ -14,8 +14,13 @@ use types_rel::AccessExclusiveLock;
 
 const PROKIND_AGGREGATE: i8 = b'a' as i8;
 
+// does_not_exist_skipping's `ereport(NOTICE, (errmsg(msg, name)))`
+// (dropcmds.c:521, 18.6; the name+args variant is :523): the NOTICE carries
+// C's F/L/R fields so `\set VERBOSITY verbose` shows the same LOCATION.
 fn notice(msg: String) -> PgResult<()> {
-    elog_seams::ereport_msg::call(NOTICE, msg, None)
+    elog_seams::ereport::call(
+        PgError::notice(msg).with_location("dropcmds.c", 521, "does_not_exist_skipping"),
+    )
 }
 
 fn schema_does_not_exist_skipping(names: &NodeList<'_>) -> PgResult<Option<String>> {
@@ -415,11 +420,7 @@ fn remove_foreign_objects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResu
         let (class_id, oid, owner) = if is_fdw {
             let oid = foreigncmds::foreign::get_foreign_data_wrapper_oid(name, stmt.missing_ok)?;
             if oid == InvalidOid {
-                elog_seams::ereport_msg::call(
-                    NOTICE,
-                    format!("foreign-data wrapper \"{name}\" does not exist, skipping"),
-                    None,
-                )?;
+                notice(format!("foreign-data wrapper \"{name}\" does not exist, skipping"))?;
                 continue;
             }
             let fdw = foreigncmds::foreign::GetForeignDataWrapper(mcx, oid)?;
@@ -427,11 +428,7 @@ fn remove_foreign_objects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResu
         } else {
             let oid = foreigncmds::foreign::get_foreign_server_oid(name, stmt.missing_ok)?;
             if oid == InvalidOid {
-                elog_seams::ereport_msg::call(
-                    NOTICE,
-                    format!("server \"{name}\" does not exist, skipping"),
-                    None,
-                )?;
+                notice(format!("server \"{name}\" does not exist, skipping"))?;
                 continue;
             }
             let srv = foreigncmds::foreign::GetForeignServer(mcx, oid)?;
@@ -460,12 +457,13 @@ mod tests {
 
     static NOTICES: Mutex<Vec<std::string::String>> = Mutex::new(Vec::new());
 
-    fn capture(
-        _elevel: types_error::ErrorLevel,
-        msg: std::string::String,
-        _detail: Option<std::string::String>,
-    ) -> PgResult<()> {
-        NOTICES.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+    fn capture(err: PgError) -> PgResult<()> {
+        assert_eq!(err.level(), NOTICE);
+        let loc = err.location().expect("C location pinned");
+        assert_eq!(loc.filename.as_deref(), Some("dropcmds.c"));
+        assert_eq!(loc.lineno, 521);
+        assert_eq!(loc.funcname.as_deref(), Some("does_not_exist_skipping"));
+        NOTICES.lock().unwrap_or_else(|e| e.into_inner()).push(err.message().to_owned());
         Ok(())
     }
 
@@ -480,7 +478,7 @@ mod tests {
     fn does_not_exist_skipping_matches_c() {
         let ctx = mcx::MemoryContext::new("dropcmds-test");
         let mcx = ctx.mcx();
-        elog_seams::ereport_msg::set(capture);
+        elog_seams::ereport::set(capture);
 
         does_not_exist_skipping(ObjectType::OBJECT_FDW, string_node(mcx, "w1")).unwrap();
         does_not_exist_skipping(ObjectType::OBJECT_FOREIGN_SERVER, string_node(mcx, "s1"))

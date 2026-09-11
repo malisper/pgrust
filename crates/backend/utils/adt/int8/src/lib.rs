@@ -49,38 +49,41 @@ macro_rules! overflow_fns {
 
 overflow_fns!(pg_add_s64_overflow, pg_sub_s64_overflow, pg_mul_s64_overflow, i64);
 
-#[track_caller]
+// C repeats the ereport per function; each caller threads its C routine
+// name (wire R field) and that ereport's closing line in int8.c (18.6), so
+// psql's `\set VERBOSITY verbose` LOCATION line matches C byte for byte.
 #[cold]
 #[inline(never)]
-fn bigint_out_of_range() -> Box<PgError> {
+fn out_of_range(msg: &'static str, line: i32, funcname: &'static str) -> Box<PgError> {
     Box::new(
-        PgError::error("bigint out of range").with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+        PgError::error(msg)
+            .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+            .with_location("int8.c", line, funcname),
     )
 }
 
-#[track_caller]
 #[cold]
 #[inline(never)]
-fn integer_out_of_range() -> Box<PgError> {
-    Box::new(
-        PgError::error("integer out of range").with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-    )
+fn bigint_out_of_range(line: i32, funcname: &'static str) -> Box<PgError> {
+    out_of_range("bigint out of range", line, funcname)
 }
 
-#[track_caller]
 #[cold]
 #[inline(never)]
-fn smallint_out_of_range() -> Box<PgError> {
-    Box::new(
-        PgError::error("smallint out of range").with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-    )
+fn integer_out_of_range(line: i32, funcname: &'static str) -> Box<PgError> {
+    out_of_range("integer out of range", line, funcname)
 }
 
-#[track_caller]
 #[cold]
 #[inline(never)]
-fn oid_out_of_range() -> Box<PgError> {
-    Box::new(PgError::error("OID out of range").with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE))
+fn smallint_out_of_range(line: i32, funcname: &'static str) -> Box<PgError> {
+    out_of_range("smallint out of range", line, funcname)
+}
+
+#[cold]
+#[inline(never)]
+fn oid_out_of_range(line: i32, funcname: &'static str) -> Box<PgError> {
+    out_of_range("OID out of range", line, funcname)
 }
 
 #[track_caller]
@@ -186,7 +189,7 @@ pub fn in_range_int8_int8(
 #[inline]
 pub fn int8um(arg: i64) -> PgResult<i64> {
     if arg == PG_INT64_MIN {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(448, "int8um"));
     }
     Ok(-arg)
 }
@@ -200,7 +203,7 @@ pub fn int8up(arg: i64) -> i64 {
 pub fn int8pl(arg1: i64, arg2: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_add_s64_overflow(arg1, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(471, "int8pl"));
     }
     Ok(result)
 }
@@ -209,7 +212,7 @@ pub fn int8pl(arg1: i64, arg2: i64) -> PgResult<i64> {
 pub fn int8mi(arg1: i64, arg2: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_sub_s64_overflow(arg1, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(485, "int8mi"));
     }
     Ok(result)
 }
@@ -218,7 +221,7 @@ pub fn int8mi(arg1: i64, arg2: i64) -> PgResult<i64> {
 pub fn int8mul(arg1: i64, arg2: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_mul_s64_overflow(arg1, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(499, "int8mul"));
     }
     Ok(result)
 }
@@ -231,7 +234,7 @@ pub fn int8div(arg1: i64, arg2: i64) -> PgResult<i64> {
     // INT64_MIN / -1 traps; division by -1 is negation.
     if arg2 == -1 {
         if arg1 == PG_INT64_MIN {
-            return Err(bigint_out_of_range());
+            return Err(bigint_out_of_range(530, "int8div"));
         }
         return Ok(-arg1);
     }
@@ -241,7 +244,7 @@ pub fn int8div(arg1: i64, arg2: i64) -> PgResult<i64> {
 #[inline]
 pub fn int8abs(arg1: i64) -> PgResult<i64> {
     if arg1 == PG_INT64_MIN {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(554, "int8abs"));
     }
     Ok(if arg1 < 0 { -arg1 } else { arg1 })
 }
@@ -268,7 +271,7 @@ fn int8gcd_internal(mut arg1: i64, mut arg2: i64) -> PgResult<i64> {
 
     if arg1 == PG_INT64_MIN {
         if arg2 == 0 || arg2 == PG_INT64_MIN {
-            return Err(bigint_out_of_range());
+            return Err(bigint_out_of_range(636, "int8gcd_internal"));
         }
         // gcd(INT64_MIN, -1): dodge the INT64_MIN % -1 trap.
         if arg2 == -1 {
@@ -300,10 +303,10 @@ pub fn int8lcm(mut arg1: i64, arg2: i64) -> PgResult<i64> {
     arg1 /= gcd;
     let mut result = 0i64;
     if pg_mul_s64_overflow(arg1, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(704, "int8lcm"));
     }
     if result == PG_INT64_MIN {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(710, "int8lcm"));
     }
     if result < 0 {
         result = -result;
@@ -317,7 +320,7 @@ pub fn int8lcm(mut arg1: i64, arg2: i64) -> PgResult<i64> {
 pub fn int8inc(arg: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_add_s64_overflow(arg, 1, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(750, "int8inc"));
     }
     Ok(result)
 }
@@ -326,7 +329,7 @@ pub fn int8inc(arg: i64) -> PgResult<i64> {
 pub fn int8dec(arg: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_sub_s64_overflow(arg, 1, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(787, "int8dec"));
     }
     Ok(result)
 }
@@ -361,7 +364,7 @@ pub fn int8smaller(arg1: i64, arg2: i64) -> i64 {
 pub fn int84pl(arg1: i64, arg2: i32) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_add_s64_overflow(arg1, arg2 as i64, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(929, "int84pl"));
     }
     Ok(result)
 }
@@ -370,7 +373,7 @@ pub fn int84pl(arg1: i64, arg2: i32) -> PgResult<i64> {
 pub fn int84mi(arg1: i64, arg2: i32) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_sub_s64_overflow(arg1, arg2 as i64, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(943, "int84mi"));
     }
     Ok(result)
 }
@@ -379,7 +382,7 @@ pub fn int84mi(arg1: i64, arg2: i32) -> PgResult<i64> {
 pub fn int84mul(arg1: i64, arg2: i32) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_mul_s64_overflow(arg1, arg2 as i64, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(957, "int84mul"));
     }
     Ok(result)
 }
@@ -391,7 +394,7 @@ pub fn int84div(arg1: i64, arg2: i32) -> PgResult<i64> {
     }
     if arg2 == -1 {
         if arg1 == PG_INT64_MIN {
-            return Err(bigint_out_of_range());
+            return Err(bigint_out_of_range(988, "int84div"));
         }
         return Ok(-arg1);
     }
@@ -402,7 +405,7 @@ pub fn int84div(arg1: i64, arg2: i32) -> PgResult<i64> {
 pub fn int48pl(arg1: i32, arg2: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_add_s64_overflow(arg1 as i64, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1010, "int48pl"));
     }
     Ok(result)
 }
@@ -411,7 +414,7 @@ pub fn int48pl(arg1: i32, arg2: i64) -> PgResult<i64> {
 pub fn int48mi(arg1: i32, arg2: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_sub_s64_overflow(arg1 as i64, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1024, "int48mi"));
     }
     Ok(result)
 }
@@ -420,7 +423,7 @@ pub fn int48mi(arg1: i32, arg2: i64) -> PgResult<i64> {
 pub fn int48mul(arg1: i32, arg2: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_mul_s64_overflow(arg1 as i64, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1038, "int48mul"));
     }
     Ok(result)
 }
@@ -438,7 +441,7 @@ pub fn int48div(arg1: i32, arg2: i64) -> PgResult<i64> {
 pub fn int82pl(arg1: i64, arg2: i16) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_add_s64_overflow(arg1, arg2 as i64, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1071, "int82pl"));
     }
     Ok(result)
 }
@@ -447,7 +450,7 @@ pub fn int82pl(arg1: i64, arg2: i16) -> PgResult<i64> {
 pub fn int82mi(arg1: i64, arg2: i16) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_sub_s64_overflow(arg1, arg2 as i64, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1085, "int82mi"));
     }
     Ok(result)
 }
@@ -456,7 +459,7 @@ pub fn int82mi(arg1: i64, arg2: i16) -> PgResult<i64> {
 pub fn int82mul(arg1: i64, arg2: i16) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_mul_s64_overflow(arg1, arg2 as i64, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1099, "int82mul"));
     }
     Ok(result)
 }
@@ -468,7 +471,7 @@ pub fn int82div(arg1: i64, arg2: i16) -> PgResult<i64> {
     }
     if arg2 == -1 {
         if arg1 == PG_INT64_MIN {
-            return Err(bigint_out_of_range());
+            return Err(bigint_out_of_range(1130, "int82div"));
         }
         return Ok(-arg1);
     }
@@ -479,7 +482,7 @@ pub fn int82div(arg1: i64, arg2: i16) -> PgResult<i64> {
 pub fn int28pl(arg1: i16, arg2: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_add_s64_overflow(arg1 as i64, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1152, "int28pl"));
     }
     Ok(result)
 }
@@ -488,7 +491,7 @@ pub fn int28pl(arg1: i16, arg2: i64) -> PgResult<i64> {
 pub fn int28mi(arg1: i16, arg2: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_sub_s64_overflow(arg1 as i64, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1166, "int28mi"));
     }
     Ok(result)
 }
@@ -497,7 +500,7 @@ pub fn int28mi(arg1: i16, arg2: i64) -> PgResult<i64> {
 pub fn int28mul(arg1: i16, arg2: i64) -> PgResult<i64> {
     let mut result = 0i64;
     if pg_mul_s64_overflow(arg1 as i64, arg2, &mut result) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1180, "int28mul"));
     }
     Ok(result)
 }
@@ -550,7 +553,7 @@ pub fn int48(arg: i32) -> i64 {
 #[inline]
 pub fn int84(arg: i64) -> PgResult<i32> {
     if arg < PG_INT32_MIN || arg > PG_INT32_MAX {
-        return Err(integer_out_of_range());
+        return Err(integer_out_of_range(1286, "int84"));
     }
     Ok(arg as i32)
 }
@@ -563,7 +566,7 @@ pub fn int28(arg: i16) -> i64 {
 #[inline]
 pub fn int82(arg: i64) -> PgResult<i16> {
     if arg < PG_INT16_MIN || arg > PG_INT16_MAX {
-        return Err(smallint_out_of_range());
+        return Err(smallint_out_of_range(1307, "int82"));
     }
     Ok(arg as i16)
 }
@@ -578,7 +581,7 @@ pub fn i8tod(arg: i64) -> f64 {
 pub fn dtoi8(num: f64) -> PgResult<i64> {
     let num = num.round_ties_even();
     if num.is_nan() || !float8_fits_in_int64(num) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1342, "dtoi8"));
     }
     Ok(num as i64)
 }
@@ -592,7 +595,7 @@ pub fn i8tof(arg: i64) -> f32 {
 pub fn ftoi8(num: f32) -> PgResult<i64> {
     let num = num.round_ties_even();
     if num.is_nan() || !float4_fits_in_int64(num) {
-        return Err(bigint_out_of_range());
+        return Err(bigint_out_of_range(1377, "ftoi8"));
     }
     Ok(num as i64)
 }
@@ -600,7 +603,7 @@ pub fn ftoi8(num: f32) -> PgResult<i64> {
 #[inline]
 pub fn i8tooid(arg: i64) -> PgResult<::types_core::Oid> {
     if arg < 0 || arg > PG_UINT32_MAX {
-        return Err(oid_out_of_range());
+        return Err(oid_out_of_range(1390, "i8tooid"));
     }
     Ok(arg as ::types_core::Oid)
 }

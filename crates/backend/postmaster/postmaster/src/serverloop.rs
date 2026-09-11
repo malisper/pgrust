@@ -190,7 +190,18 @@ pub fn ServerLoop() -> PgResult<i32> {
     // GL-MEMWATCH-1: the process memory watchdog sampler thread. Near-free
     // (a 1s tick off every query path); pgrust.memory_watchdog gates the
     // work per tick, so SIGHUP can arm/disarm without a restart.
-    memwatchdog::start();
+    {
+        let pm_pid = init_small::globals::MyProcPid();
+        let pm_start = init_small::globals::MyStartTime();
+        memwatchdog::start(move || {
+            // The watchdog logs as the postmaster: %p/%c/%s/%b its own
+            // (PostmasterPid is per-thread too; %b = "postmaster" needs it).
+            init_small::globals::SetMyProcPid(pm_pid);
+            init_small::globals::SetPostmasterPid(pm_pid);
+            init_small::globals::SetMyStartTime(pm_start);
+            launch_backend::logctx::install();
+        });
+    }
     // M2 pool-binding: wire the STANDING runtime executor gang (boot
     // captures + spawner install; threads spawn lazily at first
     // engagement). No-op unless PGRUST_RUNTIME=1, with PGRUST_RUNTIME_

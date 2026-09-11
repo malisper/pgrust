@@ -11,7 +11,6 @@
 //! panic). C never has this problem because its dynahash lives in
 //! TopMemoryContext for the life of the (single-session) process.
 
-use core::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -26,28 +25,12 @@ mod tests;
 const SECS_PER_HOUR: i64 = 3600;
 const SECS_PER_MINUTE: i64 = 60;
 
-thread_local! {
-    static SESSION_TIMEZONE: Cell<Option<&'static PgTz>> = const { Cell::new(None) };
-    static LOG_TIMEZONE: Cell<Option<&'static PgTz>> = const { Cell::new(None) };
-}
-
-#[inline]
-pub fn session_timezone() -> Option<&'static PgTz> {
-    SESSION_TIMEZONE.with(Cell::get)
-}
-
-pub fn set_session_timezone(tz: Option<&'static PgTz>) {
-    SESSION_TIMEZONE.with(|c| c.set(tz));
-}
-
-#[inline]
-pub fn log_timezone() -> Option<&'static PgTz> {
-    LOG_TIMEZONE.with(Cell::get)
-}
-
-pub fn set_log_timezone(tz: Option<&'static PgTz>) {
-    LOG_TIMEZONE.with(|c| c.set(tz));
-}
+// The session/log timezone globals live in `localtime::globals` (below elog,
+// which formats log timestamps in log_timezone); re-exported here so callers
+// keep pgtz.c's names.
+pub use localtime::globals::{
+    log_timezone, session_timezone, set_log_timezone, set_session_timezone,
+};
 
 // DIVERGENCE from pg_TZDIR: PGRUST_TZDIR (runtime) / PGRUST_PGSHAREDIR
 // (build) take precedence over C's get_share_path resolution (harness

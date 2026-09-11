@@ -157,6 +157,8 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     init_small::globals::SetPostmasterPid(init_small::globals::MyProcPid());
     init_small::globals::SetIsPostmasterEnvironment(true);
+    // The postmaster's own log lines: %p its pid, %b "postmaster".
+    launch_backend::logctx::install();
 
     // SAFETY: umask is async-signal-safe and process-global by design here.
     // wasm32: no umask on WASI (files carry no mode bits) — no-op.

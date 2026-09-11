@@ -346,7 +346,17 @@ pub fn run_session_teardown() {
                 .map(String::as_str)
                 .or_else(|| e.downcast_ref::<&str>().copied())
                 .unwrap_or("non-string panic payload");
-            eprintln!("WARNING: session-teardown cleanup panicked (phase {i}): {msg}");
+            // Through elog so the line carries log_line_prefix; raw stderr
+            // only if reporting itself unwinds (the message must not vanish).
+            let line = format!("session-teardown cleanup panicked (phase {i}): {msg}");
+            // unwind-ok: log-then-die
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = elog::elog(types_error::WARNING, line.clone());
+            }))
+            .is_err()
+            {
+                elog::write_stderr(&format!("WARNING:  {line}\n"));
+            }
         }
     }
 }

@@ -54,6 +54,9 @@ ipc = { path = "../../storage/ipc/ipc" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 parallel = { path = "../../access/transam/parallel" }
 postinit = { path = "../../utils/init/postinit" }
+xact = { path = "../../access/transam/xact" }
+backend_status = { path = "../../utils/activity/backend_status" }
+ps_status = { path = "../../utils/misc/ps_status" }
 elog = { path = "../../utils/error/elog" }
 types_error = { path = "../../../_support/types/types_error" }
 # PERMIT-S1 (WS-CORE): the spawn-door registration surface. Native/loom

@@ -3,6 +3,7 @@
 #![allow(clippy::manual_range_contains)]
 
 mod clock;
+pub mod globals;
 mod load;
 #[cfg(test)]
 mod tests;
