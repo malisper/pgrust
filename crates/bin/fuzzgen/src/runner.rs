@@ -1680,6 +1680,11 @@ pub struct SideRig {
     fed: u64,
     last_stats: Option<Value>,
     version: String,
+    /// Backend pid of the session a `disconnect` step just dropped: its
+    /// exit-time log lines (held-portal teardown, resource-leak
+    /// WARNINGs) land after the socket closes, so the disconnect step
+    /// and the step after it slice the log for this pid too.
+    exited_pid: Option<u32>,
 }
 
 impl SideRig {
@@ -1705,6 +1710,7 @@ impl SideRig {
             fed: 0,
             last_stats: None,
             version: String::new(),
+            exited_pid: None,
         }
     }
 
@@ -2180,7 +2186,12 @@ impl SiteRunner {
                 };
             }
             StepKind::Disconnect => {
+                let pid = rig.session_index(&step.session).and_then(|i| rig.sessions[i].1.obs.backend_pid());
                 rig.sessions.retain(|(n, _)| n != &step.session);
+                rig.exited_pid = pid;
+                // Its exit-time lines land after the socket closes: the
+                // slice below and the next step's include them.
+                let _ = rig.tail.poll();
                 return StepObs { wire: Vec::new(), ms: 0, liveness: liveness_base.into(), hang: None, lost: None };
             }
             _ => {}
@@ -2384,14 +2395,22 @@ impl SiteRunner {
             rig.tail.parser_mut().finish();
             let m1 = rig.tail.mark();
             let pid = rig.session_index(&step.session).and_then(|i| rig.sessions[i].1.obs.backend_pid());
+            // The pid a disconnect step just dropped rides along for that
+            // step and the next one (exit-time lines arrive late).
+            let exited = rig.exited_pid;
+            if step.kind != StepKind::Disconnect {
+                rig.exited_pid = None;
+            }
+            let pids: Vec<u32> = pid.into_iter().chain(exited).collect();
             let lines = rig.tail.parser().lines();
             let mut log = match step.kind {
                 // The auth phase has no BackendKeyData: the @mark slice.
                 StepKind::Connect => logtail::slice_all(lines, m0, m1),
-                _ => logtail::slice_for_pid(lines, m0, m1, pid),
+                _ if pids.is_empty() => logtail::slice_for_pid(lines, m0, m1, None),
+                _ => logtail::slice_for_pids(lines, m0, m1, &pids),
             };
             for t in &rig.collector_tails {
-                log.extend(t.parser().lines().iter().filter(|l| l.rec.pid == pid || pid.is_none()).map(|l| l.rec.clone()));
+                log.extend(t.parser().lines().iter().filter(|l| l.rec.pid.is_none_or(|p| pids.is_empty() || pids.contains(&p))).map(|l| l.rec.clone()));
             }
             let panic = logtail::panics_in(rig.tail.parser(), m0, m1).into_iter().next();
             if panic.is_some() {
@@ -2913,11 +2932,19 @@ pub fn xproto_frames(sql: &str, x: &contracts::XProto) -> Vec<Frame> {
     if x.mode == "describe_only" {
         return out;
     }
-    out.push(Frame::Bind { portal: x.portal.clone(), stmt: x.stmt.clone(), params, result_fmts: Vec::new() });
+    out.push(Frame::Bind { portal: x.portal.clone(), stmt: x.stmt.clone(), params: params.clone(), result_fmts: Vec::new() });
     if x.describe == "P" {
         out.push(Frame::Describe { kind: Describe::Portal, name: x.portal.clone() });
     }
     out.push(Frame::Execute { portal: x.portal.clone(), limit: x.limit });
+    // `repeat`: the whole Parse/Bind/Execute group again, N-1 more times,
+    // with no Sync in between (the compose `pipeline-n` shell, the
+    // extended-protocol twin of the multi-statement message).
+    for _ in 1..x.repeat.max(1) {
+        out.push(Frame::Parse { stmt: x.stmt.clone(), sql: sql.to_string(), param_oids: Vec::new() });
+        out.push(Frame::Bind { portal: x.portal.clone(), stmt: x.stmt.clone(), params: params.clone(), result_fmts: Vec::new() });
+        out.push(Frame::Execute { portal: x.portal.clone(), limit: x.limit });
+    }
     out
 }
 
@@ -2957,6 +2984,7 @@ impl Observer for ClientObserver {
                     portal: String::new(),
                     limit: 0,
                     describe: "P".into(),
+                    repeat: 1,
                 });
                 let c = self.armed(deadline_ms)?;
                 match x.mode.as_str() {
@@ -3613,7 +3641,7 @@ mod site_tests {
     /// The xproto step -> client frames mapping.
     #[test]
     fn xproto_step_maps_to_frames() {
-        let x = contracts::XProto { mode: "named_portal".into(), params: vec![Some(Bytes::text("2")), None], stmt: "ps1".into(), portal: "p1".into(), limit: 5, describe: "P".into() };
+        let x = contracts::XProto { mode: "named_portal".into(), params: vec![Some(Bytes::text("2")), None], stmt: "ps1".into(), portal: "p1".into(), limit: 5, describe: "P".into(), repeat: 1 };
         let s = xproto_step("SELECT $1", &x);
         assert_eq!((s.stmt.as_str(), s.portal.as_str(), s.limit, s.describe), ("ps1", "p1", 5, Some(Describe::Portal)));
         assert_eq!(s.params.len(), 2);
@@ -3624,7 +3652,7 @@ mod site_tests {
         assert!(matches!(&frames[1], Frame::Bind { portal, .. } if portal == "p1"));
         assert!(matches!(&frames[2], Frame::Describe { kind: Describe::Portal, .. }));
         assert!(matches!(&frames[3], Frame::Execute { limit: 5, .. }));
-        let d = contracts::XProto { mode: "describe_only".into(), params: vec![], stmt: "".into(), portal: "".into(), limit: 0, describe: "S".into() };
+        let d = contracts::XProto { mode: "describe_only".into(), params: vec![], stmt: "".into(), portal: "".into(), limit: 0, describe: "S".into(), repeat: 1 };
         let frames = xproto_frames("SELECT 1", &d);
         assert_eq!(frames.len(), 2);
         assert!(matches!(&frames[1], Frame::Describe { kind: Describe::Statement, .. }));

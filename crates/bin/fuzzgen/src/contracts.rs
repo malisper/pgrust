@@ -851,11 +851,20 @@ pub struct XProto {
     pub limit: u32,
     /// Describe target: "S" | "P" | "" (none).
     pub describe: String,
+    /// `pipeline` mode only: send the Parse/Bind/Execute group this many
+    /// times before the single Sync (1 = once; the compose `pipeline-n`
+    /// shell). Omitted from JSON when 1.
+    pub repeat: u32,
 }
 
 impl XProto {
+    /// The plain unnamed parse/bind/execute shape.
+    pub fn simple(mode: &str) -> XProto {
+        XProto { mode: mode.into(), params: Vec::new(), stmt: String::new(), portal: String::new(), limit: 0, describe: String::new(), repeat: 1 }
+    }
+
     pub fn to_json(&self) -> Value {
-        Value::obj()
+        let o = Value::obj()
             .with("mode", Value::from(self.mode.as_str()))
             .with(
                 "params",
@@ -864,11 +873,15 @@ impl XProto {
             .with("stmt", Value::from(self.stmt.as_str()))
             .with("portal", Value::from(self.portal.as_str()))
             .with("limit", Value::from(self.limit))
-            .with("describe", Value::from(self.describe.as_str()))
+            .with("describe", Value::from(self.describe.as_str()));
+        if self.repeat > 1 {
+            return o.with("repeat", Value::from(self.repeat));
+        }
+        o
     }
 
     pub fn from_json(v: &Value) -> Result<XProto, String> {
-        reject_unknown(v, &["mode", "params", "stmt", "portal", "limit", "describe"], "xproto")?;
+        reject_unknown(v, &["mode", "params", "stmt", "portal", "limit", "describe", "repeat"], "xproto")?;
         let params = req(v, "params")?
             .as_arr()
             .ok_or("xproto.params must be an array")?
@@ -882,6 +895,7 @@ impl XProto {
             portal: req_str(v, "portal")?,
             limit: req_u64(v, "limit")? as u32,
             describe: req_str(v, "describe")?,
+            repeat: opt_u64(v, "repeat")?.unwrap_or(1).max(1) as u32,
         })
     }
 }
@@ -2835,6 +2849,7 @@ mod tests {
                 portal: "p1".into(),
                 limit: 5,
                 describe: "P".into(),
+                repeat: 1,
             }),
             productions: vec!["select.simple".into(), "orderby:total".into()],
             targets: vec![],

@@ -801,6 +801,17 @@ pub fn slice_for_pid(lines: &[TailLine], from: Mark, to: Mark, pid: Option<u32>)
         .collect()
 }
 
+/// `slice_for_pid` for a set of pids (the step's backend plus a backend
+/// a disconnect step just dropped); unattributed lines are kept.
+pub fn slice_for_pids(lines: &[TailLine], from: Mark, to: Mark, pids: &[u32]) -> Vec<LogLine> {
+    lines
+        .iter()
+        .filter(|l| l.line_no > from.0 && l.line_no <= to.0)
+        .filter(|l| l.rec.pid.is_none_or(|p| pids.contains(&p)))
+        .map(|l| l.rec.clone())
+        .collect()
+}
+
 /// Every line of `[from, to)` regardless of pid: the `@mark` slice used
 /// for the auth phase of a connect step (no BackendKeyData yet) and for
 /// restarts.

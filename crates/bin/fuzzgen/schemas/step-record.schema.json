@@ -26,7 +26,8 @@
         "stmt": { "type": "string" },
         "portal": { "type": "string" },
         "limit": { "type": "integer", "minimum": 0 },
-        "describe": { "type": "string", "enum": ["", "S", "P"] }
+        "describe": { "type": "string", "enum": ["", "S", "P"] },
+        "repeat": { "type": "integer", "minimum": 1, "description": "pipeline mode: Parse/Bind/Execute groups before the Sync (default 1)." }
       }
     },
     "productions": { "type": "array", "items": { "type": "string" } },

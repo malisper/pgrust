@@ -1426,6 +1426,7 @@ impl Recipe {
                         portal: String::new(),
                         limit: 0,
                         describe: String::new(),
+                        repeat: 1,
                     })
                 } else {
                     None

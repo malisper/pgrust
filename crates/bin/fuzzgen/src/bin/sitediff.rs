@@ -67,13 +67,20 @@ usage: sitediff <command> [options]
     --out <dir>          JSONL output dir (default: out/sitediff-<seed>)
     --dry-run            no servers: replay the contracts fixtures' wire
                          through a fixture Observer
-    --compose <p>        wrap each SELECT-shaped generated statement with
-                         probability p (0..1) in a composition shell
-                         (fuzzgen::compose: secdef-srf, plpgsql-record,
-                         cte, prepared, hold-cursor, agg-sublink,
-                         multi-statement); the step keeps its production
-                         tags and gains compose:<template>
-    --compose-templates <a,b,..>  restrict the shells (default: all)
+    --compose <p>        wrap each generated statement with probability p
+                         (0..1) in a composition shell legal for its kind
+                         (fuzzgen::compose; SELECT / DML / DDL shells:
+                         secdef-srf, plpgsql-record, cte, prepared,
+                         hold-cursor, agg-sublink, multi-statement,
+                         ordered-set-agg, trigger-exec, hold-cursor-split,
+                         hold-cursor-leak, multi-n, pipeline-n, agg-nested,
+                         view-select, view-rule, secdef-set-leakproof,
+                         plpgsql-srf, partition-dml, rls,
+                         plpgsql-loop-array, plan-cache, savepoint); the
+                         step keeps its production tags and gains
+                         compose:<shell>
+    --compose-shells <a,b,..>  restrict the shells (default: all;
+                         --compose-templates is the older spelling)
 
   recipes      run a recipe bank through the cell (same observer,
                comparator, ledger and findings.jsonl as smoke)
@@ -217,8 +224,8 @@ fn parse_smoke(args: &[String]) -> Result<SmokeArgs, String> {
                 }
                 a.compose = (p * 1000.0).round() as u64;
             }
-            "--compose-templates" => {
-                a.compose_templates = value("--compose-templates")?
+            "--compose-shells" | "--compose-templates" => {
+                a.compose_templates = value("--compose-shells")?
                     .split(',')
                     .filter(|t| !t.trim().is_empty())
                     .map(|t| Template::parse(t.trim()).ok_or_else(|| format!("unknown compose template {t:?}")))
@@ -287,6 +294,28 @@ fn step_of(scenario: &str, seq: u64, sql: &str, productions: Vec<String>, ordere
         productions,
         targets: Vec::new(),
         ordered,
+        expect_c: None,
+        bracket: None,
+        recipe: None,
+        mutant: None,
+        slots: BTreeMap::new(),
+    }
+}
+
+/// A composed step: `sql` by default, `xproto` for the pipeline shell,
+/// `disconnect` (no SQL) for the cursor-leak shell.
+fn step_of_composed(scenario: &str, seq: u64, c: &compose::Composed) -> StepRecord {
+    StepRecord {
+        scenario: scenario.to_string(),
+        seq,
+        session: "s1".into(),
+        role: "superuser".into(),
+        kind: c.kind.clone(),
+        sql: if c.kind == StepKind::Disconnect { None } else { Some(c.sql.clone()) },
+        xproto: c.xproto.clone(),
+        productions: c.productions.clone(),
+        targets: Vec::new(),
+        ordered: c.ordered,
         expect_c: None,
         bracket: None,
         recipe: None,
@@ -501,23 +530,20 @@ fn live(a: &SmokeArgs, out: &Path, ledger: Ledger) -> Result<(), String> {
     let stmts = generate(a)?;
     let stream: Vec<(String, Vec<String>, Ordered)> =
         stmts.iter().map(|s| (s.sql.clone(), s.productions.clone(), ordered_of(&s.productions))).collect();
+    let shell_ctx = compose::ShellCtx::from_catalog(&FixtureCatalog.load_catalog()?);
     let composed = if a.compose > 0 {
         // A seed-derived stream distinct from the generator's so the
         // wrap decisions never perturb the generated statements.
         let mut rng = Rng::new(a.seed ^ 0x636f_6d70_6f73_6521);
-        compose::compose(&stream, a.compose, &a.compose_templates, &mut rng)
+        compose::compose(&stream, a.compose, &a.compose_templates, &shell_ctx, &mut rng)
     } else {
-        compose::compose(&stream, 0, &[], &mut Rng::new(0))
+        compose::compose(&stream, 0, &[], &shell_ctx, &mut Rng::new(0))
     };
     let wrapped = composed.iter().filter(|c| c.productions.iter().any(|p| p.starts_with("compose:"))).count();
     if a.compose > 0 {
         println!("sitediff smoke: --compose {}/1000: {} generated statements -> {} steps ({} composed)", a.compose, stmts.len(), composed.len(), wrapped);
     }
-    let steps: Vec<StepRecord> = composed
-        .iter()
-        .enumerate()
-        .map(|(i, c)| step_of(&scenario, i as u64 + 1, &c.sql, c.productions.clone(), c.ordered))
-        .collect();
+    let steps: Vec<StepRecord> = composed.iter().enumerate().map(|(i, c)| step_of_composed(&scenario, i as u64 + 1, c)).collect();
 
     let rig_a = SideRig::new(Side::A, &cfg, ClientObserver::connector(opts_a, None), None);
     let rig_b = SideRig::new(Side::B, &cfg, ClientObserver::connector(opts_b, srv_b), None);
