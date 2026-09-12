@@ -149,7 +149,7 @@ where
     // C dispatches index_build_range_scan through rd_tableam; this scan is
     // heapam's. A columnar table's rows live outside its (empty) main fork, so
     // scanning it here would record a valid, empty index (UNIQUE unenforced).
-    if heap_relation.rd_rel.relam != tableam_vocab::HEAP_TABLE_AM_OID {
+    if tableam_vocab::TableAm::of(heap_relation) != Some(tableam_vocab::TableAm::Heap) {
         return Err(Box::new(
             types_error::PgError::error(format!(
                 "cannot build an index on table \"{}\": its table access method is not supported by the index build scan",

@@ -167,7 +167,7 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
         ));
     }
 
-    if rel.rd_rel.relam != tableam_vocab::HEAP_TABLE_AM_OID {
+    if tableam_vocab::TableAm::of(&rel) != Some(tableam_vocab::TableAm::Heap) {
         return Err(Box::new(
             PgError::error("only heap AM is supported")
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
