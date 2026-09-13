@@ -217,6 +217,16 @@ mod audit_b148 {
     }
 
     #[test]
+    fn destroy_releases_batch_context_tuples() {
+        let Rig { mut estate, table: mut t, .. } = rig(8192);
+        let id = t.batch_cxt;
+        let before = estate.aux_mcx(id).context().used();
+        t.destroy(&mut estate).expect("destroy");
+        let after = estate.aux_mcx(id).context().used();
+        assert!(after < before, "batch context kept {after} of {before} bytes after destroy");
+    }
+
+    #[test]
     fn increase_num_buckets_walk_is_cancellable() {
         let Rig { estate, table: mut t, .. } = rig(2048);
         let mcx = estate.es_query_cxt;

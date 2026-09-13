@@ -102,6 +102,7 @@ pub(crate) struct SqlFnEntryState<'mcx> {
     pub prokind: i8,
     pub rettupdesc: Option<Rc<TupleDescData<'mcx>>>,
     pub num_queries: usize,
+    pub raw_source: Option<PgVec<'mcx, types_nodes::rawnodes::RawStmt<'mcx>>>,
     pub plansources: RefCell<PgVec<'mcx, plancache::CachedPlanSourceHandle>>,
 }
 
@@ -471,14 +472,14 @@ fn compile_entry(
             let rettupdesc = resolved.result_tuple_desc.map(Rc::new);
             let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(rettype)?;
             let scratch = MemoryContext::new("sqlfn count");
-            let num_queries = match row.prosqlbody.as_ref() {
+            let (num_queries, raw_source) = match row.prosqlbody.as_ref() {
                 Some(body) => {
                     let qs = sqlbody_queries(scratch.mcx(), body.as_str())?;
-                    qs.len()
+                    (qs.len(), None)
                 }
                 None => {
-                    let raws = pg_parse_query(scratch.mcx(), row.prosrc.as_str())?;
-                    raws.len()
+                    let raws = pg_parse_query(mcx, row.prosrc.as_str())?;
+                    (raws.len(), Some(raws))
                 }
             };
             if num_queries == 0 && rettype != VOIDOID {
@@ -509,6 +510,7 @@ fn compile_entry(
                 prokind: row.prokind,
                 rettupdesc,
                 num_queries,
+                raw_source,
                 plansources: RefCell::new(PgVec::new_in(mcx)),
             })
         })();
@@ -625,12 +627,7 @@ fn build_query_plansource(
                 return Err(e);
             }
         } else {
-            let scratch = MemoryContext::new("sqlfn parse");
-            let raw_list = parser_seams::raw_parser::call(
-                scratch.mcx(),
-                s.src.as_str(),
-                parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-            )?;
+            let raw_list = s.raw_source.as_ref().expect("raw source retained at compile");
             let raw = raw_list.get(qindex).expect("counted at compile");
             let stmt = raw.stmt.expect("RawStmt has a stmt");
             let tag = utility_seams::create_command_tag::call(stmt);

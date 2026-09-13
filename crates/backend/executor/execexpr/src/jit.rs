@@ -947,6 +947,7 @@ mod emit {
                 | Step::HashDatumNext32Strict { jumpdone, .. } => t[*jumpdone as usize] = true,
                 Step::AggStrictInputCheck { jumpnull, .. }
                 | Step::AggStrictInputCheck1 { jumpnull, .. }
+                | Step::AggPergroupNullcheck { jumpnull, .. }
                 | Step::AggStrictDeserialize { jumpnull, .. } => t[*jumpnull as usize] = true,
                 Step::RowCompareStep {
                     jumpnull, jumpdone, ..

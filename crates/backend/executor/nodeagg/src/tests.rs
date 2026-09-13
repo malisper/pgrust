@@ -2088,6 +2088,67 @@ fn hashed_grouping_sets_two_tables() {
     );
 }
 
+// A chgParam rescan (exec_rescan_agg_chg) resets aggcontext: the prior
+// scan's hash entries and transvalues do not accumulate across rescans.
+#[test]
+fn hashed_grouping_sets_rescan_resets_aggcontext() {
+    install_seams();
+    let agg = mk_hashed_gsets_agg(leaked_mcx());
+    let rows: &'static [(i32, i32)] =
+        Box::leak((0..3000).map(|i| (i, i * 10)).collect::<Vec<_>>().into_boxed_slice());
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = two_int4_desc(mcx);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(
+            agg,
+            estate,
+            0,
+            three_col_result_desc(leaked_mcx()),
+            Some(two_int4_desc(leaked_mcx())),
+        )
+        .unwrap();
+        fn drain<'mcx>(
+            state: &mut crate::AggStateData<'mcx>,
+            estate: &mut EStateData<'mcx>,
+            outer_id: ExecSlotId,
+            rows: &'static [(i32, i32)],
+        ) -> Vec<GsRow> {
+            let mut got: Vec<GsRow> = Vec::new();
+            let mut feed = feeder2(outer_id, rows);
+            while let Some(slot_id) = exec_agg(state, estate, &mut feed).unwrap() {
+                let base = estate.slot_mut(slot_id).base();
+                got.push((
+                    (!base.tts_isnull[0]).then(|| base.tts_values[0].as_i32()),
+                    (!base.tts_isnull[1]).then(|| base.tts_values[1].as_i32()),
+                    base.tts_values[2].as_i64(),
+                    base.tts_values[3].as_i32(),
+                ));
+            }
+            got
+        }
+        let first = drain(&mut state, estate, outer_id, rows);
+        assert_eq!(first.len(), 6000);
+        // SAFETY: read of the once-allocated node between drives.
+        let retained = |state: &crate::AggStateData<'_>| unsafe { state.agg_node.as_ref() }
+            .aggcontext()
+            .context()
+            .subtree_allocated();
+        let retained1 = retained(&state);
+        assert!(retained1 > 0);
+        for _ in 0..3 {
+            crate::exec_rescan_agg_chg(&mut state, estate);
+            assert_eq!(drain(&mut state, estate, outer_id, rows), first);
+        }
+        assert_eq!(retained(&state), retained1);
+        crate::exec_end_agg(&mut state);
+    });
+}
+
 #[test]
 fn hashed_grouping_sets_empty_input() {
     install_seams();

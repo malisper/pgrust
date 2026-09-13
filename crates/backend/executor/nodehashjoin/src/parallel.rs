@@ -266,7 +266,7 @@ fn parallel_outer_get_tuple<'mcx, O: HashJoinOuter<'mcx>>(
     let curbatch = table.curbatch;
     let ecxt = node.ps_ExprContext;
     if curbatch == 0 && table.nbatch == 1 {
-        if let Some(slot_id) = outer.exec_proc(estate)? {
+        while let Some(slot_id) = outer.exec_proc(estate)? {
             {
                 let e = estate.ecxt_mut(ecxt);
                 e.reset();
@@ -275,19 +275,25 @@ fn parallel_outer_get_tuple<'mcx, O: HashJoinOuter<'mcx>>(
             let h = match outer.staged_hash() {
                 Some(h) => h,
                 None if node.outer_hash_expr.has_subplan() => {
-                    ::executils::exec_eval_expr_with_subplans_hashkey(
+                    let r = ::executils::exec_eval_expr_with_subplans_hashkey(
                         &mut node.outer_hash_expr,
                         estate,
                         ecxt,
                         slot_id,
-                    )?
-                    .value
-                    .as_u32()
+                    )?;
+                    if r.isnull {
+                        continue;
+                    }
+                    r.value.as_u32()
                 }
                 None => {
                     let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
                     let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
-                    exec_eval_expr(&mut node.outer_hash_expr, &mut slots)?.value.as_u32()
+                    let r = exec_eval_expr(&mut node.outer_hash_expr, &mut slots)?;
+                    if r.isnull {
+                        continue;
+                    }
+                    r.value.as_u32()
                 }
             };
             node.hj_OuterNotEmpty = true;
@@ -336,19 +342,25 @@ fn partition_outer<'mcx, O: HashJoinOuter<'mcx>>(
         let hashvalue = match outer.staged_hash() {
             Some(h) => h,
             None if node.outer_hash_expr.has_subplan() => {
-                ::executils::exec_eval_expr_with_subplans_hashkey(
+                let r = ::executils::exec_eval_expr_with_subplans_hashkey(
                     &mut node.outer_hash_expr,
                     estate,
                     ecxt,
                     slot_id,
-                )?
-                .value
-                .as_u32()
+                )?;
+                if r.isnull {
+                    continue;
+                }
+                r.value.as_u32()
             }
             None => {
                 let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
                 let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
-                exec_eval_expr(&mut node.outer_hash_expr, &mut slots)?.value.as_u32()
+                let r = exec_eval_expr(&mut node.outer_hash_expr, &mut slots)?;
+                if r.isnull {
+                    continue;
+                }
+                r.value.as_u32()
             }
         };
         let (ptr, len) = phj::slot_min_tuple_image(estate, slot_id, ecxt)?;

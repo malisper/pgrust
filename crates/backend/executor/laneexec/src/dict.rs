@@ -220,8 +220,8 @@ pub struct DictClause {
     konst: Vec<u8>,
     kernel: Option<LikeKernel>,
     ic: IcScratch,
-    /// ILIKE-only: satisfies texticlike's mcx parameter. The admitted paths
-    /// (ctype_is_c lower_into / single-byte SbIc) never allocate from it.
+    /// ILIKE/regex scratch (regex wchar conversion allocates here); reset
+    /// per dict epoch and per raw window.
     arena: Option<MemoryContext>,
     memo_epoch: Option<u64>,
     memo: Vec<bool>,
@@ -825,6 +825,9 @@ fn eval_raw_rows(
     nrows: u32,
     sv: &mut SelVec,
 ) -> PgResult<()> {
+    if let Some(a) = cl.arena.as_mut() {
+        a.reset();
+    }
     let values = soa.col_values(cl.col as usize);
     let isnull = soa.col_isnull(cl.col as usize);
     // Blob-wide contains (likeband; the strsearch parity note's measured-best
@@ -993,6 +996,47 @@ mod tests {
         let mut memo = Vec::new();
         // contig: the helper's blob IS one Vec allocation.
         fill_memo_contains_sweep(&f, &dict, true, negated, &mut memo).then_some(memo)
+    }
+
+    #[test]
+    fn raw_rows_reset_clause_arena() {
+        let arena = MemoryContext::new_bump("LaneDictPredContext");
+        let footprint = arena.used();
+        for _ in 0..4 {
+            arena
+                .mcx()
+                .alloc_uninit_bytes(core::alloc::Layout::from_size_align(1 << 20, 8).unwrap())
+                .unwrap();
+        }
+        let before = arena.used();
+        assert!(before > footprint);
+        let mut cl = DictClause {
+            col: 0,
+            op: DictPredOp::ILike,
+            collation: C_COLLATION_OID,
+            konst: b"s01".to_vec(),
+            kernel: Some(LikeKernel::Exact(b"s01".to_vec())),
+            ic: IcScratch::default(),
+            arena: Some(arena),
+            memo_epoch: None,
+            memo: Vec::new(),
+            range: None,
+            memo_tri: Vec::new(),
+            blob_logged: false,
+            sweep_logged: false,
+        };
+        let (blob, offs) = blob_of(&[b"s01", b"s02"]);
+        let cx = MemoryContext::new("raw_rows_test");
+        let mut soa = SoaBatch::new_in(cx.mcx(), 1);
+        soa.begin(2);
+        for (i, &o) in offs.iter().enumerate() {
+            soa.col_values_mut(0)[i] = Datum::from_usize(blob.as_ptr() as usize + o);
+            soa.col_isnull_mut(0)[i] = false;
+        }
+        let mut sv = SelVec::all(2);
+        eval_raw_rows(&mut cl, &soa, 2, &mut sv).unwrap();
+        assert!(cl.arena.as_ref().unwrap().used() < before);
+        assert!(sv.contains(0) && !sv.contains(1));
     }
 
     #[test]

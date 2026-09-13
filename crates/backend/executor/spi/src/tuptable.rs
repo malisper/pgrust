@@ -117,7 +117,17 @@ fn locate(h: TuptabHandle) -> Option<(usize, usize)> {
 /// Read access to a result table; panics on a stale handle (freed table).
 pub fn tuptable_with<R>(h: TuptabHandle, f: impl for<'mcx> FnOnce(&TuptabData<'mcx>) -> R) -> R {
     let (ci, ti) = locate(h).unwrap_or_else(|| panic!("SPI tuptable {h:?} is not live"));
-    SPI_STACK.with(|s| s.borrow()[ci].tuptables[ti].table.with(f))
+    // The callback may re-enter SPI (a nested SPI_connect from a datatype
+    // input function or PL call, as C permits), so the stack borrow ends
+    // before it runs: the table state lives in its own arena, address-stable
+    // until SPI_freetuptable drops the entry.
+    let data: *const () = SPI_STACK.with(|s| {
+        s.borrow()[ci].tuptables[ti].table.with(|d| d as *const TuptabData<'_> as *const ())
+    });
+    // SAFETY: only the owning connection's SPI_freetuptable / SPI_finish free
+    // the entry, neither reachable from a nested connection; the arena block
+    // never moves.
+    unsafe { f(&*(data as *const TuptabData<'static>)) }
 }
 
 pub fn SPI_freetuptable(h: TuptabHandle) -> PgResult<()> {

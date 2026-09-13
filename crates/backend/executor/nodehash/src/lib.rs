@@ -964,8 +964,9 @@ impl<'mcx> HashJoinTable<'mcx> {
         self.space_used = 0;
     }
 
-    /// `ExecHashTableDestroy`: batch 0 never has files.
-    pub fn destroy(&mut self) -> PgResult<()> {
+    /// `ExecHashTableDestroy`: batch 0 never has files; the batch context
+    /// (C's hashCxt) releases the tuples.
+    pub fn destroy(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         for i in 1..self.inner_batch_file.len() {
             if let Some(f) = self.inner_batch_file[i].take() {
                 f.close()?;
@@ -974,6 +975,7 @@ impl<'mcx> HashJoinTable<'mcx> {
                 f.close()?;
             }
         }
+        estate.reset_aux_context(self.batch_cxt);
         Ok(())
     }
 

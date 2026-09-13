@@ -516,7 +516,7 @@ pub fn exec_build_agg_trans<'mcx>(
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, PergroupMode::Fixed, agg_node, params, None)
+    build_agg_trans(mcx, specs, PergroupMode::Fixed, agg_node, params, None, false)
 }
 
 /// [`exec_build_agg_trans`] with SubPlan compile support wired (aggregated
@@ -528,7 +528,7 @@ pub fn exec_build_agg_trans_subplans<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, PergroupMode::Fixed, agg_node, params, sub)
+    build_agg_trans(mcx, specs, PergroupMode::Fixed, agg_node, params, sub, false)
 }
 
 /// Grouping-sets variant: args evaluated once per transno, one trans call
@@ -547,6 +547,7 @@ pub fn exec_build_agg_trans_gsets<'mcx>(
         agg_node,
         params,
         None,
+        false,
     )
 }
 
@@ -565,6 +566,7 @@ pub fn exec_build_agg_trans_gsets_subplans<'mcx>(
         agg_node,
         params,
         sub,
+        false,
     )
 }
 
@@ -579,6 +581,10 @@ enum PergroupMode<'a> {
     ),
 }
 
+/// C's dosort+dohash program (mixed phase 1, or every-set hashed grouping
+/// sets with no sorted bases): the hash cells are null-checked per set
+/// (EEOP_AGG_PLAIN_PERGROUP_NULLCHECK), so a set the row spilled from is
+/// skipped while the arguments and FILTER still evaluate once per row.
 pub fn exec_build_agg_trans_mixed<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
@@ -594,6 +600,27 @@ pub fn exec_build_agg_trans_mixed<'mcx>(
         agg_node,
         params,
         None,
+        true,
+    )
+}
+
+pub fn exec_build_agg_trans_mixed_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    set_bases: &[NonNull<AggPerGroup>],
+    cells: &[NonNull<NonNull<AggPerGroup>>],
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans(
+        mcx,
+        specs,
+        PergroupMode::Mixed(set_bases, cells),
+        agg_node,
+        params,
+        sub,
+        true,
     )
 }
 
@@ -614,6 +641,7 @@ pub fn exec_build_agg_trans_hashed<'mcx>(
         agg_node,
         params,
         None,
+        false,
     )
 }
 
@@ -634,6 +662,31 @@ pub fn exec_build_agg_trans_hashed_subplans<'mcx>(
         agg_node,
         params,
         sub,
+        false,
+    )
+}
+
+/// [`exec_build_agg_trans_hashed_subplans`] with C's nullcheck
+/// (hashagg_recompile_expressions in spill mode): a row whose group was
+/// spilled still evaluates its arguments and FILTER, then skips the
+/// transition.
+pub fn exec_build_agg_trans_hashed_nullcheck_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    base: NonNull<NonNull<AggPerGroup>>,
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans_masked(
+        mcx,
+        specs,
+        None,
+        PergroupMode::Indirect(base),
+        agg_node,
+        params,
+        sub,
+        true,
     )
 }
 
@@ -660,6 +713,7 @@ pub fn exec_build_agg_trans_hashed_masked<'mcx>(
         agg_node,
         params,
         sub,
+        false,
     )
 }
 
@@ -685,6 +739,7 @@ pub fn exec_build_agg_trans_plain_masked<'mcx>(
         agg_node,
         params,
         sub,
+        false,
     )
 }
 
@@ -718,8 +773,9 @@ fn build_agg_trans<'mcx>(
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
+    nullcheck: bool,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans_masked(mcx, specs, None, mode, agg_node, params, sub)
+    build_agg_trans_masked(mcx, specs, None, mode, agg_node, params, sub, nullcheck)
 }
 
 // `keep` = None compiles every spec (all pre-existing callers); Some(mask)
@@ -733,6 +789,7 @@ fn build_agg_trans_masked<'mcx>(
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
+    nullcheck: bool,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let kept = |transno: usize| keep.is_none_or(|k| k[transno]);
     let mut state = ExprState::new_boxed_in(mcx)?;
@@ -1021,6 +1078,7 @@ fn build_agg_trans_masked<'mcx>(
                 },
             )?;
         }
+        let mut nullchecks: Vec<usize> = Vec::new();
         match &mode {
             PergroupMode::Fixed => push_step(&mut state, mcx, fixed_step(spec.pergroup))?,
             PergroupMode::Sets(bases) => {
@@ -1032,6 +1090,14 @@ fn build_agg_trans_masked<'mcx>(
                 }
             }
             PergroupMode::Indirect(base) => {
+                if nullcheck {
+                    nullchecks.push(state.steps.len());
+                    push_step(
+                        &mut state,
+                        mcx,
+                        Step::AggPergroupNullcheck { cell: *base, jumpnull: u32::MAX },
+                    )?;
+                }
                 push_step(&mut state, mcx, indirect_step(*base))?;
             }
             PergroupMode::Mixed(bases, cells) => {
@@ -1041,11 +1107,25 @@ fn build_agg_trans_masked<'mcx>(
                     push_step(&mut state, mcx, fixed_step(pergroup))?;
                 }
                 for &cell in cells.iter() {
+                    if nullcheck {
+                        nullchecks.push(state.steps.len());
+                        push_step(
+                            &mut state,
+                            mcx,
+                            Step::AggPergroupNullcheck { cell, jumpnull: u32::MAX },
+                        )?;
+                    }
                     push_step(&mut state, mcx, indirect_step(cell))?;
                 }
             }
         }
         let target = state.steps.len() as u32;
+        for ix in nullchecks {
+            match &mut state.steps[ix] {
+                Step::AggPergroupNullcheck { jumpnull, .. } => *jumpnull = target,
+                _ => unreachable!(),
+            }
+        }
         if let Some(ix) = filter_jump {
             match &mut state.steps[ix] {
                 Step::JumpIfNotTrue { jumpdone, .. } => *jumpdone = target,
@@ -5631,6 +5711,7 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
             }
             Step::AggStrictInputCheck { jumpnull, .. }
             | Step::AggStrictInputCheck1 { jumpnull, .. }
+            | Step::AggPergroupNullcheck { jumpnull, .. }
             | Step::AggStrictDeserialize { jumpnull, .. } => {
                 assert!(
                     (*jumpnull as usize) < len,
@@ -5790,6 +5871,7 @@ fn for_each_jump_field_mut(step: &mut Step, mut f: impl FnMut(&mut u32)) {
         | Step::ReturningExprStep { jumpdone, .. } => f(jumpdone),
         Step::AggStrictInputCheck { jumpnull, .. }
         | Step::AggStrictInputCheck1 { jumpnull, .. }
+        | Step::AggPergroupNullcheck { jumpnull, .. }
         | Step::AggStrictDeserialize { jumpnull, .. } => f(jumpnull),
         Step::RowCompareStep {
             jumpnull, jumpdone, ..

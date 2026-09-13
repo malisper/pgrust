@@ -7,7 +7,7 @@ extern crate alloc;
 use alloc::rc::Rc;
 
 use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
-use ::executils::{CteShared, EStateData, ExecSlotId};
+use ::executils::{AuxCxtId, CteShared, EStateData, ExecSlotId};
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::types_nodes::list::NodeList;
@@ -24,6 +24,7 @@ pub struct CteScanState<'mcx> {
     cte_plan_id: i32,
     cte_param: i32,
     is_leader: bool,
+    copy_cxt: AuxCxtId,
 }
 
 impl<'mcx> ScanNode<'mcx> for CteScanState<'mcx> {
@@ -76,8 +77,9 @@ impl<'mcx> CteScanState<'mcx> {
         let mut eof_tuplestore = ts.ateof();
 
         if !eof_tuplestore {
+            let cmcx = self.fresh_copy_mcx(estate);
             let slot = estate.slot_mut(self.ss.ss_ScanTupleSlot);
-            if ts.gettupleslot(true, true, slot, mcx)? {
+            if ts.gettupleslot(true, true, slot, cmcx)? {
                 return Ok(true);
             }
             eof_tuplestore = true;
@@ -103,19 +105,33 @@ impl<'mcx> CteScanState<'mcx> {
             shared.fills += 1;
 
             // ExecCopySlot: output must survive other CteScans advancing.
+            let cmcx = self.fresh_copy_mcx(estate);
             let mtup = exectuples::exec_copy_slot_minimal_tuple(
                 estate.slot_mut(sub_slot),
                 mcx,
-                mcx,
+                cmcx,
                 0,
             )?;
             let scan = estate.slot_mut(self.ss.ss_ScanTupleSlot);
-            exectuples::exec_store_minimal_tuple_owned(scan, mcx, mtup);
+            exectuples::exec_store_minimal_tuple_owned(scan, cmcx, mtup);
             return Ok(true);
         }
 
         exectuples::exec_clear_tuple(estate.slot_mut(self.ss.ss_ScanTupleSlot), mcx);
         Ok(false)
+    }
+
+    // The scan slot's copy lives in a per-node context reset before each
+    // read (C's copyslot frees the previous owned tuple); the query
+    // context is bump, so the copies would otherwise persist to query end.
+    fn fresh_copy_mcx(&self, estate: &mut EStateData<'mcx>) -> Mcx<'mcx> {
+        let mcx = estate.es_query_cxt;
+        exectuples::exec_clear_tuple(estate.slot_mut(self.ss.ss_ScanTupleSlot), mcx);
+        estate.reset_aux_context(self.copy_cxt);
+        let cxt: *const ::mcx::MemoryContext = estate.aux_mcx(self.copy_cxt).context();
+        // SAFETY: aux contexts are boxed in es_query_cxt (address-stable) and
+        // live as long as the estate, which outlives every slot for 'mcx.
+        unsafe { (*cxt).mcx() }
     }
 }
 
@@ -213,6 +229,7 @@ pub fn exec_init_cte_scan<'mcx>(
         cte_plan_id: node.ctePlanId,
         cte_param: node.cteParam,
         is_leader,
+        copy_cxt: estate.create_aux_context("CteScanCopyContext"),
     })
 }
 
@@ -274,5 +291,6 @@ pub fn exec_rescan_cte_scan_chg<'mcx>(
 }
 
 mcx::forget_safe_struct!(
-    CteScanState<'_> { ss, readptr, cte_plan_id, cte_param, is_leader },
+    // copy_cxt: an index into es_aux_contexts (no drop glue).
+    CteScanState<'_> { ss, readptr, cte_plan_id, cte_param, is_leader; copy_cxt },
 );

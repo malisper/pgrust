@@ -229,24 +229,29 @@ pub fn exec_init_memoize<'mcx>(
         key_attrs.push(KeyAttr { byval: att.attbyval, len: att.attlen });
     }
 
+    let mut hashfns: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut eqfns: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut cols: PgVec<'mcx, i16> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
+    for (i, &hashop) in node.hashOperators.iter().enumerate() {
+        let Some((left_hashfn, _)) = lsyscache::get_op_hash_functions(hashop)? else {
+            return Err(no_hash_function(hashop));
+        };
+        hashfns.push(left_hashfn);
+        eqfns.push(lsyscache::get_opcode(hashop)?);
+        cols.push(i as i16 + 1);
+    }
+    // C ExecInitMemoize (nodeMemoize.c:1027): ExecBuildParamSetEqual over
+    // the hash-key descriptor, compared in forward column order — built in
+    // binary mode too, so its EXECUTE-ACL checks fire for every probe kernel.
+    let eq_expr =
+        execexpr::exec_build_param_set_equal(mcx, &hashkeydesc, &eqfns, node.collations)?;
     let mut kernel = ProbeKernel::Expr;
-    let (hash_expr, eq_expr) = if node.binary_mode {
+    let hash_expr = if node.binary_mode {
         if nkeys == 1 && key_attrs[0].byval {
             kernel = ProbeKernel::ByvalImage;
         }
-        (None, None)
+        None
     } else {
-        let mut hashfns: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
-        let mut eqfns: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
-        let mut cols: PgVec<'mcx, i16> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
-        for (i, &hashop) in node.hashOperators.iter().enumerate() {
-            let Some((left_hashfn, _)) = lsyscache::get_op_hash_functions(hashop)? else {
-                return Err(no_hash_function(hashop));
-            };
-            hashfns.push(left_hashfn);
-            eqfns.push(lsyscache::get_opcode(hashop)?);
-            cols.push(i as i16 + 1);
-        }
         let hash_expr = execexpr::exec_build_hash32_from_attrs(
             mcx,
             &hashkeydesc,
@@ -255,17 +260,10 @@ pub fn exec_init_memoize<'mcx>(
             &cols,
             0,
         )?;
-        // C ExecInitMemoize (nodeMemoize.c:1027): ExecBuildParamSetEqual over
-        // the hash-key descriptor, compared in forward column order.
-        let eq_expr = execexpr::exec_build_param_set_equal(
-            mcx,
-            &hashkeydesc,
-            &eqfns,
-            node.collations,
-        )?;
         kernel = ProbeKernel::select(nkeys, &hashfns, &eqfns);
-        (Some(hash_expr), Some(eq_expr))
+        Some(hash_expr)
     };
+    let eq_expr = Some(eq_expr);
 
     Ok(MemoizeState {
         plan: node,

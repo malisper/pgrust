@@ -7,7 +7,8 @@ use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATUR
 use ::types_slot::SlotData;
 
 use crate::steps::{
-    fcinfo_mut, ExprState, FuncCall, Kernel, OutRef, SlotSrc, Step, EEO_FLAG_STILL_VALID_CHECKED,
+    agg_pergroup_null, fcinfo_mut, ExprState, FuncCall, Kernel, OutRef, SlotSrc, Step,
+    EEO_FLAG_STILL_VALID_CHECKED,
 };
 
 // C ExprContext's slot triple (execnodes/execUtils are the executor-state
@@ -1464,6 +1465,13 @@ fn run_program<'mcx>(
             Step::AggStrictInputCheck1 { arg, jumpnull } => {
                 // SAFETY: as AggStrictInputCheck.
                 if unsafe { arg.read().isnull } {
+                    sp = unsafe { base.add(*jumpnull as usize) };
+                    continue;
+                }
+            }
+            Step::AggPergroupNullcheck { cell, jumpnull } => {
+                // SAFETY: live once-allocated cell nodeAgg writes per row.
+                if unsafe { cell.read() } == agg_pergroup_null() {
                     sp = unsafe { base.add(*jumpnull as usize) };
                     continue;
                 }
@@ -5430,6 +5438,12 @@ pub(crate) fn exec_one_step<'mcx>(
                 return Ok(StepFlow::Jump(jumpnull));
             }
         }
+        Step::AggPergroupNullcheck { cell, jumpnull } => {
+            // SAFETY: live once-allocated cell nodeAgg writes per row.
+            if unsafe { cell.read() } == agg_pergroup_null() {
+                return Ok(StepFlow::Jump(jumpnull));
+            }
+        }
         Step::AggOrderedMark { flag } => {
             // SAFETY: nodeagg-owned once-allocated flag slot.
             unsafe { flag.write(true) };
@@ -5731,6 +5745,7 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::AggSetCurrent { .. }
         | Step::AggStrictInputCheck { .. }
         | Step::AggStrictInputCheck1 { .. }
+        | Step::AggPergroupNullcheck { .. }
         | Step::AggOrderedMark { .. }
         | Step::AggPlainTransByVal { .. }
         | Step::AggPlainTransStrictByVal { .. }

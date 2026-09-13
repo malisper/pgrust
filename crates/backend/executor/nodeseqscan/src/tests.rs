@@ -13,7 +13,7 @@ use ::types_core::{
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
-use ::types_nodes::primnodes::OpExpr;
+use ::types_nodes::primnodes::{CoercionForm, FuncExpr, OpExpr};
 use ::types_rel::{FormData_pg_class, LockInfoData, LockRelId, RelationData, RELKIND_RELATION};
 use ::types_snapshot::{SnapshotData, SnapshotType};
 use ::types_storage::bufpage::{ItemIdData, SizeOfPageHeaderData, LP_NORMAL};
@@ -161,6 +161,13 @@ fn install_seams() {
                     typbyval: true,
                     typalign: b'c' as i8,
                     typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
+                1700 => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: TYPALIGN_INT,
+                    typstorage: b'm' as i8,
                     typcollation: 0,
                 }),
                 _ => None,
@@ -518,6 +525,55 @@ fn mk_bloom<'mcx>(mcx: Mcx<'mcx>, admit: &[i32]) -> Rc<::nodehash::ProbeBloom<'m
         bf.insert(::hashfn::hash_bytes_uint32(*v as u32));
     }
     Rc::new(bf)
+}
+
+fn int4_numeric_tlist<'mcx>(mcx: Mcx<'mcx>) -> NodeList<'mcx> {
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let f = Node::mk(
+        mcx,
+        FuncExpr {
+            funcid: 1740,
+            funcresulttype: 1700,
+            funcretset: false,
+            funcvariadic: false,
+            funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+            funccollid: 0,
+            inputcollid: 0,
+            args: NodeList::make1(mcx, var).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let tle = Node::mk_target_entry(mcx, f, 1, None, false).unwrap();
+    NodeList::make1(mcx, tle).unwrap()
+}
+
+fn count_rows<'mcx>(node: &mut SeqScanState<'mcx>, estate: &mut EStateData<'mcx>) -> usize {
+    let mut n = 0;
+    while exec_seq_scan(node, estate).unwrap().is_some() {
+        n += 1;
+    }
+    n
+}
+
+#[test]
+fn batch_projection_results_live_in_per_tuple_memory() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_seqscan(1, int4_numeric_tlist(mcx), int4_qual(mcx, F_INT4GT, 0));
+        let page: Vec<i32> = (1..=200).collect();
+        let pages: Vec<&[i32]> = (0..20).map(|_| page.as_slice()).collect();
+        let (mut estate, mut state) = setup(mcx, &pages, &node);
+        state.batch_allowed = true;
+        assert_eq!(count_rows(&mut state, &mut estate), 4000);
+        assert_eq!(state.scan_batch, ScanBatchMode::On);
+        exec_rescan_seq_scan(&mut state, &mut estate).unwrap();
+        let before = mcx.context().used();
+        assert_eq!(count_rows(&mut state, &mut estate), 4000);
+        let growth = mcx.context().used() - before;
+        assert!(growth < 4000 * 4, "query context grew by {growth} bytes over the batch drive");
+        teardown(state, &mut estate);
+    });
 }
 
 #[test]

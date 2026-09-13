@@ -32,8 +32,10 @@ pub use compile::{
     exec_build_agg_projection_info_subplans, exec_build_agg_qual, exec_build_agg_qual_subplans,
     exec_build_agg_trans, exec_build_agg_trans_gsets, exec_build_agg_trans_gsets_subplans,
     exec_build_agg_trans_hashed,
-    exec_build_agg_trans_hashed_masked, exec_build_agg_trans_hashed_subplans,
-    exec_build_agg_trans_mixed, exec_build_agg_trans_plain_masked, exec_build_agg_trans_subplans,
+    exec_build_agg_trans_hashed_masked, exec_build_agg_trans_hashed_nullcheck_subplans,
+    exec_build_agg_trans_hashed_subplans, exec_build_agg_trans_mixed,
+    exec_build_agg_trans_mixed_subplans, exec_build_agg_trans_plain_masked,
+    exec_build_agg_trans_subplans,
     exec_build_grouping_equal, exec_build_hash32_from_attrs, exec_build_hash32_from_exprs,
     exec_build_merge_projection_info_subplans, exec_build_param_set_equal,
     exec_build_projection_info,
@@ -54,7 +56,7 @@ pub use interp::{
     QualOutcome, Resume, RetSlot, RetSlots, SuspendKind, Suspension,
 };
 pub use steps::{
-    agg_count_star_advance, qual_bitmap_cmp_const, qual_bitmap_contains, AggPerGroup, CmpOp,
+    agg_count_star_advance, agg_pergroup_null, qual_bitmap_cmp_const, qual_bitmap_contains, AggPerGroup, CmpOp,
     ExprState, GroupedColsCell, Kernel, OutRef, ProjArithOp, ProjKeyCall, ScanCmpClauses,
     ScanContainsClause, ScanProjCol, ScanProjCols, ScanProjExprKey, SlotSrc, Step,
     PROJ_KEY_MAX_ARGS, PROJ_KEY_MAX_CALLS, SCAN_CMP_MAX_CLAUSES, SCAN_PROJ_MAX_COLS,

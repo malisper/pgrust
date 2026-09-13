@@ -16,9 +16,9 @@ use std::rc::Rc;
 use ::datum::{Datum, NullableDatum};
 use ::types_fmgr::{AggStateNode, FmNodePtr, FmgrInfo, FunctionCallInfoBaseData, LocalFcinfo};
 use ::execexpr::{
-    exec_build_agg_projection_info_subplans, exec_build_agg_qual_subplans, exec_eval_expr,
-    exec_project, exec_qual, AggBind,
-    AggOrderedSpec, AggPerGroup, AggTransSpec, EvalSlots, ExprState,
+    agg_pergroup_null, exec_build_agg_projection_info_subplans, exec_build_agg_qual_subplans,
+    exec_eval_expr, exec_project, exec_qual, AggBind, AggOrderedSpec, AggPerGroup, AggTransSpec,
+    EvalSlots, ExprState,
 };
 use ::tuplesort::{Tuplesort, TUPLESORT_NONE};
 use ::execgrouping::TupleHashTable;
@@ -68,6 +68,9 @@ pub struct AggStateData<'mcx> {
     pub ps_ResultTupleSlot: ExecSlotId,
     proj: PgBox<'mcx, ExprState<'mcx>>,
     evaltrans: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    // C hashagg_recompile_expressions(nullcheck=true): the AGG_HASHED program
+    // a spilled row runs (arguments and FILTER evaluate, the transition skips).
+    evaltrans_spill: Option<PgBox<'mcx, ExprState<'mcx>>>,
     peragg: PgVec<'mcx, PerAggData<'mcx>>,
     trans_init: PgVec<'mcx, NullableDatum>,
     trans_typ: PgVec<'mcx, TransTyp>,
@@ -1457,6 +1460,7 @@ pub fn exec_init_agg<'mcx>(
     } else {
         None
     };
+    let mut evaltrans_spill = None;
     let (mut evaltrans, perhash, persort, gs) = if has_grouping_sets {
         let gs = gsets::init_grouping_sets(
             node, estate, outer_desc, &specs, numtrans, fm_agg_node, params, tmpcontext,
@@ -1484,6 +1488,16 @@ pub fn exec_init_agg<'mcx>(
                 env,
             )
         })?;
+        evaltrans_spill = Some(::executils::with_subplan_compile_env(estate, |env| {
+            ::execexpr::exec_build_agg_trans_hashed_nullcheck_subplans(
+                mcx,
+                &specs,
+                ph.pergroup_cell,
+                fm_agg_node,
+                params,
+                env,
+            )
+        })?);
         (Some(evaltrans), Some(ph), None, None)
     } else {
         let mut persort = if node.aggstrategy == AGG_SORTED {
@@ -1509,7 +1523,7 @@ pub fn exec_init_agg<'mcx>(
     // C invokes transfns in the tmpcontext per-tuple memory; by-ref call
     // results ride the armed result mcx there, reset per tuple (phase
     // programs are armed inside init_grouping_sets).
-    if let Some(et) = evaltrans.as_mut() {
+    for et in evaltrans.iter_mut().chain(evaltrans_spill.iter_mut()) {
         // SAFETY: the tmpcontext ExprContext outlives the program (same estate).
         unsafe { et.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
     }
@@ -1587,6 +1601,7 @@ pub fn exec_init_agg<'mcx>(
         ps_ResultTupleSlot,
         proj,
         evaltrans,
+        evaltrans_spill,
         peragg,
         trans_init,
         trans_typ,
@@ -3895,12 +3910,14 @@ fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
             }
             let outer_id = src.outer_slot();
             estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
-            if lookup_hash_entry(node, estate, outer_id)? {
-                let outer_slot = estate.slot_mut(outer_id);
-                let mut slots =
-                    EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-                exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
-            }
+            let et = if lookup_hash_entry(node, estate, outer_id)? {
+                node.evaltrans.as_mut().unwrap()
+            } else {
+                node.evaltrans_spill.as_mut().unwrap()
+            };
+            let outer_slot = estate.slot_mut(outer_id);
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+            exec_eval_expr(et, &mut slots)?;
             estate.reset_expr_context(node.tmpcontext);
             Ok(())
         })?;
@@ -3964,11 +3981,14 @@ pub fn agg_hash_build_accept<'mcx>(
 ) -> PgResult<()> {
     debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
     estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
-    if lookup_hash_entry(node, estate, outer_id)? {
-        let outer_slot = estate.slot_mut(outer_id);
-        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-        exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
-    }
+    let et = if lookup_hash_entry(node, estate, outer_id)? {
+        node.evaltrans.as_mut().unwrap()
+    } else {
+        node.evaltrans_spill.as_mut().unwrap()
+    };
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+    exec_eval_expr(et, &mut slots)?;
     estate.reset_expr_context(node.tmpcontext);
     Ok(())
 }
@@ -5289,15 +5309,17 @@ where
 {
     while let Some(outer_id) = fetch_outer(estate)? {
         estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
-        if lookup_hash_entry(node, estate, outer_id)? {
-            let et = node.evaltrans.as_mut().unwrap();
-            if trans_needs_driver(et) {
-                ::executils::exec_eval_expr_with_subplans(et, estate, node.tmpcontext)?;
-            } else {
-                let outer_slot = estate.slot_mut(outer_id);
-                let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-                exec_eval_expr(et, &mut slots)?;
-            }
+        let et = if lookup_hash_entry(node, estate, outer_id)? {
+            node.evaltrans.as_mut().unwrap()
+        } else {
+            node.evaltrans_spill.as_mut().unwrap()
+        };
+        if trans_needs_driver(et) {
+            ::executils::exec_eval_expr_with_subplans(et, estate, node.tmpcontext)?;
+        } else {
+            let outer_slot = estate.slot_mut(outer_id);
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+            exec_eval_expr(et, &mut slots)?;
         }
         estate.reset_expr_context(node.tmpcontext);
     }
@@ -5398,6 +5420,8 @@ fn lookup_hash_entry<'mcx>(
     let (ix, isnew) =
         ph.hashtable.lookup(&mut ph.hashslot, hash, use_table.then_some(table_mcx), mcx)?;
     let Some(ix) = ix else {
+        // SAFETY: once-allocated cell; only the null-checked spill program reads it.
+        unsafe { ph.pergroup_cell.write(agg_pergroup_null()) };
         hashagg_spill_tuple(&mut ph.spill, Some(outer_slot), hash, mcx)?;
         return Ok(false);
     };
@@ -5532,7 +5556,7 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
         pa.finalfn = None;
     }
     node.proj.release_frames();
-    if let Some(et) = node.evaltrans.as_mut() {
+    for et in node.evaltrans.iter_mut().chain(node.evaltrans_spill.iter_mut()) {
         et.release_frames();
     }
     node.ps_ResultTupleDesc = None;
@@ -5565,6 +5589,9 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
     }
     if let Some(gs) = node.gsets.as_mut() {
         gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        // SAFETY: sole access path to the node during the reset (C's
+        // ReScanExprContext(aggcontexts)+MemoryContextReset(hash_tablecxt)).
+        unsafe { node.agg_node.as_mut() }.reset();
         return;
     }
     if let Some(ph) = node.perhash.as_mut() {
@@ -5609,6 +5636,8 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
             return false;
         }
         gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        // SAFETY: sole access path to the node during the reset.
+        unsafe { node.agg_node.as_mut() }.reset();
         return true;
     }
     if let Some(ph) = node.perhash.as_mut() {
@@ -5712,6 +5741,6 @@ mcx::forget_safe_struct!(
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
         force_distinct_set, group_eq_representational, trans_order_insensitive,
         instr_idx, hash_build_combined;
-        ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
+        ps_ResultTupleDesc, proj, evaltrans, evaltrans_spill, perhash, merge, persort, gsets,
         pertrans_sort, qual },
 );

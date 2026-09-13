@@ -2055,6 +2055,16 @@ impl<'a> Estate<'a> {
         maxtuples: i64,
         must_return_tuples: bool,
     ) -> PgResult<i32> {
+        self.exec_spi_plan_dest(expr, maxtuples, must_return_tuples, None)
+    }
+
+    fn exec_spi_plan_dest(
+        &mut self,
+        expr: &PlExpr,
+        maxtuples: i64,
+        must_return_tuples: bool,
+        dest: Option<&mut tcop_dest::DestReceiver<'_>>,
+    ) -> PgResult<i32> {
         let (plan, paramnos, argtypes) = EXPR_PLANS.with(|t| {
             let t = t.borrow();
             let e = t.get(&expr.expr_id).expect("plan ensured");
@@ -2071,6 +2081,7 @@ impl<'a> Estate<'a> {
             false,
             must_return_tuples,
             maxtuples,
+            dest,
         )
         .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
         self.eval_processed = spi::SPI_processed();
@@ -4548,6 +4559,7 @@ impl<'a> Estate<'a> {
             true,
             false,
             0,
+            None,
         )
         .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
         if rc < 0 {
@@ -4864,6 +4876,7 @@ impl<'a> Estate<'a> {
             &pnulls,
             self.readonly_func,
             false,
+            None,
         )
         .map_err(|e| spi_ctx_err(e, &querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT))?;
 
@@ -5145,103 +5158,78 @@ impl<'a> Estate<'a> {
         if self.tuple_store.is_none() {
             self.init_tuple_store()?;
         }
-        let dst = RecDesc::from_tupdesc(self.tuple_store_desc.as_ref().expect("initialized"));
-
-        let ctx_query;
-        let ctx_mode;
-        let rc = if let Some(query) = query {
-            ctx_query = query.query.clone();
-            ctx_mode = query.parse_mode;
-            self.ensure_plan(query, CURSOR_OPT_PARALLEL_OK)?;
-            self.exec_spi_plan(query, 0, true)?
-        } else {
-            let dynquery = dynquery.expect("RETURN QUERY has a query");
-            let (qv, isnull, restype, _m) = self.exec_eval_expr(dynquery)?;
-            if isnull {
-                return Err(exec_err(
-                    types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
-                    "query string argument of EXECUTE is null".to_string(),
-                ));
+        let store = self.tuple_store.take().expect("initialized");
+        let tcount = store.tuple_count();
+        let tstore = tuplestore::hold::register(store);
+        let stmt_ctx = MemoryContext::new("PLpgSQL RETURN QUERY receiver");
+        let target = tupdesc::CreateTupleDescCopy(
+            stmt_ctx.mcx(),
+            self.tuple_store_desc.as_ref().expect("initialized"),
+        )
+        .map(std::rc::Rc::new);
+        let rc = match target {
+            Err(e) => Err(e),
+            Ok(target) => {
+                let mut treceiver =
+                    tcop_dest::CreateDestReceiver(types_dest::CommandDest::Tuplestore);
+                tcop_dest::SetTuplestoreDestReceiverParams(
+                    &mut treceiver,
+                    tstore,
+                    false,
+                    Some(target),
+                    Some("structure of query does not match function result type"),
+                );
+                self.run_return_query(query, dynquery, params, &mut treceiver)
             }
-            let querystr = self.convert_value_to_string(qv, restype)?;
-            self.exec_eval_cleanup();
-            ctx_query = querystr.clone();
-            ctx_mode = parser_seams::RawParseMode::RAW_PARSE_DEFAULT;
-            let (ptypes, pvalues, pnulls) = self.exec_eval_using_params(params)?;
-            let _frame =
-                FrameGuard::push_spi(&querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT);
-            // must_return_tuples = true (pl_exec.c:3626): the SPI level
-            // describes its own errors — "empty query does not return
-            // tuples" is raised before its callback names a query, so it
-            // carries no SQL-statement line (spi.c:2494 vs 2509).
-            spi::SPI_execute_extended(
-                &querystr,
-                &ptypes,
-                &pvalues,
-                &pnulls,
-                self.readonly_func,
-                true,
-            )?
         };
-
-        // must_return_tuples contract (spi.c:2570).
-        let Some(tuptab) = spi::SPI_tuptable() else {
-            let tag = match rc {
-                spi::SPI_OK_INSERT => "INSERT",
-                spi::SPI_OK_UPDATE => "UPDATE",
-                spi::SPI_OK_DELETE => "DELETE",
-                spi::SPI_OK_MERGE => "MERGE",
-                spi::SPI_OK_SELINTO => "SELECT INTO",
-                spi::SPI_OK_UTILITY => "UTILITY",
-                _ => "SQL",
-            };
-            // C raises this inside _SPI_execute_plan under
-            // _SPI_error_callback (spi.c:2552-2570): the query rides along
-            // as an "SQL statement" context line.
-            return Err(spi_ctx_err(
-                exec_err(
-                    types_error::ERRCODE_SYNTAX_ERROR,
-                    format!("{tag} query does not return tuples"),
-                ),
-                &ctx_query,
-                ctx_mode,
-            ));
-        };
-
-        let (srcdesc, _src) = self.rec_desc_of(tuptab)?;
-        let n = spi::SPI_processed() as usize;
-        let natts = srcdesc.types.len();
-        for i in 0..n {
-            let mut values = vec![Datum::null(); natts];
-            let mut nulls = vec![true; natts];
-            spi::tuptable_with(tuptab, |t| {
-                for f in 0..natts {
-                    let (v, isnull) = spi::SPI_getbinval(&t.vals[i], &t.tupdesc, (f + 1) as i32);
-                    values[f] = v;
-                    nulls[f] = isnull;
-                }
-            });
-            // C's mismatch fires inside the tuplestore DestReceiver, under
-            // the SPI statement context.
-            let (v, nn) = convert_values_by_position(
-                &srcdesc,
-                &values,
-                &nulls,
-                &dst,
-                "structure of query does not match function result type",
-            )
-            .map_err(|e| {
-                spi_ctx_err(e, &ctx_query, parser_seams::RawParseMode::RAW_PARSE_DEFAULT)
-            })?;
-            self.put_tuple_store_values(&v, &nn)?;
-        }
-        let _ = spi::SPI_freetuptable(tuptab);
+        self.tuple_store = Some(tuplestore::hold::take(tstore).expect("registered above"));
+        rc?;
         self.eval_tuptable = None;
         self.exec_eval_cleanup();
 
-        self.eval_processed = n as u64;
-        self.exec_set_found(n != 0);
+        let processed =
+            (self.tuple_store.as_ref().expect("initialized").tuple_count() - tcount) as u64;
+        self.eval_processed = processed;
+        self.exec_set_found(processed != 0);
         Ok(RC_OK)
+    }
+
+    fn run_return_query(
+        &mut self,
+        query: Option<&PlExpr>,
+        dynquery: Option<&PlExpr>,
+        params: &[PlExpr],
+        treceiver: &mut tcop_dest::DestReceiver<'_>,
+    ) -> PgResult<i32> {
+        if let Some(query) = query {
+            self.ensure_plan(query, CURSOR_OPT_PARALLEL_OK)?;
+            return self.exec_spi_plan_dest(query, 0, true, Some(treceiver));
+        }
+        let dynquery = dynquery.expect("RETURN QUERY has a query");
+        let (qv, isnull, restype, _m) = self.exec_eval_expr(dynquery)?;
+        if isnull {
+            return Err(exec_err(
+                types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                "query string argument of EXECUTE is null".to_string(),
+            ));
+        }
+        let querystr = self.convert_value_to_string(qv, restype)?;
+        self.exec_eval_cleanup();
+        let (ptypes, pvalues, pnulls) = self.exec_eval_using_params(params)?;
+        let _frame = FrameGuard::push_spi(&querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT);
+        // must_return_tuples = true (pl_exec.c:3626): the SPI level
+        // describes its own errors — "empty query does not return
+        // tuples" is raised before its callback names a query, so it
+        // carries no SQL-statement line (spi.c:2494 vs 2509).
+        spi::SPI_execute_extended(
+            &querystr,
+            &ptypes,
+            &pvalues,
+            &pnulls,
+            self.readonly_func,
+            true,
+            Some(treceiver),
+        )
     }
 
     // ------------------------------------------------------------------

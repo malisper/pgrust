@@ -439,6 +439,12 @@ pub enum Step {
         base: NonNull<NonNull<AggPerGroup>>,
         transno: u16,
     },
+    // C EEOP_AGG_PLAIN_PERGROUP_NULLCHECK: the cell holds agg_pergroup_null()
+    // for a hash set this row did not land in (spilled), so skip its transition.
+    AggPergroupNullcheck {
+        cell: NonNull<NonNull<AggPerGroup>>,
+        jumpnull: u32,
+    },
     HashDatumSetInitVal {
         init_value: Datum,
         out: OutRef,
@@ -951,6 +957,12 @@ pub struct AggPerGroup {
     pub trans_value: Datum,
     pub trans_value_is_null: bool,
     pub no_trans_value: bool,
+}
+
+/// C's NULL `hash_pergroup[setno]`: the cell value the nullcheck step skips on
+/// (also the cells' initial, never-dereferenced value).
+pub fn agg_pergroup_null() -> NonNull<AggPerGroup> {
+    NonNull::dangling()
 }
 
 ::mcx::forget_safe_nodrop!(AggPerGroup, CmpOp);

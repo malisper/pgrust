@@ -260,15 +260,14 @@ pub fn exec_init_hash_join<'mcx>(
     // C ExecInitHashJoin compiles the outer hash keys with the HashJoinState
     // parent, so SubPlans are legal in them.
     //
-    // keep_nulls: C passes HJ_FILL_OUTER — the probe hash aborts to NULL on
-    // strict-key NULLs so ExecHashJoinOuterGetTuple can skip un-matchable
-    // outer tuples before probing. pgrust keeps the outer expr non-strict
-    // (keep_nulls=true): a NULL-key probe hashes as 0, misses or fails the
-    // recheck, and joins/fills identically — results and EXPLAIN counters
-    // are unaffected, and the columnar probe covers (staged_hash /
-    // probe_hash_col byte-equality) stay total. ACCEPTED RESIDUAL, see
-    // docs/fuzzing/findings-hj-counters.md (re-open if a probe-side eval
-    // side effect or counter surface is found).
+    // keep_nulls: C passes HJ_FILL_OUTER — a strict NULL key aborts the
+    // probe hash and ExecHashJoinOuterGetTuple discards the tuple before any
+    // later key is evaluated. Plain-Var keys have no side effects, so they
+    // keep the total (non-aborting) expr the columnar probe covers
+    // (staged_hash / probe_hash_col byte-equality) require: a NULL-key probe
+    // hashes as 0 and misses or fails the recheck, joining identically (see
+    // docs/fuzzing/findings-hj-counters.md).
+    let keep_nulls = hj_fill_outer || node.hashkeys.iter().all(|k| k.as_var().is_some());
     let outer_hash_expr = ::executils::with_subplan_compile_env(estate, |env| {
         exec_build_hash32_from_exprs(
             mcx,
@@ -277,7 +276,7 @@ pub fn exec_init_hash_join<'mcx>(
             &outer_hashfns,
             &collations,
             &hash_strict,
-            true,
+            keep_nulls,
             0,
             params,
             env,
@@ -875,7 +874,7 @@ fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
         // First outer tuple may already have been fetched by the build
         // arm's empty-outer check and not used yet (C's
         // hj_FirstOuterTupleSlot consumption).
-        let slot_id = match node.hj_FirstOuterTupleSlot.take() {
+        let mut slot_id = match node.hj_FirstOuterTupleSlot.take() {
             Some(slot_id) => slot_id,
             None => {
                 let Some(slot_id) = outer.exec_proc(estate)? else {
@@ -884,24 +883,34 @@ fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
                 slot_id
             }
         };
-        {
-            let e = estate.ecxt_mut(ecxt);
-            e.reset();
-            e.ecxt_outertuple = Some(slot_id);
+        loop {
+            {
+                let e = estate.ecxt_mut(ecxt);
+                e.reset();
+                e.ecxt_outertuple = Some(slot_id);
+            }
+            let h = match outer.staged_hash() {
+                Some(h) => Some(h),
+                None => {
+                    let r = ::executils::exec_eval_expr_with_subplans_inner_slot(
+                        &mut node.outer_hash_expr,
+                        estate,
+                        ecxt,
+                        slot_id,
+                    )?;
+                    (!r.isnull).then(|| r.value.as_u32())
+                }
+            };
+            if let Some(h) = h {
+                node.hj_OuterNotEmpty = true;
+                return Ok(Some(h));
+            }
+            // A strict NULL key can never match: discard the tuple.
+            let Some(next) = outer.exec_proc(estate)? else {
+                return Ok(None);
+            };
+            slot_id = next;
         }
-        let h = match outer.staged_hash() {
-            Some(h) => h,
-            None => ::executils::exec_eval_expr_with_subplans_inner_slot(
-                &mut node.outer_hash_expr,
-                estate,
-                ecxt,
-                slot_id,
-            )?
-            .value
-            .as_u32(),
-        };
-        node.hj_OuterNotEmpty = true;
-        Ok(Some(h))
     } else {
         let table = hash_state.table.as_mut().expect("hash table built");
         // In outer-join cases the batch file can be empty.
@@ -1121,7 +1130,7 @@ pub fn exec_end_hash_join<'mcx>(
 ) -> PgResult<()> {
     accum_instrumentation(node, hash_state, estate);
     if let Some(table) = hash_state.table.as_mut() {
-        table.destroy()?;
+        table.destroy(estate)?;
         hash_state.table = None;
     }
     node.hashclauses = None;
@@ -1203,7 +1212,7 @@ pub fn exec_rescan_hash_join_chg<'mcx>(
     release_parallel_table(node, hash_state, estate)?;
     if hash_state.table.is_some() {
         accum_instrumentation(node, hash_state, estate);
-        hash_state.table.as_mut().expect("just checked").destroy()?;
+        hash_state.table.as_mut().expect("just checked").destroy(estate)?;
         hash_state.table = None;
     }
     end_hash_instr_loop(node, estate);
@@ -1284,7 +1293,7 @@ pub fn exec_rescan_hash_join<'mcx>(
                 .table
                 .as_mut()
                 .expect("just checked")
-                .destroy()?;
+                .destroy(estate)?;
             hash_state.table = None;
             node.hj_JoinState = HJ_BUILD_HASHTABLE;
             node.dense_on = false;
@@ -1610,14 +1619,18 @@ pub fn lane_probe_accept<'mcx>(
             if isnull { ::nodehash::DENSE_END } else { dense.head_for(v.as_i32()) };
     } else {
         let ecxt = node.ps_ExprContext;
-        let h = ::executils::exec_eval_expr_with_subplans_inner_slot(
+        let r = ::executils::exec_eval_expr_with_subplans_inner_slot(
             &mut node.outer_hash_expr,
             estate,
             ecxt,
             outer_slot,
-        )?
-        .value
-        .as_u32();
+        )?;
+        if r.isnull {
+            // ExecHashJoinOuterGetTuple discards strict-NULL-key outers.
+            node.hj_JoinState = HJ_NEED_NEW_OUTER;
+            return Ok(());
+        }
+        let h = r.value.as_u32();
         node.hj_CurHashValue = h;
         if let Some(f) = node.lane_filter.as_deref() {
             node.lane_flt_seen = node.lane_flt_seen.wrapping_add(1);

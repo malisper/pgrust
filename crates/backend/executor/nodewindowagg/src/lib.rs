@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::{
-    exec_build_grouping_equal, exec_eval_expr, exec_init_expr, exec_init_qual, exec_project,
+    exec_build_grouping_equal, exec_eval_expr, exec_init_qual, exec_project,
     exec_qual, exec_qual_outcome, expr_type, AggBind, AggPerGroup, AggTransSpec, EvalSlots,
     ExprState, QualOutcome, SuspendKind, WinBind,
 };
@@ -118,6 +118,8 @@ struct PerFuncData<'mcx> {
     argstates: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
     // WfKind::Generic only: C's perfuncstate->flinfo (fmgr_info_cxt).
     flinfo: Option<FmgrInfo>,
+    resulttype_len: i16,
+    resulttype_byval: bool,
 }
 
 // Int8TransTypeData (numeric.c): the {count,sum} pair C wraps in an int8[2]
@@ -996,18 +998,18 @@ pub fn exec_init_window_agg<'mcx>(
                 build_argstates(mcx, &wfunc.args, params, env)
             })?;
             for st in argstates.iter_mut() {
-                // C evaluates WinGetFuncArg* in the tmpcontext per-tuple
-                // memory; by-ref arg results (lead/lag default coercions)
-                // ride the armed result mcx.
-                // SAFETY: the tmpcontext ExprContext outlives the programs
-                // (same estate).
-                unsafe { st.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+                // eval_windowfunction (nodeWindowAgg.c:1040) runs WinGetFuncArg*
+                // under ps_ExprContext's per-tuple memory: by-ref arg results
+                // must outlive the tmpcontext resets of later functions.
+                // SAFETY: the ExprContext outlives the programs (same estate).
+                unsafe { st.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
             }
             if wfunc.args.len() >= 2 {
                 arg1_stable = arg_is_stable(wfunc.args.nth(1));
             }
             kind
         };
+        let (resulttype_len, resulttype_byval) = lsyscache::get_typlenbyval(wfunc.wintype)?;
         perfunc.push(PerFuncData {
             kind,
             wfuncno: wfuncno as u16,
@@ -1022,6 +1024,8 @@ pub fn exec_init_window_agg<'mcx>(
             arg1_stable,
             argstates,
             flinfo,
+            resulttype_len,
+            resulttype_byval,
         });
     }
     let numaggs = agg_specs_args.len();
@@ -1135,8 +1139,12 @@ pub fn exec_init_window_agg<'mcx>(
     let mut agg_saved: PgVec<'mcx, NullableDatum> = vec_with_capacity_in(mcx, numaggs)?;
     agg_saved.resize(numaggs, NullableDatum::null());
 
-    let start_offset_state = exec_init_expr(mcx, node.startOffset, params)?;
-    let end_offset_state = exec_init_expr(mcx, node.endOffset, params)?;
+    let start_offset_state = ::executils::with_subplan_compile_env(estate, |env| {
+        ::execexpr::exec_init_expr_subplans(mcx, node.startOffset, params, env)
+    })?;
+    let end_offset_state = ::executils::with_subplan_compile_env(estate, |env| {
+        ::execexpr::exec_init_expr_subplans(mcx, node.endOffset, params, env)
+    })?;
     let (start_offset_typlen, start_offset_byval) = match node.startOffset {
         Some(off) => lsyscache::get_typlenbyval(expr_type(off))?,
         None => (0, true),
@@ -3035,6 +3043,13 @@ impl<'mcx> WindowAggStateData<'mcx> {
             }
             WfKind::PlainAgg { .. } => unreachable!("plain aggs go through eval_windowaggregates"),
         };
+        let pf = &self.perfunc[perfunc_ix];
+        let result = if !pf.resulttype_byval && !result.isnull && self.perfunc.len() > 1 {
+            let mcx = estate.ecxt(self.ps_ExprContext).per_tuple_mcx();
+            NullableDatum::value(datum_copy(mcx, result.value, pf.resulttype_len)?)
+        } else {
+            result
+        };
         self.write_result(perfunc_ix, result);
         Ok(())
     }
@@ -3957,7 +3972,8 @@ mcx::forget_safe_nodrop!(WfKind, Int8TransState, WaStatus);
 // cleared).
 mcx::forget_safe_struct!(
     PerFuncData<'_> { kind, wfuncno, readptr, seekpos, markpos, rank, ntile,
-        rows_per_bucket, boundary, remainder, arg1_stable; argstates, flinfo },
+        rows_per_bucket, boundary, remainder, arg1_stable, resulttype_len, resulttype_byval;
+        argstates, flinfo },
     PerAggData<'_> { wfuncno, num_arguments, win_collation, fn_strict,
         has_inverse, num_final_args, resulttype_len, resulttype_byval,
         trans_typlen, trans_byval, agg_state, private_ctx, init_value,

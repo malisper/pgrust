@@ -162,11 +162,10 @@ pub fn RelationGetIndexExpressions<'mcx>(
     Ok(out)
 }
 
-/// RelationGetIndexPredicate (relcache.c), implicit-AND result, cached per C
-/// rd_indpred. DIVERGENCE: C canonicalize_quals here (relcache.c:5254-5257);
-/// this executor path skips it — ExecQual truth values are form-independent —
-/// and the planner copy (plancat.rs get_relation_info) canonicalizes
-/// independently.
+/// RelationGetIndexPredicate (relcache.c:5254-5257), implicit-AND result,
+/// cached per C rd_indpred. canonicalize_qual matters for evaluation too:
+/// it drops redundant OR branches that would otherwise raise (1/(a-1) under
+/// `(a = 1 AND ...) OR a = 1`).
 pub fn RelationGetIndexPredicate<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'_>,
@@ -182,7 +181,8 @@ pub fn RelationGetIndexPredicate<'mcx>(
     expr_cache_arm()?;
     let node = readfuncs::stringToNode(mcx, src.as_str())?;
     let folded = clauses::eval_const_expressions(mcx, node)?;
-    let out = clauses::make_ands_implicit(mcx, Some(folded))?;
+    let canon = planner_seams::canonicalize_qual::call(mcx, folded, false)?;
+    let out = clauses::make_ands_implicit(mcx, Some(canon))?;
     for e in out.iter() {
         nodes_core::fix_opfuncids(e)?;
     }

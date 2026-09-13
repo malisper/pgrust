@@ -1,0 +1,38 @@
+-- ExecInitMemoize builds cache_eq_expr (ExecBuildParamSetEqual) in binary
+-- mode too, so the hash operator's equality function must be executable
+-- even though binary mode compares key images and never calls it.
+CREATE TABLE memo_acl_outer(k int);
+INSERT INTO memo_acl_outer SELECT g % 10 FROM generate_series(1, 10000) g;
+ANALYZE memo_acl_outer;
+CREATE ROLE memo_acl_user;
+GRANT SELECT ON memo_acl_outer TO memo_acl_user;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM (SELECT o.k, s.x FROM memo_acl_outer o CROSS JOIN LATERAL (SELECT o.k + 1 AS x OFFSET 0) s) q;
+                QUERY PLAN                
+------------------------------------------
+ Aggregate
+   ->  Nested Loop
+         ->  Seq Scan on memo_acl_outer o
+         ->  Memoize
+               Cache Key: o.k
+               Cache Mode: binary
+               ->  Subquery Scan on s
+                     ->  Result
+(8 rows)
+
+REVOKE EXECUTE ON FUNCTION pg_catalog.int4eq(integer, integer) FROM PUBLIC;
+SET ROLE memo_acl_user;
+SELECT count(*) FROM (SELECT o.k, s.x FROM memo_acl_outer o CROSS JOIN LATERAL (SELECT o.k + 1 AS x OFFSET 0) s) q;
+ERROR:  permission denied for function int4eq
+RESET ROLE;
+GRANT EXECUTE ON FUNCTION pg_catalog.int4eq(integer, integer) TO PUBLIC;
+SET ROLE memo_acl_user;
+SELECT count(*) FROM (SELECT o.k, s.x FROM memo_acl_outer o CROSS JOIN LATERAL (SELECT o.k + 1 AS x OFFSET 0) s) q;
+ count 
+-------
+ 10000
+(1 row)
+
+RESET ROLE;
+DROP TABLE memo_acl_outer;
+DROP ROLE memo_acl_user;

@@ -138,7 +138,7 @@ impl LineSink {
                 (AggOp::CountStar, OutCol::I(_, v)) => v.push(cnt as i64),
                 (AggOp::CountDistinct, OutCol::I(_, v)) => v.push(distinct as i64),
                 (AggOp::Sum, OutCol::I(_, v)) => v.push(sums(i) as i64),
-                (AggOp::Avg, OutCol::R(_, v)) => v.push((sums(i) as i128, cnt as i64)),
+                (AggOp::Avg, OutCol::R(_, v)) => v.push((sums(i) as i64 as i128, cnt as i64)),
                 // [aggqual] distinct folds: the pair-dedup's first-seen
                 // sum + the distinct count (avg = dsum / distinct).
                 (AggOp::SumDistinct, OutCol::I(_, v)) => v.push(dsum),
@@ -657,7 +657,7 @@ pub fn dense_distinct(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
                 let k = (dk[r] as i64 - lo) as usize;
                 st.cnt[k] += 1;
                 for (a, &(_, w)) in sum_specs.iter().enumerate() {
-                    st.sums[a][k] += sx(scols[a][r], w) as u64;
+                    st.sums[a][k] = st.sums[a][k].wrapping_add(sx(scols[a][r], w) as u64);
                 }
                 if let Some(du) = dd {
                     let pair = ((k as u128) << 64) | du[r] as u128;
@@ -913,7 +913,7 @@ pub fn dense_distinct(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
         }
         for a in 0..nsum {
             for i in 0..dn {
-                sums[a][i] += p.1[a][i];
+                sums[a][i] = sums[a][i].wrapping_add(p.1[a][i]);
             }
         }
     }

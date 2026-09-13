@@ -57,6 +57,8 @@ resowner = { path = "../../backend/utils/resowner/resowner" }
 scan_fgram = { path = "../../backend/parser/scan_fgram" }
 snapmgr = { path = "../../backend/utils/time/snapmgr" }
 spi = { path = "../../backend/executor/spi" }
+tcop_dest = { path = "../../backend/tcop/dest" }
+types_dest = { path = "../../_support/types/types_dest" }
 types_core = { path = "../../_support/types/types_core" }
 types_error = { path = "../../_support/types/types_error" }
 types_nodes = { path = "../../_support/types/nodes" }

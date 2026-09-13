@@ -60,7 +60,7 @@ pub fn SPI_execute(src: &str, read_only: bool, tcount: i64) -> PgResult<i32> {
         tcount: tcount as u64,
         ..Default::default()
     };
-    let res = _SPI_execute_plan(&plan, &options, None, None, true);
+    let res = _SPI_execute_plan(&plan, &options, None, None, true, None);
     plan::drop_state_sources(&mut plan);
     let res = res?;
 
@@ -83,6 +83,7 @@ pub fn SPI_execute_extended(
     nulls: &[bool],
     read_only: bool,
     must_return_tuples: bool,
+    dest: Option<&mut DestReceiver<'_>>,
 ) -> PgResult<i32> {
     if argtypes.len() != values.len() || values.len() != nulls.len() {
         return Ok(SPI_ERROR_PARAM);
@@ -102,7 +103,7 @@ pub fn SPI_execute_extended(
         must_return_tuples,
         ..Default::default()
     };
-    let res = _SPI_execute_plan(&plan, &options, None, None, true);
+    let res = _SPI_execute_plan(&plan, &options, None, None, true, dest);
     if !params.is_null() {
         types_portal::params::free(params);
     }
@@ -120,7 +121,9 @@ pub fn SPI_execute_plan(
     read_only: bool,
     tcount: i64,
 ) -> PgResult<i32> {
-    execute_plan_common(ptr, values, nulls, false, read_only, false, false, tcount, None, None, true)
+    execute_plan_common(
+        ptr, values, nulls, false, read_only, false, false, tcount, None, None, true, None,
+    )
 }
 
 // SPI_execute_plan_with_paramlist (spi.c): C's entry for a PL-built
@@ -136,7 +139,9 @@ pub fn SPI_execute_plan_with_paramlist(
     read_only: bool,
     tcount: i64,
 ) -> PgResult<i32> {
-    execute_plan_common(ptr, values, nulls, true, read_only, false, false, tcount, None, None, true)
+    execute_plan_common(
+        ptr, values, nulls, true, read_only, false, false, tcount, None, None, true, None,
+    )
 }
 
 // SPI_execute_plan_extended's allow_nonatomic / must_return_tuples legs
@@ -153,6 +158,7 @@ pub fn SPI_execute_plan_extended(
     allow_nonatomic: bool,
     must_return_tuples: bool,
     tcount: i64,
+    dest: Option<&mut DestReceiver<'_>>,
 ) -> PgResult<i32> {
     execute_plan_common(
         ptr,
@@ -166,6 +172,7 @@ pub fn SPI_execute_plan_extended(
         None,
         None,
         true,
+        dest,
     )
 }
 
@@ -195,6 +202,7 @@ pub fn SPI_execute_snapshot(
         snapshot,
         crosscheck_snapshot,
         fire_triggers,
+        None,
     )
 }
 
@@ -211,6 +219,7 @@ fn execute_plan_common(
     snapshot: Option<Snapshot>,
     crosscheck_snapshot: Option<Snapshot>,
     fire_triggers: bool,
+    dest: Option<&mut DestReceiver<'_>>,
 ) -> PgResult<i32> {
     if ptr.is_null() || tcount < 0 {
         return Ok(SPI_ERROR_ARGUMENT);
@@ -234,7 +243,8 @@ fn execute_plan_common(
         must_return_tuples,
         tcount: tcount as u64,
     };
-    let res = _SPI_execute_plan(&state, &options, snapshot, crosscheck_snapshot, fire_triggers);
+    let res =
+        _SPI_execute_plan(&state, &options, snapshot, crosscheck_snapshot, fire_triggers, dest);
     if !params.is_null() {
         types_portal::params::free(params);
     }
@@ -297,6 +307,7 @@ pub(crate) fn _SPI_execute_plan(
     snapshot: Option<Snapshot>,
     crosscheck_snapshot: Option<Snapshot>,
     fire_triggers: bool,
+    mut dest: Option<&mut DestReceiver<'_>>,
 ) -> PgResult<i32> {
     let atomic = with_current(|c| c.atomic).expect("SPI: not connected");
     let allow_nonatomic = options.allow_nonatomic && !atomic && !xact::IsSubTransaction();
@@ -413,11 +424,15 @@ pub(crate) fn _SPI_execute_plan(
                     snapmgr::UpdateActiveSnapshotCommandId()?;
                 }
 
-                let mut dest = CreateDestReceiver(if can_set_tag {
+                let mut own_dest = CreateDestReceiver(if can_set_tag {
                     CommandDest::Spi
                 } else {
                     CommandDest::None
                 });
+                let dest: &mut DestReceiver<'_> = match dest.as_deref_mut() {
+                    Some(d) if can_set_tag => d,
+                    _ => &mut own_dest,
+                };
 
                 let res = if stmt.utilityStmt.is_none() {
                     let snap = snapmgr::ActiveSnapshotSet().then(snapmgr::GetActiveSnapshot);
@@ -433,7 +448,7 @@ pub(crate) fn _SPI_execute_plan(
                     )?;
                     let tcount = if can_set_tag { options.tcount } else { 0 };
                     let mut qd_owner = pquery::QueryDescOwner(qd);
-                    let r = _SPI_pquery(qd, stmt, &mut dest, fire_triggers, tcount)?;
+                    let r = _SPI_pquery(qd, stmt, dest, fire_triggers, tcount)?;
                     qd_owner.disarm();
                     execmain_seams::free_query_desc::call(qd);
                     r
@@ -457,7 +472,7 @@ pub(crate) fn _SPI_execute_plan(
                         context,
                         options.params,
                         crate::current_query_env(),
-                        &mut dest,
+                        dest,
                         Some(&mut qc),
                     )?;
 

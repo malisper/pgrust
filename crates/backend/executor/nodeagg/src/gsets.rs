@@ -13,8 +13,9 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use ::execexpr::{
-    exec_build_agg_trans_gsets_subplans, exec_build_agg_trans_hashed_subplans, exec_eval_expr,
-    exec_project, exec_qual, AggPerGroup, AggTransSpec, EvalSlots, ExprState, GroupedColsCell,
+    agg_pergroup_null, exec_build_agg_trans_gsets_subplans, exec_build_agg_trans_hashed_subplans,
+    exec_build_agg_trans_mixed_subplans, exec_eval_expr, exec_project, exec_qual, AggPerGroup,
+    AggTransSpec, EvalSlots, ExprState, GroupedColsCell,
 };
 use ::execgrouping::TupleHashTable;
 use ::executils::{EStateData, ExecSlotId};
@@ -108,6 +109,9 @@ pub(crate) struct HashSetsState<'mcx> {
     tmp_ctx: MemoryContext,
     table_filled: bool,
     current_set: usize,
+    // C phase 0's evaltrans (dohash, every set's cell null-checked): the
+    // AGG_HASHED-only form; a mixed agg's phase-1 program carries the cells.
+    hash_trans: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 // C HashAggBatch, grouping-sets form (setno-tagged).
@@ -239,8 +243,31 @@ pub(crate) fn init_grouping_sets<'mcx>(
             params,
         )?)
     };
+    let hash_cells: Vec<NonNull<NonNull<AggPerGroup>>> = hash
+        .as_ref()
+        .map(|h| h.perhash.iter().map(|ph| ph.cell).collect())
+        .unwrap_or_default();
+    if let Some(h) = hash.as_mut() {
+        if sorted_nodes.is_empty() {
+            h.hash_trans = Some(::executils::with_subplan_compile_env(estate, |env| {
+                exec_build_agg_trans_mixed_subplans(
+                    mcx,
+                    specs,
+                    &[],
+                    &hash_cells,
+                    fm_agg_node,
+                    params,
+                    env,
+                )
+            })?);
+        }
+    }
     let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
     if let Some(h) = hash.as_mut() {
+        if let Some(et) = h.hash_trans.as_mut() {
+            // SAFETY: the tmpcontext ExprContext outlives every phase program.
+            unsafe { et.arm_result_mcx_raw(per_tuple) };
+        }
         for ph in h.perhash.iter_mut() {
             // SAFETY: the tmpcontext ExprContext outlives every phase program.
             unsafe { ph.refill_trans.arm_result_mcx_raw(per_tuple) };
@@ -252,7 +279,7 @@ pub(crate) fn init_grouping_sets<'mcx>(
         }
     }
     let mut phases: PgVec<'mcx, PerPhaseData<'mcx>> = droppy_vec(mcx, numphases)?;
-    for (_phaseidx, &aggnode) in sorted_nodes.iter().enumerate() {
+    for (phaseidx, &aggnode) in sorted_nodes.iter().enumerate() {
         let sortnode = if core::ptr::eq(aggnode, node) {
             None
         } else {
@@ -314,20 +341,29 @@ pub(crate) fn init_grouping_sets<'mcx>(
 
         let nsets_eff = numsets.max(1);
         // C: phase one, and only phase one, of a mixed agg also advances the
-        // hash-set transitions (dosort + dohash), null-checking pergroup per
-        // set. Our compiled indirect trans steps don't null-check, so the
-        // hash side runs through each set's own program from
-        // lookup_hash_entries instead; this program stays sorted-only even
-        // for phase 0 of a mixed agg.
+        // hash-set transitions (dosort + dohash), null-checking each set's
+        // cell so a spilled set is skipped while the arguments evaluate once.
         let mut evaltrans = ::executils::with_subplan_compile_env(estate, |env| {
-            exec_build_agg_trans_gsets_subplans(
-                mcx,
-                specs,
-                &pergroup_bases[..nsets_eff],
-                fm_agg_node,
-                params,
-                env,
-            )
+            if phaseidx == 0 && !hash_cells.is_empty() {
+                exec_build_agg_trans_mixed_subplans(
+                    mcx,
+                    specs,
+                    &pergroup_bases[..nsets_eff],
+                    &hash_cells,
+                    fm_agg_node,
+                    params,
+                    env,
+                )
+            } else {
+                exec_build_agg_trans_gsets_subplans(
+                    mcx,
+                    specs,
+                    &pergroup_bases[..nsets_eff],
+                    fm_agg_node,
+                    params,
+                    env,
+                )
+            }
         })?;
         // By-ref transfn results ride the armed per-tuple mcx (lib.rs note).
         // SAFETY: the tmpcontext ExprContext outlives every phase program.
@@ -639,6 +675,7 @@ fn init_hash_sets<'mcx>(
         tmp_ctx,
         table_filled: false,
         current_set: 0,
+        hash_trans: None,
     })
 }
 
@@ -876,6 +913,8 @@ fn prepare_hash_set_entry<'mcx>(
     let (ix, isnew) =
         ph.hashtable.lookup(&mut ph.hashslot, hashval, use_table.then_some(table_mcx), mcx)?;
     let Some(ix) = ix else {
+        // SAFETY: once-allocated cell; the null-checked trans steps skip it.
+        unsafe { ph.cell.write(agg_pergroup_null()) };
         spill_tuple_gs(hash, setno, 0, Some(input_slot), hashval, mcx)?;
         return Ok(false);
     };
@@ -894,46 +933,22 @@ fn prepare_hash_set_entry<'mcx>(
     Ok(true)
 }
 
-fn eval_refill_from_slot<'mcx>(
-    hash: &mut HashSetsState<'mcx>,
-    setno: usize,
-    input_slot: &mut SlotData<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    tmpcontext: ::executils::EcxtId,
-) -> PgResult<()> {
-    let ph = &mut hash.perhash[setno];
-    if crate::trans_needs_driver(&ph.refill_trans) {
-        ::executils::exec_eval_expr_with_subplans_outer(
-            &mut ph.refill_trans,
-            input_slot,
-            estate,
-            tmpcontext,
-        )?;
-    } else {
-        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(input_slot) };
-        exec_eval_expr(&mut ph.refill_trans, &mut slots)?;
-    }
-    Ok(())
-}
-
+// lookup_hash_entries (nodeAgg.c): every set's cell is repointed at its
+// entry (or nulled when the row spills) before the caller's one combined
+// trans program advances them all.
 fn lookup_hash_entries_slot<'mcx>(
     hash: &mut HashSetsState<'mcx>,
     trans_init: &[::datum::NullableDatum],
     trans_typ: &[crate::TransTyp],
     agg_node: NonNull<::types_fmgr::AggStateNode>,
     input_slot: &mut SlotData<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    tmpcontext: ::executils::EcxtId,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     // SAFETY: read of the once-allocated node; no &mut is live to it.
     let table_mcx = unsafe { agg_node.as_ref() }.aggcontext();
     let numsets = hash.perhash.len();
     for setno in 0..numsets {
-        if prepare_hash_set_entry(hash, setno, trans_init, trans_typ, table_mcx, input_slot, mcx)?
-        {
-            eval_refill_from_slot(hash, setno, input_slot, estate, tmpcontext)?;
-        }
+        prepare_hash_set_entry(hash, setno, trans_init, trans_typ, table_mcx, input_slot, mcx)?;
     }
     Ok(())
 }
@@ -945,31 +960,10 @@ fn lookup_hash_entries_id<'mcx>(
     agg_node: NonNull<::types_fmgr::AggStateNode>,
     outer_id: ExecSlotId,
     estate: &mut EStateData<'mcx>,
-    tmpcontext: ::executils::EcxtId,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    // SAFETY: read of the once-allocated node; no &mut is live to it.
-    let table_mcx = unsafe { agg_node.as_ref() }.aggcontext();
-    let numsets = hash.perhash.len();
-    for setno in 0..numsets {
-        let go = {
-            let input_slot = estate.slot_mut(outer_id);
-            prepare_hash_set_entry(hash, setno, trans_init, trans_typ, table_mcx, input_slot, mcx)?
-        };
-        if !go {
-            continue;
-        }
-        let ph = &mut hash.perhash[setno];
-        if crate::trans_needs_driver(&ph.refill_trans) {
-            estate.ecxt_mut(tmpcontext).ecxt_outertuple = Some(outer_id);
-            ::executils::exec_eval_expr_with_subplans(&mut ph.refill_trans, estate, tmpcontext)?;
-        } else {
-            let input_slot = estate.slot_mut(outer_id);
-            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(input_slot) };
-            exec_eval_expr(&mut ph.refill_trans, &mut slots)?;
-        }
-    }
-    Ok(())
+    let input_slot = estate.slot_mut(outer_id);
+    lookup_hash_entries_slot(hash, trans_init, trans_typ, agg_node, input_slot, mcx)
 }
 
 // agg_refill_hash_table (nodeAgg.c), grouping-sets form: false = no more
@@ -1129,18 +1123,15 @@ where
             let AggStateData { gsets, trans_init, trans_typ, agg_node, .. } = node;
             let gs = gsets.as_mut().unwrap();
             let h = gs.hash.as_mut().expect("hashed grouping sets");
-            // lookup_hash_entries runs each hit set's own trans program
-            // inline; spilled sets simply don't advance this row.
-            lookup_hash_entries_id(
-                h,
-                trans_init,
-                trans_typ,
-                *agg_node,
-                outer_id,
-                estate,
-                tmpcontext,
-                mcx,
-            )?;
+            lookup_hash_entries_id(h, trans_init, trans_typ, *agg_node, outer_id, estate, mcx)?;
+            let et = h.hash_trans.as_mut().expect("AGG_HASHED grouping sets carry hash_trans");
+            if crate::trans_needs_driver(et) {
+                ::executils::exec_eval_expr_with_subplans(et, estate, tmpcontext)?;
+            } else {
+                let outer_slot = estate.slot_mut(outer_id);
+                let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+                exec_eval_expr(et, &mut slots)?;
+            }
         }
         estate.reset_expr_context(node.tmpcontext);
     }
@@ -1693,16 +1684,7 @@ where
         // tables in the same advance.
         if *mixed && *current_phase == 0 {
             let h = hash.as_mut().expect("mixed grouping sets");
-            lookup_hash_entries_slot(
-                h,
-                trans_init,
-                trans_typ,
-                *agg_node,
-                first_slot,
-                estate,
-                tmpcontext,
-                mcx,
-            )?;
+            lookup_hash_entries_slot(h, trans_init, trans_typ, *agg_node, first_slot, mcx)?;
         }
         if crate::trans_needs_driver(&phases[*current_phase].evaltrans) {
             ::executils::exec_eval_expr_with_subplans_outer(
@@ -1807,16 +1789,7 @@ where
                     let GroupingSetsState { phases, current_phase, hash, mixed, .. } = gs;
                     if *mixed && *current_phase == 0 {
                         let h = hash.as_mut().expect("mixed grouping sets");
-                        lookup_hash_entries_id(
-                            h,
-                            trans_init,
-                            trans_typ,
-                            *agg_node,
-                            id,
-                            estate,
-                            tmpcontext,
-                            mcx,
-                        )?;
+                        lookup_hash_entries_id(h, trans_init, trans_typ, *agg_node, id, estate, mcx)?;
                     }
                     if crate::trans_needs_driver(&phases[*current_phase].evaltrans) {
                         estate.ecxt_mut(tmpcontext).ecxt_outertuple = Some(id);

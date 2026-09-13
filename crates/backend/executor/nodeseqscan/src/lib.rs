@@ -2778,12 +2778,19 @@ fn exec_seq_scan_batch<'mcx, const PROJ: bool>(
             return Ok(Some(scan_id));
         }
         let mcx = estate.es_query_cxt;
+        let ecxt = node.ss.ps_ExprContext;
         let proj = node.ss.ps_ProjInfo.as_mut().unwrap();
+        // SAFETY: reset-only context, arena-boxed (address-stable), outlives
+        // the plan.
+        unsafe {
+            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+            proj.pi_state.arm_result_mcx_raw(per_tuple);
+        }
         let result_id = proj.pi_result_slot;
         let (scan_slot, result_slot) = ::execscan::slot_pair(estate, scan_id, result_id);
         let mut slots =
             ::execexpr::EvalSlots { scan: Some(scan_slot), inner: None, outer: None };
-        ::execexpr::exec_project(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
+        ::execexpr::exec_project_prearmed(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
         return Ok(Some(result_id));
     }
 }

@@ -33,7 +33,7 @@ pub const WAIT_EVENT_HASH_GROW_BUCKETS_REALLOCATE: u32 = PG_WAIT_IPC | 27;
 pub const WAIT_EVENT_HASH_GROW_BUCKETS_REINSERT: u32 = PG_WAIT_IPC | 28;
 use ::sharedtuplestore::{SharedTuplestore, SharedTuplestoreAccessor};
 use ::types_core::instrument::HashInstrumentation;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_tuple::MinimalTupleData;
 
 use crate::{
@@ -109,19 +109,26 @@ fn chunk_layout(maxlen: usize) -> core::alloc::Layout {
         .expect("chunk layout fits")
 }
 
-// dsa_allocate analog; freed by free_chunk at C's dsa_free points.
-fn alloc_chunk(chunk_size: usize) -> *mut HashMemoryChunkHdr {
+// dsa_allocate analog; freed by free_chunk at C's dsa_free points. A
+// failed allocation is dsa.c's ERRCODE_OUT_OF_MEMORY error.
+fn alloc_chunk(chunk_size: usize) -> PgResult<*mut HashMemoryChunkHdr> {
     let maxlen = chunk_size - HASH_CHUNK_HEADER_SIZE;
     // SAFETY: layout is non-zero; header initialized immediately below.
     unsafe {
         let p = std::alloc::alloc(chunk_layout(maxlen)).cast::<HashMemoryChunkHdr>();
-        assert!(!p.is_null(), "out of memory allocating hash chunk");
+        if p.is_null() {
+            return Err(Box::new(
+                PgError::error("out of memory")
+                    .with_sqlstate(::types_error::ERRCODE_OUT_OF_MEMORY)
+                    .with_detail(format!("Failed on DSA request of size {chunk_size}.")),
+            ));
+        }
         (*p).ntuples = 0;
         (*p)._pad = 0;
         (*p).maxlen = maxlen;
         (*p).used = 0;
         (*p).next = core::ptr::null_mut();
-        p
+        Ok(p)
     }
 }
 
@@ -774,7 +781,7 @@ fn parallel_tuple_alloc(
         }
     }
 
-    let chunk = alloc_chunk(chunk_size);
+    let chunk = alloc_chunk(chunk_size)?;
     {
         let batch = table.shared_batch(curbatch);
         let mut b = batch.lock();
@@ -1379,4 +1386,18 @@ pub fn slot_min_tuple_image<'a>(
         exectuples::FetchedMinimalTuple::Copied(t) => (t.as_ptr(), t.t_len()),
     };
     Ok((ptr, t_len as usize))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_allocation_failure_is_out_of_memory_error() {
+        let size = 1usize << 62;
+        let err = alloc_chunk(size).expect_err("an unsatisfiable chunk request errors");
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_OUT_OF_MEMORY);
+        assert_eq!(err.message(), "out of memory");
+        assert_eq!(err.detail(), Some(format!("Failed on DSA request of size {size}.").as_str()));
+    }
 }
