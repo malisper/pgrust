@@ -105,7 +105,7 @@ fn load_hba_content_locked(name: &str, content: &str) {
     assert!(hba_seams::load_hba::call());
 }
 
-fn unix_port(user: &str, db: &str) -> Port {
+pub(crate) fn unix_port(user: &str, db: &str) -> Port {
     let mut raddr = SockAddr::zeroed();
     // SAFETY: writing an aligned sockaddr_un prefix into the storage buffer.
     unsafe {
@@ -283,6 +283,26 @@ fn auth_fatal_under_port_borrow_reaches_client() {
     client.join().unwrap();
     pqcomm::RemoveSocketFiles();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ClientAuthentication runs under WithMyProcPort; the FATAL it raises formats
+// log_line_prefix through the backend log context, which reads the port
+// again. Those reads must degrade to "port present, fields unreadable"
+// rather than the RefCell double-borrow panic that took the server down.
+#[test]
+fn port_probes_do_not_panic_under_port_borrow() {
+    std::thread::spawn(|| {
+        g::SetMyProcPort(unix_port("alice", "postgres"));
+        assert!(g::HaveMyProcPort());
+        assert_eq!(g::TryWithMyProcPort(|p| p.user_name.clone()), Some(Some("alice".to_string())));
+        g::WithMyProcPort(|_| {
+            assert!(g::HaveMyProcPort());
+            assert_eq!(g::TryWithMyProcPort(|p| p.user_name.clone()), None);
+        });
+        assert!(g::HaveMyProcPort());
+    })
+    .join()
+    .unwrap();
 }
 
 #[test]

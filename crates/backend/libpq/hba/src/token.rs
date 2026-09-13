@@ -95,10 +95,12 @@ pub(crate) fn next_token(
 }
 
 pub(crate) fn make_auth_token(token: &[u8], quoted: bool) -> AuthToken {
+    let lossy = std::str::from_utf8(token).is_err();
     AuthToken {
         string: String::from_utf8_lossy(token).into_owned(),
         quoted,
         regex: false,
+        lossy,
     }
 }
 

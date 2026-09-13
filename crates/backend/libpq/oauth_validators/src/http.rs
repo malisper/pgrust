@@ -294,13 +294,16 @@ fn dechunk(data: &[u8]) -> Result<Vec<u8>, String> {
         if size == 0 {
             return Ok(out);
         }
-        let end = i + size;
-        if end > data.len() {
+        if size > data.len() - i {
             return Err("truncated chunk".into());
         }
+        let end = i + size;
         out.extend_from_slice(&data[i..end]);
         if out.len() > MAX_BODY {
             return Err("response body too large".into());
+        }
+        if data.get(end..end + 2) != Some(b"\r\n") {
+            return Err("truncated chunked body".into());
         }
         i = end + 2;
     }

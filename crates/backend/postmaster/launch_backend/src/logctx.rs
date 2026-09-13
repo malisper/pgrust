@@ -20,10 +20,7 @@ struct LiveBackendLogContext;
 static LIVE: LiveBackendLogContext = LiveBackendLogContext;
 
 fn with_port<R>(f: impl FnOnce(&types_startup::Port) -> R) -> Option<R> {
-    if !g::HaveMyProcPort() {
-        return None;
-    }
-    Some(g::WithMyProcPort(|p| f(p)))
+    g::TryWithMyProcPort(f)
 }
 
 impl BackendLogContext for LiveBackendLogContext {

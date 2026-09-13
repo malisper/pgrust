@@ -41,6 +41,9 @@ pub struct AuthToken {
     pub string: String,
     pub quoted: bool,
     pub regex: bool,
+    // The file bytes were not UTF-8: `string` is a lossy rendering that no
+    // name pgrust carries can equal byte-for-byte as C's strcmp would.
+    pub lossy: bool,
 }
 
 // ldap.h search scopes (OpenLDAP values, used by HbaLine.ldapscope).

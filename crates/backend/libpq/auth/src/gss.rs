@@ -192,6 +192,11 @@ impl Drop for GssState<'_> {
             // SAFETY: live credential from gss_acquire_cred_from.
             unsafe { (self.api.gss_release_cred)(&mut lmin_s, &mut self.acceptor_cred) };
         }
+        if self.outbuf.length != 0 {
+            // SAFETY: an output token gss_accept_sec_context allocated that an
+            // early return left unreleased.
+            unsafe { (self.api.gss_release_buffer)(&mut lmin_s, &mut self.outbuf) };
+        }
     }
 }
 
@@ -523,6 +528,105 @@ fn map_principal<'a>(
 #[cfg(test)]
 mod tests {
     use super::{gss_setenv, map_principal};
+
+    // An early return (interrupt between gss_accept_sec_context and the
+    // send-and-release block) drops GssState with outbuf still populated;
+    // Drop must hand that token back to the library.
+    #[test]
+    fn drop_releases_unsent_output_token() {
+        use core::ffi::{c_int, c_void};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::gss_ffi::*;
+
+        static RELEASED: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn accept(
+            _: *mut OM_uint32,
+            _: *mut gss_ctx_id_t,
+            _: gss_cred_id_t,
+            _: *mut gss_buffer_desc,
+            _: gss_channel_bindings_t,
+            _: *mut gss_name_t,
+            _: *mut gss_OID,
+            _: *mut gss_buffer_desc,
+            _: *mut OM_uint32,
+            _: *mut OM_uint32,
+            _: *mut gss_cred_id_t,
+        ) -> OM_uint32 {
+            0
+        }
+        unsafe extern "C" fn display_name(
+            _: *mut OM_uint32,
+            _: gss_name_t,
+            _: *mut gss_buffer_desc,
+            _: *mut gss_OID,
+        ) -> OM_uint32 {
+            0
+        }
+        unsafe extern "C" fn display_status(
+            _: *mut OM_uint32,
+            _: OM_uint32,
+            _: c_int,
+            _: gss_OID,
+            _: *mut OM_uint32,
+            _: *mut gss_buffer_desc,
+        ) -> OM_uint32 {
+            0
+        }
+        unsafe extern "C" fn release_buffer(_: *mut OM_uint32, b: *mut gss_buffer_desc) -> OM_uint32 {
+            RELEASED.fetch_add(1, Ordering::SeqCst);
+            // SAFETY: the test passes its own live buffer descriptor.
+            unsafe {
+                (*b).length = 0;
+                (*b).value = core::ptr::null_mut();
+            }
+            0
+        }
+        unsafe extern "C" fn release_ptr(_: *mut OM_uint32, _: *mut *mut c_void) -> OM_uint32 {
+            0
+        }
+        unsafe extern "C" fn delete_ctx(
+            _: *mut OM_uint32,
+            _: *mut gss_ctx_id_t,
+            _: *mut gss_buffer_desc,
+        ) -> OM_uint32 {
+            0
+        }
+        let api: &'static GssApi = Box::leak(Box::new(GssApi {
+            gss_accept_sec_context: accept,
+            gss_display_name: display_name,
+            gss_display_status: display_status,
+            gss_release_buffer: release_buffer,
+            gss_release_cred: release_ptr,
+            gss_release_name: release_ptr,
+            gss_delete_sec_context: delete_ctx,
+            gss_acquire_cred_from: None,
+            gss_store_cred_into: None,
+        }));
+        let port = crate::tests::unix_port("alice", "db");
+        let mut token = *b"token";
+        let state = super::GssState {
+            api,
+            ctx: core::ptr::null_mut(),
+            name: core::ptr::null_mut(),
+            acceptor_cred: core::ptr::null_mut(),
+            outbuf: gss_buffer_desc { length: token.len(), value: token.as_mut_ptr().cast() },
+            port: &port,
+        };
+        drop(state);
+        assert_eq!(RELEASED.load(Ordering::SeqCst), 1);
+
+        let state = super::GssState {
+            api,
+            ctx: core::ptr::null_mut(),
+            name: core::ptr::null_mut(),
+            acceptor_cred: core::ptr::null_mut(),
+            outbuf: gss_buffer_desc::empty(),
+            port: &port,
+        };
+        drop(state);
+        assert_eq!(RELEASED.load(Ordering::SeqCst), 1, "an empty buffer is not released");
+    }
 
     // The keytab/ccache env writes on the GSS auth path must be serialized
     // (GSS_ENV_LOCK) so two backend threads never race libc::setenv against

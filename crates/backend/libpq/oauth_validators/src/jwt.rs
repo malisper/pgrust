@@ -297,9 +297,9 @@ pub fn check_claims(claims: &Json, policy: &Policy<'_>, strict: bool) -> Result<
                 return Err("none of the token's audiences is accepted".into());
             }
         }
+        None | Some(Json::Null) if strict => return Err("token has no \"aud\" claim".into()),
+        None | Some(Json::Null) => {}
         Some(_) => return Err("\"aud\" claim is not a string or array".into()),
-        None if strict => return Err("token has no \"aud\" claim".into()),
-        None => {}
     }
     let time_claim = |name: &str| -> Result<Option<i64>, String> {
         match claims.get(name) {

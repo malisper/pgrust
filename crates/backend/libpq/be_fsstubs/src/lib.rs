@@ -13,7 +13,8 @@ use large_object::{
 use mcx::{Mcx, PgVec};
 use types_core::{int64, InvalidOid, Oid, SubTransactionId};
 use types_error::{
-    PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
+    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
@@ -303,7 +304,7 @@ pub fn be_lowrite<'mcx>(mcx: Mcx<'mcx>, fd: i32, wbuf: &[u8]) -> PgResult<i32> {
 // BUFSIZE (be-fsstubs.c).
 const BUFSIZE: usize = 8192;
 
-fn to_fnamebuf(filename: &[u8]) -> String {
+fn to_fnamebuf(filename: &[u8]) -> PgResult<String> {
     // text_to_cstring_buffer(filename, fnamebuf, sizeof(fnamebuf)) into a
     // char[MAXPGPATH] (be-fsstubs.c:439, :511): at most MAXPGPATH-1 bytes are
     // copied, clipped on a character boundary of the database encoding
@@ -311,21 +312,34 @@ fn to_fnamebuf(filename: &[u8]) -> String {
     // filename reaches open(2) truncated — ENOENT for a long path of short
     // components, and the clipped path in the error message — rather than
     // ENAMETOOLONG with the full text. Paths are opaque bytes to the OS; the
-    // tree carries them as UTF-8 strings (non-UTF-8 database bytes fall under
-    // the tree-wide SQL_ASCII carve).
+    // tree carries them as UTF-8 strings, so non-UTF-8 bytes (a SQL_ASCII
+    // database) are the UTF-8-only carve's typed refusal
+    // (docs/design/carve-ratifications.md §11), never a U+FFFD substitute
+    // that would name a different file than C opens.
     let limit = types_core::MAXPGPATH - 1;
     let n = if filename.len() <= limit {
         filename.len()
     } else {
         mbutils_seams::pg_mbcliplen::call(filename, filename.len() as i32, limit as i32) as usize
     };
-    String::from_utf8_lossy(&filename[..n]).into_owned()
+    match std::str::from_utf8(&filename[..n]) {
+        Ok(s) => Ok(s.to_owned()),
+        Err(_) => Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "non-ASCII server file names are not supported yet in databases with encoding \"{}\"",
+                mbutils_seams::get_database_encoding_name::call()
+            ))
+            .errhint("Use a database with encoding \"UTF8\".")
+            .into_error()
+            .into()),
+    }
 }
 
 fn lo_import_internal<'mcx>(mcx: Mcx<'mcx>, filename: &[u8], lobjOid: Oid) -> PgResult<Oid> {
     xact::PreventCommandIfReadOnly("lo_import()")?;
 
-    let fnamebuf = to_fnamebuf(filename);
+    let fnamebuf = to_fnamebuf(filename)?;
 
     let fd = fd::desc::OpenTransientFile(&fnamebuf, libc::O_RDONLY)?;
     if fd < 0 {
@@ -389,7 +403,7 @@ pub fn be_lo_export<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid, filename: &[u8]) -> PgRes
     with_state(|s| s.lo_cleanup_needed = true);
     let mut lobj = inv_open(mcx, lobjId, INV_READ)?;
 
-    let fnamebuf = to_fnamebuf(filename);
+    let fnamebuf = to_fnamebuf(filename)?;
 
     // C reduces the backend's normal 077 umask to 022 around the open so a
     // file the open CREATES lands as 0644 (rw-r--r--) rather than
@@ -675,6 +689,22 @@ mod tests {
         // An admitted len reaches lo_read, whose fd check fails as before.
         let e = crate::be_loread(mcx, 0, 16).expect_err("fd 0 is not open");
         assert_eq!(e.message(), "invalid large-object descriptor: 0");
+    }
+
+    // text_to_cstring_buffer hands the raw bytes to open(2); a filename
+    // that is not UTF-8 (a SQL_ASCII database) is the §11 typed refusal,
+    // never a U+FFFD substitute naming a different file.
+    #[test]
+    fn non_utf8_filename_is_the_ratified_refusal() {
+        mbutils_seams::get_database_encoding_name::set(|| "SQL_ASCII");
+        let e = crate::to_fnamebuf(b"/tmp/caf\xe9").unwrap_err();
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(
+            e.message(),
+            "non-ASCII server file names are not supported yet in databases with encoding \"SQL_ASCII\""
+        );
+        assert_eq!(e.hint(), Some("Use a database with encoding \"UTF8\"."));
+        assert_eq!(crate::to_fnamebuf("/tmp/caf\u{e9}".as_bytes()).unwrap(), "/tmp/caf\u{e9}");
     }
 
     // The lo_export permission bits C produces: 0666 & ~022.

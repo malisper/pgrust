@@ -117,7 +117,7 @@ pub(crate) fn check_role(
 ) -> PgResult<bool> {
     for tok in tokens {
         if token_is_member_check(tok) {
-            if is_member(roleid, &tok.string[1..])? {
+            if !tok.lossy && is_member(roleid, &tok.string[1..])? {
                 return Ok(true);
             }
         } else if token_is_keyword(tok, "all") {

@@ -102,11 +102,11 @@ pub(crate) fn token_is_keyword(t: &AuthToken, k: &str) -> bool {
 }
 
 pub(crate) fn token_matches(t: &AuthToken, k: &[u8]) -> bool {
-    t.string.as_bytes() == k
+    !t.lossy && t.string.as_bytes() == k
 }
 
 pub(crate) fn token_matches_insensitive(t: &AuthToken, k: &[u8]) -> bool {
-    pg_strcasecmp(t.string.as_bytes(), k) == 0
+    !t.lossy && pg_strcasecmp(t.string.as_bytes(), k) == 0
 }
 
 pub(crate) fn token_has_regexp(t: &AuthToken) -> bool {

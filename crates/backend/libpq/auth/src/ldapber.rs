@@ -171,6 +171,13 @@ pub enum Filter {
     Present(String),
     // initial, any*, final
     Substrings(String, Option<Vec<u8>>, Vec<Vec<u8>>, Option<Vec<u8>>),
+    // RFC 4515 extensible match: attr [":dn"] [":" rule] ":=" value
+    Extensible {
+        attr: Option<String>,
+        rule: Option<String>,
+        value: Vec<u8>,
+        dn_attrs: bool,
+    },
 }
 
 fn encode_filter(f: &Filter) -> Vec<u8> {
@@ -194,6 +201,20 @@ fn encode_filter(f: &Filter) -> Vec<u8> {
         Filter::Le(a, v) => ava(0xa6, a, v),
         Filter::Approx(a, v) => ava(0xa8, a, v),
         Filter::Present(a) => tlv(0x87, a.as_bytes()),
+        Filter::Extensible { attr, rule, value, dn_attrs } => {
+            let mut c = Vec::new();
+            if let Some(r) = rule {
+                c.extend_from_slice(&tlv(0x81, r.as_bytes()));
+            }
+            if let Some(a) = attr {
+                c.extend_from_slice(&tlv(0x82, a.as_bytes()));
+            }
+            c.extend_from_slice(&tlv(0x83, value));
+            if *dn_attrs {
+                c.extend_from_slice(&tlv(0x84, &[0xff]));
+            }
+            tlv(0xa9, &c)
+        }
         Filter::Substrings(a, initial, any, fin) => {
             let mut subs = Vec::new();
             if let Some(i) = initial {
@@ -312,6 +333,29 @@ impl<'a> FilterParser<'a> {
             b'>' => Ok(Filter::Ge(attr, unescape_value(raw)?)),
             b'<' => Ok(Filter::Le(attr, unescape_value(raw)?)),
             b'~' => Ok(Filter::Approx(attr, unescape_value(raw)?)),
+            _ if attr.ends_with(':') => {
+                let mut parts = attr[..attr.len() - 1].split(':');
+                let attr = parts.next().unwrap_or("");
+                let rest: Vec<&str> = parts.collect();
+                let (dn_attrs, rule) = match rest.as_slice() {
+                    [] => (false, None),
+                    [d] if d.eq_ignore_ascii_case("dn") => (true, None),
+                    [r] if !r.is_empty() => (false, Some((*r).to_string())),
+                    [d, r] if d.eq_ignore_ascii_case("dn") && !r.is_empty() => {
+                        (true, Some((*r).to_string()))
+                    }
+                    _ => return Err(()),
+                };
+                if attr.is_empty() && rule.is_none() {
+                    return Err(());
+                }
+                Ok(Filter::Extensible {
+                    attr: (!attr.is_empty()).then(|| attr.to_string()),
+                    rule,
+                    value: unescape_value(raw)?,
+                    dn_attrs,
+                })
+            }
             _ => {
                 if raw == "*" {
                     Ok(Filter::Present(attr))
@@ -1289,6 +1333,59 @@ mod ber_tests {
             enc,
             vec![0xa3, 0x08, 0x04, 0x03, b'u', b'i', b'd', 0x04, 0x01, b'a']
         );
+    }
+
+    // RFC 4515 extensible matches, as libldap's str2filter hands them to the
+    // server: [9] { [1] rule, [2] attr, [3] value, [4] dnAttributes }.
+    #[test]
+    fn extensible_match_filters() {
+        let f = parse_search_filter("(cn:caseIgnoreMatch:=alice)").unwrap();
+        assert_eq!(
+            f,
+            Filter::Extensible {
+                attr: Some("cn".into()),
+                rule: Some("caseIgnoreMatch".into()),
+                value: b"alice".to_vec(),
+                dn_attrs: false,
+            }
+        );
+        let mut want = vec![0xa9, 0x1c, 0x81, 0x0f];
+        want.extend_from_slice(b"caseIgnoreMatch");
+        want.extend_from_slice(&[0x82, 0x02, b'c', b'n', 0x83, 0x05]);
+        want.extend_from_slice(b"alice");
+        assert_eq!(encode_filter(&f), want);
+
+        assert_eq!(
+            parse_search_filter("(cn:dn:=alice)").unwrap(),
+            Filter::Extensible {
+                attr: Some("cn".into()),
+                rule: None,
+                value: b"alice".to_vec(),
+                dn_attrs: true,
+            }
+        );
+        assert_eq!(
+            encode_filter(&parse_search_filter("(:dn:2.4.6.8.10:=x)").unwrap()),
+            vec![
+                0xa9, 0x12, 0x81, 0x0a, b'2', b'.', b'4', b'.', b'6', b'.', b'8', b'.', b'1', b'0',
+                0x83, 0x01, b'x', 0x84, 0x01, 0xff
+            ]
+        );
+        assert_eq!(
+            parse_search_filter("(&(objectClass=person)(uid:=a\\2ab))").unwrap(),
+            Filter::And(vec![
+                Filter::Eq("objectClass".into(), b"person".to_vec()),
+                Filter::Extensible {
+                    attr: Some("uid".into()),
+                    rule: None,
+                    value: b"a*b".to_vec(),
+                    dn_attrs: false,
+                },
+            ])
+        );
+        assert!(parse_search_filter("(:=x)").is_err());
+        assert!(parse_search_filter("(cn::=x)").is_err());
+        assert!(parse_search_filter("(cn:a:b:=x)").is_err());
     }
 
     #[test]

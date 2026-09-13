@@ -221,6 +221,31 @@ fn claim_policy() {
     assert!(lax(r#"{"active":true,"scope":"openid postgres"}"#).is_err());
     assert!(lax(r#"{"active":true,"sub":"s1","exp":1,"scope":"openid postgres"}"#).unwrap_err().contains("expired"));
     assert!(lax(r#"{"active":true,"sub":"s1","aud":"nope","scope":"openid postgres"}"#).unwrap_err().contains("audience"));
+    // A JSON null aud is absent, like null iss/exp: skipped in lax mode,
+    // "no aud claim" in strict mode; other non-string types stay rejected.
+    assert_eq!(lax(r#"{"active":true,"sub":"s1","aud":null,"scope":"openid postgres"}"#), Ok("s1".into()));
+    assert!(err(r#"{"iss":"https://issuer.example","aud":null,"sub":"a","exp":1700000100,"scope":"openid postgres"}"#).contains("no \"aud\""));
+    assert!(lax(r#"{"active":true,"sub":"s1","aud":42,"scope":"openid postgres"}"#).unwrap_err().contains("not a string or array"));
+}
+
+#[test]
+fn http_malformed_chunked_is_an_error_not_a_panic() {
+    // Chunk data without its trailing CRLF and no terminating 0-chunk.
+    let (port, _h) = serve_once("200 OK", "Transfer-Encoding: chunked\r\n", b"5\r\nhello".to_vec());
+    let url = http::parse_url(&format!("http://127.0.0.1:{port}/")).unwrap();
+    let r = http::get(&url, &insecure());
+    assert!(r.is_err(), "expected a clean error, got {r:?}");
+
+    // A chunk size that overflows usize arithmetic.
+    let (port, _h) = serve_once("200 OK", "Transfer-Encoding: chunked\r\n", b"ffffffffffffffff\r\nx".to_vec());
+    let url = http::parse_url(&format!("http://127.0.0.1:{port}/")).unwrap();
+    let r = http::get(&url, &insecure());
+    assert!(r.is_err(), "expected a clean error, got {r:?}");
+
+    // Bytes other than CRLF after the chunk data.
+    let (port, _h) = serve_once("200 OK", "Transfer-Encoding: chunked\r\n", b"5\r\nhelloXX0\r\n\r\n".to_vec());
+    let url = http::parse_url(&format!("http://127.0.0.1:{port}/")).unwrap();
+    assert!(http::get(&url, &insecure()).is_err());
 }
 
 #[test]

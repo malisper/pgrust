@@ -835,6 +835,32 @@ fn authname_table() {
     assert_eq!(hba_seams::hba_authname::call(uaMD5), "md5");
 }
 
+// hba.c next_token copies the file bytes and check_role strcmp's them, so a
+// token that is not UTF-8 never equals a name; its lossy U+FFFD rendering
+// must not match the role "\u{fffd}" (nor a group of that name).
+#[test]
+fn non_utf8_token_never_matches_a_name() {
+    setup();
+    let file = FileHandle {
+        content: b"local all \xff trust\nlocal all +\xff trust\nlocal all \"\xef\xbf\xbd\" trust\n"
+            .to_vec(),
+        depth: 0,
+    };
+    let mut lines = Vec::new();
+    tokenize_auth_file("test_file", &file, &mut lines, LOG, 0).unwrap();
+    let parsed: Vec<_> = lines
+        .iter_mut()
+        .map(|l| parse_hba_line(l, LOG).unwrap().expect("parses"))
+        .collect();
+    assert!(parsed[0].roles[0].lossy);
+    assert_eq!(parsed[0].roles[0].string, "\u{fffd}");
+    assert!(!crate::check::check_role("\u{fffd}", 101, &parsed[0].roles, false).unwrap());
+    assert!(!crate::check::check_role("\u{fffd}", 101, &parsed[0].roles, true).unwrap());
+    assert!(!crate::check::check_role("\u{fffd}", 101, &parsed[1].roles, false).unwrap());
+    assert!(!parsed[2].roles[0].lossy);
+    assert!(crate::check::check_role("\u{fffd}", 101, &parsed[2].roles, false).unwrap());
+}
+
 #[test]
 fn regex_tokens_compile_and_match() {
     setup();

@@ -261,7 +261,17 @@ pub fn SetMyClientSocket(sock: types_startup::ClientSocket) {
 }
 
 pub fn HaveMyProcPort() -> bool {
-    MY_PROC_PORT.with(|p| p.borrow().is_some())
+    // A borrow in flight (ClientAuthentication holds the port while its
+    // FATAL formats log_line_prefix) means the port is installed.
+    MY_PROC_PORT.with(|p| p.try_borrow().map_or(true, |slot| slot.is_some()))
+}
+
+// None when unset or while a WithMyProcPort borrow is in flight.
+pub fn TryWithMyProcPort<R>(f: impl FnOnce(&types_startup::Port) -> R) -> Option<R> {
+    MY_PROC_PORT.with(|p| {
+        let slot = p.try_borrow().ok()?;
+        slot.as_ref().map(|port| f(port))
+    })
 }
 
 /// Session-memory teardown (FPBUDGET-1): free the Port copy at clean task
