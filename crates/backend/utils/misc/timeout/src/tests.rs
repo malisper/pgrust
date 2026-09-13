@@ -209,6 +209,66 @@ fn timer_post_raises_interrupt_pending() {
     globals::SetInterruptPending(false);
 }
 
+static REARM_ID: AtomicI64 = AtomicI64::new(-1);
+
+// The handler re-arms its own id as a one-shot 60s away.
+fn handler_rearm_one_shot() {
+    FIRED.with(|f| f.borrow_mut().push("rearm"));
+    enable_timeout_after(REARM_ID.load(O::Relaxed) as TimeoutId, 60_000);
+}
+
+// timeout.c:417: interval_in_ms/fin_time are read after the handler, so a
+// handler that re-arms as a one-shot is not overwritten by the periodic
+// reschedule.
+#[test]
+fn handler_rearm_wins_over_periodic_reschedule() {
+    let _serial = setup_thread(9009);
+    RegisterTimeout(STANDBY_TIMEOUT, handler_rearm_one_shot);
+    REARM_ID.store(STANDBY_TIMEOUT as i64, O::Relaxed);
+    let fin = NOW.load(O::Relaxed) + 5000;
+    enable_timeout_every(STANDBY_TIMEOUT, fin, 5);
+
+    advance_ms(6);
+    drain_when_posted();
+    assert_eq!(FIRED.with(|f| f.borrow().clone()), vec!["rearm"]);
+    assert!(get_timeout_active(STANDBY_TIMEOUT));
+    assert_eq!(get_timeout_finish_time(STANDBY_TIMEOUT), NOW.load(O::Relaxed) + 60_000_000);
+    disable_all_timeouts(false);
+}
+
+#[test]
+fn user_timeout_slots_exhausted_is_fatal_53400() {
+    let _serial = setup_thread(9010);
+    for _ in USER_TIMEOUT..MAX_TIMEOUTS {
+        RegisterTimeout(USER_TIMEOUT, handler_a);
+    }
+    let payload = std::panic::catch_unwind(|| RegisterTimeout(USER_TIMEOUT, handler_b))
+        .expect_err("eleventh user timeout");
+    let err = types_error::pg_error_from_panic(payload).expect("structured PgError");
+    assert_eq!(err.level(), FATAL);
+    assert_eq!(err.sqlstate(), ERRCODE_CONFIGURATION_LIMIT_EXCEEDED);
+    assert_eq!(err.message(), "cannot add more timeout reasons");
+}
+
+fn slot_registered(pid: i32) -> bool {
+    timer().slots.lock().unwrap().contains_key(&pid)
+}
+
+#[test]
+fn backend_slot_released_at_task_end() {
+    let _serial = setup_thread(9011);
+    assert!(slot_registered(9011));
+    forget_backend_timer_slot();
+    assert!(!slot_registered(9011));
+    // A later arm re-registers on demand, so releasing is never premature.
+    RegisterTimeout(STATEMENT_TIMEOUT, handler_a);
+    enable_timeout_after(STATEMENT_TIMEOUT, 60_000);
+    assert!(slot_registered(9011));
+    disable_all_timeouts(false);
+    forget_backend_timer_slot();
+    assert!(!slot_registered(9011));
+}
+
 #[test]
 fn user_timeout_allocation() {
     let _serial = setup_thread(9005);

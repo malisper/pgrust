@@ -1370,6 +1370,21 @@ impl MemoryContext {
         *self.acct.ident.borrow_mut() = id.map(alloc::string::String::from);
     }
 
+    /// A parked context leaves the tree (C's AllocSetDelete unlinks it before
+    /// its keeper block goes to context_freelists); `reattach_to_parent`
+    /// undoes this on reuse.
+    pub fn detach_from_parent(&self) {
+        if let Some(p) = &self.acct.parent {
+            p.children.borrow_mut().retain(|w| w.ptr != self.acct.ptr);
+        }
+    }
+
+    pub fn reattach_to_parent(&self) {
+        if let Some(p) = &self.acct.parent {
+            p.children.borrow_mut().push(self.acct.downgrade());
+        }
+    }
+
     pub fn ident(&self) -> Option<alloc::string::String> {
         self.acct.ident.borrow().clone()
     }

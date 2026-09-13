@@ -758,6 +758,9 @@ fn run_child_task(
     // registry cannot grow. No-ops when already consumed.
     procsignal::PreIdentitySignalRelease();
     procsignal::PreIdentitySignalDiscard(child_pid);
+    if timeout_seams::forget_backend_timer_slot::is_installed() {
+        timeout_seams::forget_backend_timer_slot::call();
+    }
     if parks {
         wpool::mark_parked_announce(child_pid);
     }

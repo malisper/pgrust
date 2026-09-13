@@ -163,6 +163,45 @@ fn overlong_names_truncate_and_collide() {
     PortalDrop(&a, false).unwrap();
 }
 
+// dynahash keys the first 63 BYTES: names whose byte 63 splits a multibyte
+// character differently are distinct portals (C accepts both Binds).
+#[test]
+fn split_character_at_byte_63_keeps_names_distinct() {
+    setup();
+    let name_a = format!("{}é", "a".repeat(62));
+    let name_b = format!("{}中", "a".repeat(62));
+    let a = CreatePortal(&name_a, false, false).unwrap();
+    let b = CreatePortal(&name_b, false, false).unwrap();
+    assert_eq!(a.borrow().name.as_str(), "a".repeat(62));
+    assert!(GetPortalByName(Some(&name_a)).unwrap().ptr_eq(&a));
+    assert!(GetPortalByName(Some(&name_b)).unwrap().ptr_eq(&b));
+    PortalDrop(&a, false).unwrap();
+    assert!(GetPortalByName(Some(&name_a)).is_none());
+    assert!(GetPortalByName(Some(&name_b)).unwrap().ptr_eq(&b));
+    PortalDrop(&b, false).unwrap();
+}
+
+// portalmem.c:595 deletes the context: a parked (pooled) PortalContext is
+// not a visible child of TopPortalContext until a portal reuses it.
+#[test]
+fn parked_portal_contexts_leave_the_context_tree() {
+    setup();
+    let portal_children = || {
+        with_mgr(|m| {
+            m.top.stats_tree().children.iter().filter(|c| c.name == "PortalContext").count()
+        })
+        .unwrap()
+    };
+    let before = portal_children();
+    let p = CreatePortal("b50_parked", false, false).unwrap();
+    assert_eq!(portal_children(), before + 1);
+    PortalDrop(&p, false).unwrap();
+    assert_eq!(portal_children(), before);
+    let q = CreatePortal("b50_reused", false, false).unwrap();
+    assert_eq!(portal_children(), before + 1);
+    PortalDrop(&q, false).unwrap();
+}
+
 #[test]
 fn create_new_portal_skips_conflicts() {
     setup();

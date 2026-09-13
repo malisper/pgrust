@@ -254,6 +254,18 @@ fn line_too_long() {
     );
 }
 
+// tzparser.c:363: fgets hands back a C string, so the bytes after a NUL are
+// not part of the line.
+#[test]
+fn nul_byte_ends_the_line() {
+    let dir = scratch_dir("nul");
+    std::fs::write(format!("{dir}/Nul"), b"XYZ 3600\0 junk that is not a token\nQQQ 7200\n")
+        .unwrap();
+    let tbl = load_tzoffsets_from(&dir, "Nul").expect("NUL-terminated line parses");
+    assert_eq!(find(tbl, "xyz").value, 3600);
+    assert_eq!(find(tbl, "qqq").value, 7200);
+}
+
 #[test]
 fn strtol_semantics() {
     assert_eq!(strtol10(b"123"), Some(123));

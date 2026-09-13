@@ -22,7 +22,7 @@ use pg_clock::Deadline;
 
 use init_small::globals;
 use types_core::TimestampTz;
-use types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED;
+use types_error::{PgError, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, FATAL};
 use types_storage::latch::LatchHandle;
 
 pub use timeout_seams::{
@@ -379,14 +379,20 @@ fn handle_sig_alarm() {
                     remove_timeout_index(data, 0);
                     let t = &mut data.all_timeouts[id as usize];
                     t.indicator = true;
-                    Some((id, t.timeout_handler, t.interval_in_ms, t.fin_time))
+                    Some((id, t.timeout_handler))
                 });
-                let Some((id, handler, interval, fin_time)) = fired else {
+                let Some((id, handler)) = fired else {
                     break;
                 };
 
                 (handler.expect("fired timeout has a handler"))();
 
+                // timeout.c:417 reads the params after the handler, which
+                // may have re-armed this id (one-shot or a new interval).
+                let (interval, fin_time) = DATA.with(|d| {
+                    let t = &d.borrow().all_timeouts[id as usize];
+                    (t.interval_in_ms, t.fin_time)
+                });
                 if interval > 0 {
                     // Anti-drift: schedule off the intended firing time.
                     let mut new_fin = timestamptz_plus_ms(fin_time, interval);
@@ -494,6 +500,12 @@ pub fn InitializeTimeouts() {
     );
 }
 
+/// pgrust-only: C reclaims timeout state with the process; a thread-model
+/// backend releases its timer-registry slot at task end.
+pub fn forget_backend_timer_slot() {
+    timer().slots.lock().unwrap().remove(&globals::MyProcPid());
+}
+
 pub fn RegisterTimeout(id: TimeoutId, handler: TimeoutHandlerProc) -> TimeoutId {
     debug_assert!(ALL_TIMEOUTS_INITIALIZED.with(|c| c.get()));
 
@@ -504,11 +516,10 @@ pub fn RegisterTimeout(id: TimeoutId, handler: TimeoutHandlerProc) -> TimeoutId 
             id = (USER_TIMEOUT..MAX_TIMEOUTS)
                 .find(|&i| data.all_timeouts[i as usize].timeout_handler.is_none())
                 .unwrap_or_else(|| {
-                    // C ereport(FATAL)s; backend-fatal either way.
-                    panic!(
-                        "cannot add more timeout reasons ({:?})",
-                        ERRCODE_CONFIGURATION_LIMIT_EXCEEDED
-                    )
+                    std::panic::panic_any(Box::new(
+                        PgError::new(FATAL, "cannot add more timeout reasons")
+                            .with_sqlstate(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
+                    ))
                 });
         }
         debug_assert!(data.all_timeouts[id as usize].timeout_handler.is_none());
@@ -702,6 +713,7 @@ pub fn init_seams() {
     s::get_timeout_start_time::set(get_timeout_start_time);
     s::get_timeout_finish_time::set(get_timeout_finish_time);
     s::process_timeout_interrupt::set(ProcessTimeoutInterrupt);
+    s::forget_backend_timer_slot::set(forget_backend_timer_slot);
 }
 
 #[cfg(test)]

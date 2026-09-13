@@ -83,3 +83,9 @@ seam_core::seam!(
     // Synchronous SIGALRM delivery (notes/timeout-threads.md).
     pub fn process_timeout_interrupt()
 );
+
+seam_core::seam!(
+    // pgrust-only: a thread-model backend releases its timer-registry slot
+    // at task end (C's process exit reclaims it).
+    pub fn forget_backend_timer_slot()
+);

@@ -4,7 +4,8 @@ use guc_tables::{all_settings, GucDefaultValue, GucSetting};
 use types_core::Oid;
 use types_error::{ErrorLevel, PgResult, FATAL};
 use types_guc::{
-    config_type, GucContext, GucSource, PGC_POSTMASTER, PGC_S_ENV_VAR, PGC_S_OVERRIDE,
+    config_type, GucContext, GucSource, PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT, PGC_S_ENV_VAR,
+    PGC_S_OVERRIDE,
 };
 
 use crate::model::{
@@ -301,6 +302,34 @@ pub fn initialize_guc_options_from_environment() -> PgResult<()> {
     if let Ok(env) = std::env::var("PGRUST_MEM_AUTOTUNE") {
         let v = if matches!(env.as_str(), "1" | "on" | "true" | "yes") { "on" } else { "off" };
         crate::SetConfigOption("pgrust.mem_autotune", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
+    }
+    adjust_max_stack_depth_from_rlimit()
+}
+
+// guc.c:1618-1628: 2MB cap is DYNAMIC_DEFAULT; below that, ENV_VAR.
+pub fn boot_limit_and_source(new_limit: isize) -> (i32, GucSource) {
+    if new_limit < 2048 {
+        (new_limit as i32, PGC_S_ENV_VAR)
+    } else {
+        (2048, PGC_S_DYNAMIC_DEFAULT)
+    }
+}
+
+// guc.c:1613: part of InitializeGUCOptionsFromEnvironment, so a reload that
+// drops the file setting lands back on the rlimit default, not 100kB.
+pub fn adjust_max_stack_depth_from_rlimit() -> PgResult<()> {
+    let stack_rlimit = stack_depth_core::get_stack_depth_rlimit();
+    if stack_rlimit > 0 {
+        let new_limit = stack_rlimit.saturating_sub(stack_depth_core::STACK_DEPTH_SLOP) / 1024;
+        if new_limit > 100 {
+            let (new_limit, source) = boot_limit_and_source(new_limit);
+            crate::SetConfigOption(
+                "max_stack_depth",
+                Some(&new_limit.to_string()),
+                PGC_POSTMASTER,
+                source,
+            )?;
+        }
     }
     Ok(())
 }

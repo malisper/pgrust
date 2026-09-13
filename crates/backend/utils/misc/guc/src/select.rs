@@ -9,8 +9,10 @@ pub const CONFIG_FILENAME: &str = "postgresql.conf";
 const HBA_FILENAME: &str = "pg_hba.conf";
 const IDENT_FILENAME: &str = "pg_ident.conf";
 
-fn nonempty(v: Option<String>) -> Option<String> {
-    v.filter(|s| !s.is_empty())
+// The postmaster's store view of a string GUC (the C variable; identical to
+// the backing cell on this thread).
+fn setting(name: &str) -> Option<String> {
+    crate::store::get_string(name).flatten()
 }
 
 // C's "%m": strerror(errno) of the failed stat(), never io::Error's Display
@@ -44,7 +46,7 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
         }
     }
 
-    let fname = match nonempty(guc_tables::vars::ConfigFileName.read()) {
+    let fname = match setting("config_file") {
         Some(explicit) => make_absolute_path(&explicit)?,
         None => match configdir.as_deref() {
             Some(dir) => format!("{dir}/{CONFIG_FILENAME}"),
@@ -59,7 +61,7 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
     };
     crate::SetConfigOption("config_file", Some(&fname), PGC_POSTMASTER, PGC_S_OVERRIDE)?;
 
-    let config_file_name = guc_tables::vars::ConfigFileName.read().unwrap_or_default();
+    let config_file_name = setting("config_file").unwrap_or_default();
     if let Err(e) = std::fs::metadata(&config_file_name) {
         // guc.c:1832
         write_stderr(&format!(
@@ -73,7 +75,7 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
     // (process_config_file_internal owns that arm).
     guc_file::ProcessConfigFile(PGC_POSTMASTER)?;
 
-    match nonempty(guc_tables::vars::data_directory.read()) {
+    match setting("data_directory") {
         Some(dd) => miscinit::SetDataDir(&dd)?,
         None => match configdir.as_deref() {
             Some(dir) => miscinit::SetDataDir(dir)?,
@@ -97,7 +99,7 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
 
     pg_timezone_abbrev_initialize()?;
 
-    let hba = match nonempty(guc_tables::vars::HbaFileName.read()) {
+    let hba = match setting("hba_file") {
         Some(explicit) => make_absolute_path(&explicit)?,
         None => match configdir.as_deref() {
             Some(dir) => format!("{dir}/{HBA_FILENAME}"),
@@ -113,7 +115,7 @@ pub fn SelectConfigFiles(user_d_option: Option<&str>, progname: &str) -> PgResul
     };
     crate::SetConfigOption("hba_file", Some(&hba), PGC_POSTMASTER, PGC_S_OVERRIDE)?;
 
-    let ident = match nonempty(guc_tables::vars::IdentFileName.read()) {
+    let ident = match setting("ident_file") {
         Some(explicit) => make_absolute_path(&explicit)?,
         None => match configdir.as_deref() {
             Some(dir) => format!("{dir}/{IDENT_FILENAME}"),

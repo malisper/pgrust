@@ -12,37 +12,12 @@
 
 pub use stack_depth_core::{self, *};
 
-use types_error::PgResult;
 use types_guc::GucSource;
 
 #[cfg(test)]
 mod tests;
 
-// C guc.c:1618-1628: 2MB cap is DYNAMIC_DEFAULT; below that, ENV_VAR.
-pub(crate) fn boot_limit_and_source(new_limit: isize) -> (i32, GucSource) {
-    if new_limit < 2048 {
-        (new_limit as i32, GucSource::PGC_S_ENV_VAR)
-    } else {
-        (2048, GucSource::PGC_S_DYNAMIC_DEFAULT)
-    }
-}
-
-pub fn adjust_max_stack_depth_from_rlimit() -> PgResult<()> {
-    let stack_rlimit = get_stack_depth_rlimit();
-    if stack_rlimit > 0 {
-        let new_limit = stack_rlimit.saturating_sub(STACK_DEPTH_SLOP) / 1024;
-        if new_limit > 100 {
-            let (new_limit, source) = boot_limit_and_source(new_limit);
-            guc::SetConfigOption(
-                "max_stack_depth",
-                Some(&new_limit.to_string()),
-                types_guc::GucContext::PGC_POSTMASTER,
-                source,
-            )?;
-        }
-    }
-    Ok(())
-}
+pub use guc::store::{adjust_max_stack_depth_from_rlimit, boot_limit_and_source};
 
 pub fn check_max_stack_depth(newval: i32, _source: GucSource) -> bool {
     let newval_bytes = newval as isize * 1024;

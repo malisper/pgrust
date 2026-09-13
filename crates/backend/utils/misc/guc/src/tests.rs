@@ -560,6 +560,62 @@ fn valid_custom_names() {
     assert!(!valid_custom_variable_name("1foo.bar"));
 }
 
+// guc.c:1613: InitializeGUCOptionsFromEnvironment re-applies the rlimit
+// default on every reload, so dropping max_stack_depth from the file lands
+// on the platform default (2MB/DYNAMIC_DEFAULT), not the 100kB boot value.
+#[test]
+fn reload_restores_rlimit_stack_depth_default() {
+    setup();
+    let rlimit = stack_depth_core::get_stack_depth_rlimit();
+    let new_limit = rlimit.saturating_sub(stack_depth_core::STACK_DEPTH_SLOP) / 1024;
+    if rlimit <= 0 || new_limit <= 100 {
+        return;
+    }
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("guc_msd_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("postgresql.conf");
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
+    SetConfigOption("config_file", Some(conf.to_str().unwrap()), PGC_POSTMASTER, PGC_S_OVERRIDE)
+        .unwrap();
+    let source_of = || {
+        with_store(|reg| reg.find_option("max_stack_depth").unwrap().gen().source).unwrap()
+    };
+
+    std::fs::write(&conf, "max_stack_depth = '1MB'\n").unwrap();
+    crate::process_config::process_config_file_internal(PGC_SIGHUP, true, types_error::LOG)
+        .unwrap();
+    assert_eq!((get_int("max_stack_depth"), source_of()), (Some(1024), PGC_S_FILE));
+
+    std::fs::write(&conf, "").unwrap();
+    crate::process_config::process_config_file_internal(PGC_SIGHUP, true, types_error::LOG)
+        .unwrap();
+    let (expected, source) = crate::store::boot_limit_and_source(new_limit);
+    assert_eq!((get_int("max_stack_depth"), source_of()), (Some(expected), source));
+}
+
+// guc.c:1873: a set-but-empty data_directory / hba_file is not "unset"; it
+// goes through make_absolute_path and resolves to the working directory.
+#[test]
+fn select_config_files_empty_paths_resolve_to_cwd() {
+    setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("guc_scf_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("postgresql.conf"), "data_directory = ''\nhba_file = ''\n").unwrap();
+
+    assert!(crate::select::SelectConfigFiles(Some(dir.to_str().unwrap()), "postgres").unwrap());
+    let cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+    assert_eq!(get_string("data_directory"), Some(Some(cwd.clone())));
+    assert_eq!(get_string("hba_file"), Some(Some(cwd)));
+    assert_eq!(
+        get_string("ident_file"),
+        Some(Some(dir.join("pg_ident.conf").to_str().unwrap().to_string()))
+    );
+}
+
 #[test]
 fn process_config_file_applies_and_reverts() {
     setup();

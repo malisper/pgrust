@@ -41,10 +41,10 @@ mod tests;
 
 const PORTALS_PER_USER: usize = 16;
 
-// dynahash HASH_STRINGS key: strlcpy to MAX_PORTALNAME_LEN-1 bytes (backed off
-// to a char boundary) — over-long names collide exactly as in C. Hash/Eq run
-// over the used prefix only, as C's string_hash runs over strlen(name) bytes
-// (the per-statement unnamed portal hashes 0 bytes, not 64).
+// dynahash HASH_STRINGS key: strlcpy to MAX_PORTALNAME_LEN-1 bytes, even
+// mid-character — over-long names collide exactly as in C. Hash/Eq run over
+// the used prefix only, as C's string_hash runs over strlen(name) bytes (the
+// per-statement unnamed portal hashes 0 bytes, not 64).
 #[derive(Clone, Copy)]
 struct PortalName {
     len: u8,
@@ -54,10 +54,7 @@ struct PortalName {
 impl PortalName {
     fn new(name: &str) -> PortalName {
         let mut buf = [0u8; MAX_PORTALNAME_LEN];
-        let mut end = name.len().min(MAX_PORTALNAME_LEN - 1);
-        while end > 0 && !name.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = name.len().min(MAX_PORTALNAME_LEN - 1);
         buf[..end].copy_from_slice(&name.as_bytes()[..end]);
         PortalName { len: end as u8, buf }
     }
@@ -66,8 +63,11 @@ impl PortalName {
         &self.buf[..self.len as usize]
     }
 
+    // The portal's own name string: the key minus a split trailing character.
     fn as_str(&self) -> &str {
-        core::str::from_utf8(self.bytes()).expect("PortalName built from &str")
+        let bytes = self.bytes();
+        core::str::from_utf8(bytes)
+            .unwrap_or_else(|e| core::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap())
     }
 }
 
@@ -93,6 +93,8 @@ const PORTAL_POOL_MAX: usize = 16;
 struct PortalManager {
     top: &'static MemoryContext,
     entries: PgVec<'static, Portal<'static>>,
+    // entries[i]'s hash key (the name string cannot carry a split character).
+    keys: PgVec<'static, PortalName>,
     index: PgHashMap<'static, PortalName, u32>,
     unnamed_counter: u32,
     // Per-statement recycling, C's shape: dropped PortalContexts park whole
@@ -180,10 +182,15 @@ pub fn EnablePortalManager() {
         );
         let mut entries: PgVec<'static, Portal<'static>> = PgVec::new_in(top.mcx());
         entries.reserve(PORTALS_PER_USER);
+        // hash_create's own context (dynahash.c:387), a TopMemoryContext child.
+        let hash_cx: &'static MemoryContext = ::mcx::session_root("Portal hash");
+        let mut keys: PgVec<'static, PortalName> = PgVec::new_in(hash_cx.mcx());
+        keys.reserve(PORTALS_PER_USER);
         *slot = Some(ManuallyDrop::new(PortalManager {
             top,
             entries,
-            index: PgHashMap::with_capacity_in(PORTALS_PER_USER, top.mcx()),
+            keys,
+            index: PgHashMap::with_capacity_in(PORTALS_PER_USER, hash_cx.mcx()),
             unnamed_counter: 0,
             free_contexts: Vec::new(),
             free_portals: Vec::new(),
@@ -236,6 +243,7 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
         let portal_context = match m.free_contexts.pop() {
             Some(ctx) => {
                 ctx.set_name("PortalContext");
+                ctx.reattach_to_parent();
                 ctx
             }
             None => PgBox::new_in(m.top.new_child("PortalContext"), mcx),
@@ -308,6 +316,7 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
         };
         let i = m.entries.len() as u32;
         m.entries.push(portal.clone());
+        m.keys.push(key);
         m.index.insert(key, i);
         Ok(portal)
     })?
@@ -400,6 +409,7 @@ pub fn PortalCreateHoldStore(portal: &Portal<'static>) -> PgResult<()> {
         let hold = match pooled {
             Some(ctx) => {
                 ctx.set_name("PortalHoldContext");
+                ctx.reattach_to_parent();
                 ctx
             }
             None => PgBox::new_in(top.new_child("PortalHoldContext"), top.mcx()),
@@ -514,7 +524,7 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
 
     run_cleanup_hook(portal)?;
 
-    let (query_desc, stmts, params, cplan, plan_ctx, resowner, hold_snapshot, hold_store, status, key) = {
+    let (query_desc, stmts, params, cplan, plan_ctx, resowner, hold_snapshot, hold_store, status) = {
         let mut p = portal.borrow_mut();
         debug_assert!(p.portalSnapshot.is_none() || !isTopCommit);
         (
@@ -527,7 +537,6 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
             p.holdSnapshot.take(),
             core::mem::replace(&mut p.holdStore, TuplestoreHandle::NULL),
             p.status,
-            PortalName::new(&p.name),
         )
     };
     // WS-CA wave-10: the cursor store + tid sidecar die with the portal
@@ -558,17 +567,7 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         execmain_seams::release_query_desc::call(query_desc);
     }
 
-    let removed = with_mgr(|m| {
-        let i = m.index.remove(&key)?;
-        let last = m.entries.len() - 1;
-        let removed = m.entries.swap_remove(i as usize);
-        if (i as usize) != last {
-            let moved = PortalName::new(&m.entries[i as usize].borrow().name);
-            m.index.insert(moved, i);
-        }
-        Some(removed)
-    })
-    .flatten();
+    let removed = remove_from_table(portal);
     if removed.is_none() {
         elog(WARNING, "trying to delete portal name that does not exist")?;
     }
@@ -634,6 +633,7 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
     with_mgr(|m| {
         for cb in [parked_ctx, parked_hold].into_iter().flatten() {
             if m.free_contexts.len() < PORTAL_POOL_MAX {
+                cb.detach_from_parent();
                 m.free_contexts.push(cb);
             }
         }
@@ -651,14 +651,13 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
 // pins dead plans can hold (DropCachedPlan discards its shell eagerly).
 const PARKED_PORTAL_MAX: usize = 8;
 
-fn remove_from_table(key: &PortalName) -> Option<Portal<'static>> {
+fn remove_from_table(portal: &Portal<'static>) -> Option<Portal<'static>> {
     with_mgr(|m| {
-        let i = m.index.remove(key)?;
-        let last = m.entries.len() - 1;
-        let removed = m.entries.swap_remove(i as usize);
-        if (i as usize) != last {
-            let moved = PortalName::new(&m.entries[i as usize].borrow().name);
-            m.index.insert(moved, i);
+        let i = m.entries.iter().position(|e| e.ptr_eq(portal))?;
+        m.index.remove(&m.keys.swap_remove(i));
+        let removed = m.entries.swap_remove(i);
+        if i < m.entries.len() {
+            m.index.insert(m.keys[i], i as u32);
         }
         Some(removed)
     })
@@ -740,16 +739,15 @@ fn try_park(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<bool> {
         return Ok(false);
     }
 
-    let (params, resowner, key, psrc) = {
+    let (params, resowner, psrc) = {
         let mut p = portal.borrow_mut();
         (
             core::mem::replace(&mut p.portalParams, ParamListHandle::NULL),
             core::mem::replace(&mut p.resowner, ResourceOwner::NULL),
-            PortalName::new(&p.name),
             p.plansource,
         )
     };
-    if remove_from_table(&key).is_none() {
+    if remove_from_table(portal).is_none() {
         elog(WARNING, "trying to park portal name that does not exist")?;
     }
     types_portal::params::free(params);
@@ -794,6 +792,7 @@ fn try_park(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<bool> {
     let displaced = with_mgr(|m| {
         if let Some(cb) = parked_ctx {
             if m.free_contexts.len() < PORTAL_POOL_MAX {
+                cb.detach_from_parent();
                 m.free_contexts.push(cb);
             }
         }
@@ -852,6 +851,7 @@ fn discard_shell(shell: &Portal<'static>) {
     with_mgr(|m| {
         if let Some(cb) = parked_ctx {
             if m.free_contexts.len() < PORTAL_POOL_MAX {
+                cb.detach_from_parent();
                 m.free_contexts.push(cb);
             }
         }
@@ -882,6 +882,7 @@ pub fn TakeParkedPortal(plansource: PlanSourceHandle) -> PgResult<Option<Portal<
     let portal_context = mgr("TakeParkedPortal", |m| match m.free_contexts.pop() {
         Some(ctx) => {
             ctx.set_name("PortalContext");
+            ctx.reattach_to_parent();
             ctx
         }
         None => PgBox::new_in(m.top.new_child("PortalContext"), m.top.mcx()),
@@ -907,6 +908,7 @@ pub fn TakeParkedPortal(plansource: PlanSourceHandle) -> PgResult<Option<Portal<
         debug_assert!(!m.index.contains_key(&key), "unnamed portal already exists");
         let i = m.entries.len() as u32;
         m.entries.push(shell.clone());
+        m.keys.push(key);
         m.index.insert(key, i);
     })?;
     Ok(Some(shell))

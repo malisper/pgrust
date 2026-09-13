@@ -293,10 +293,21 @@ fn parse_tz_file<'mcx>(
 
     let mut over_ride = false;
     let mut lineno = 0;
-    for raw in contents.split_inclusive(|&b| b == b'\n') {
+    let mut rest: &[u8] = &contents;
+    while !rest.is_empty() {
+        // fgets(tzbuf, 1024): at most 1023 bytes or through the newline; the
+        // buffer is then a C string, so a NUL ends the line and a full
+        // buffer means the line didn't fit.
+        let take = rest
+            .iter()
+            .take(TZBUF_SIZE - 1)
+            .position(|&b| b == b'\n')
+            .map_or((TZBUF_SIZE - 1).min(rest.len()), |p| p + 1);
+        let (raw, tail) = rest.split_at(take);
+        rest = tail;
         lineno += 1;
-        // fgets fills tzbuf[1024]; a full buffer means the line didn't fit.
-        if raw.len() >= TZBUF_SIZE - 1 {
+        let raw = &raw[..raw.iter().position(|&b| b == 0).unwrap_or(raw.len())];
+        if raw.len() == TZBUF_SIZE - 1 {
             GUC_check_errmsg(format!(
                 "line is too long in time zone file \"{filename}\", line {lineno}"
             ));

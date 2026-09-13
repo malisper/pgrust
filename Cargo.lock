@@ -7303,6 +7303,7 @@ dependencies = [
  "pgtz",
  "pqcomm_seams",
  "scalar_seams",
+ "stack_depth_core",
  "superuser_seams",
  "timestamp_seams",
  "transam_xlog_seams",
