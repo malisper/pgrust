@@ -1272,7 +1272,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      "this thread is doing postmaster work" for the bgworker pool fast
     //      path (whereToSendOutput = DestNone, %b = postmaster while the
     //      guard lives); restored on drop.
-    assert_eq!(count_tree(crates), 606, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 595, bug campaign batch-01 (2026-09-13), utils/adt out functions:
+    //   -11 OUT_SCRATCH thread_local! blocks (adt/bool, char, name, pg_lsn,
+    //      adt_enum, cash, float, int, int8, mac, adt_date) — the shared
+    //      per-thread cstring buffer aliased sibling out-function results in
+    //      one projection; replaced by per-FmgrInfo scratch
+    //      (types_fmgr::cstring_scratch, the textout idiom). No session
+    //      state was involved; no SESSION_ENVELOPE_MANIFEST rows change.
+    assert_eq!(count_tree(crates), 595, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

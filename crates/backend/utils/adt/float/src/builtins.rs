@@ -43,14 +43,6 @@ pub fn fc_float8send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(varlena_result(pqformat::pq_endtypsend(b)))
 }
 
-// C pallocs each cstring result into the per-row context; the backend thread
-// owns retained scratch instead (rule 7). The returned Datum aliases the
-// scratch: consume it before the next out-function call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; crate::MAXDOUBLEWIDTH]> =
-        const { core::cell::UnsafeCell::new([0; crate::MAXDOUBLEWIDTH]) };
-}
-
 fn in_arg<'a>(fcinfo: &'a Fcinfo) -> Cow<'a, str> {
     // SAFETY: catalog arg 0 of the in-functions is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
@@ -71,28 +63,20 @@ pub fn fc_float8in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     Ok(Datum::from_f64(crate::float8in(&num, esc)?))
 }
 
-pub fn fc_float4out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_float4out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let v = a.value.as_f32();
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::float4out(v, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; crate::MAXDOUBLEWIDTH];
+    let len = crate::float4out(v, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "float4out", &buf[..len]))
 }
 
-pub fn fc_float8out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_float8out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let v = a.value.as_f64();
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::float8out(v, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; crate::MAXDOUBLEWIDTH];
+    let len = crate::float8out(v, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "float8out", &buf[..len]))
 }
 
 pub fn fc_dpi(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {

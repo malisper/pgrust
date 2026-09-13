@@ -1277,6 +1277,36 @@ fn tz_abbrev_interval_image(gmtoffset: i64) -> [u8; 16] {
     img
 }
 
+fn tz_abbrev_row(flinfo: &FmgrInfo, fcinfo: &mut Fcinfo, values: &[Datum; 3]) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(Box::new(::types_error::PgError::error("return type must be a row type")));
+    }
+    let tupdesc = resolved.result_tuple_desc.expect("composite result has tupdesc");
+    let tup = ::heaptuple::heap_form_tuple(mcx, &tupdesc, values, &[false; 3])?;
+    let d = Datum::from_usize(tup.header_ptr() as usize);
+    core::mem::forget(tup);
+    Ok(d)
+}
+
+fn srf_cursor<T: 'static + Copy>(flinfo: &mut FmgrInfo, fcinfo: &Fcinfo, init: T) -> PgResult<T> {
+    if !flinfo.has_fn_extra() {
+        let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(Box::new(init));
+    }
+    Ok(*funcapi::per_MultiFuncCall(flinfo)
+        .user_fctx
+        .as_ref()
+        .expect("srf cursor set at first call")
+        .downcast_ref::<T>()
+        .expect("srf cursor type"))
+}
+
+fn srf_cursor_set<T: 'static>(flinfo: &mut FmgrInfo, value: T) {
+    funcapi::per_MultiFuncCall(flinfo).user_fctx = Some(Box::new(value));
+}
+
 // datetime.c pg_timezone_abbrevs_zone: abbreviations defined by the IANA
 // data for the current session timezone setting.
 pub fn fc_pg_timezone_abbrevs_zone(
@@ -1284,16 +1314,14 @@ pub fn fc_pg_timezone_abbrevs_zone(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("pg_timezone_abbrevs_zone: resolved FmgrInfo required");
-    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
-    let mcx = unsafe { fcinfo.result_mcx_detached() };
-    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    let mut pindex: i32 = srf_cursor(flinfo, fcinfo, 0i32)?;
 
     let now = xact::GetCurrentTransactionStartTimestamp();
     let t = crate::timestamptz_to_time_t(now);
     let session_tz = adt_datetime::tz::session_timezone()
         .expect("pg_timezone_abbrevs_zone: session_timezone not initialized");
 
-    let mut pindex = 0i32;
+    let mut row = None;
     while let Some(abbrev) = localtime::pg_get_next_timezone_abbrev(&mut pindex, session_tz) {
         if !abbrev.iter().all(u8::is_ascii_uppercase) {
             continue;
@@ -1302,17 +1330,20 @@ pub fn fc_pg_timezone_abbrevs_zone(
         else {
             continue;
         };
-        let name = tz_abbrev_text_image(abbrev);
-        let iv_img = tz_abbrev_interval_image(gmtoff);
-        let values = [
-            Datum::from_usize(name.as_ptr() as usize),
-            Datum::from_usize(iv_img.as_ptr() as usize),
-            Datum::from_bool(isdst != 0),
-        ];
-        srf.putvalues(&values, &[false; 3])?;
+        row = Some((tz_abbrev_text_image(abbrev), tz_abbrev_interval_image(gmtoff), isdst != 0));
+        break;
     }
-
-    Ok(srf.finish(fcinfo))
+    srf_cursor_set(flinfo, pindex);
+    let Some((name, iv_img, is_dst)) = row else {
+        return Ok(funcapi::srf_return_done(flinfo, fcinfo));
+    };
+    let values = [
+        Datum::from_usize(name.as_ptr() as usize),
+        Datum::from_usize(iv_img.as_ptr() as usize),
+        Datum::from_bool(is_dst),
+    ];
+    let d = tz_abbrev_row(flinfo, fcinfo, &values)?;
+    Ok(funcapi::srf_return_next(flinfo, fcinfo, d))
 }
 
 // datetime.c pg_timezone_abbrevs_abbrevs: abbreviations defined by the
@@ -1324,51 +1355,47 @@ pub fn fc_pg_timezone_abbrevs_abbrevs(
     use adt_datetime::consts::{DTERR_BAD_ZONE_ABBREV, DTZ, DYNTZ, TZ};
 
     let flinfo = flinfo.expect("pg_timezone_abbrevs_abbrevs: resolved FmgrInfo required");
-    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
-    let mcx = unsafe { fcinfo.result_mcx_detached() };
-    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    let pindex: usize = srf_cursor(flinfo, fcinfo, 0usize)?;
 
-    let Some(tbl) = adt_datetime::tz::zoneabbrevtbl() else {
-        return Ok(srf.finish(fcinfo));
+    let Some(tp) = adt_datetime::tz::zoneabbrevtbl().and_then(|tbl| tbl.abbrevs.get(pindex)) else {
+        return Ok(funcapi::srf_return_done(flinfo, fcinfo));
     };
-    for tp in tbl.abbrevs {
-        let (gmtoffset, is_dst): (i64, bool) = match tp.typ as i32 {
-            TZ => (tp.value as i64, false),
-            DTZ => (tp.value as i64, true),
-            DYNTZ => {
-                let mut extra = adt_datetime::DateTimeErrorExtra::default();
-                let Some(tzp) = adt_datetime::tz::FetchDynamicTimeZone(tbl, tp, &mut extra)?
-                else {
-                    adt_datetime::errors::DateTimeParseError(
-                        DTERR_BAD_ZONE_ABBREV,
-                        Some(&extra),
-                        "",
-                        "",
-                        None,
-                    )?;
-                    unreachable!("DateTimeParseError returns Err");
-                };
-                let now = xact::GetCurrentTransactionStartTimestamp();
-                let mut isdst = 0i32;
-                let off =
-                    crate::DetermineTimeZoneAbbrevOffsetTS(now, tp.token_bytes(), tzp, &mut isdst)?;
-                (-(off as i64), isdst != 0)
-            }
-            other => panic!("unrecognized timezone type {other}"),
-        };
+    srf_cursor_set(flinfo, pindex + 1);
+    let tbl = adt_datetime::tz::zoneabbrevtbl().expect("zoneabbrevtbl checked above");
 
-        // Upcase (inverse of ParseDateTime's downcasing).
-        let name = tz_abbrev_text_image(&tp.token_bytes().to_ascii_uppercase());
-        let iv_img = tz_abbrev_interval_image(gmtoffset);
-        let values = [
-            Datum::from_usize(name.as_ptr() as usize),
-            Datum::from_usize(iv_img.as_ptr() as usize),
-            Datum::from_bool(is_dst),
-        ];
-        srf.putvalues(&values, &[false; 3])?;
-    }
+    let (gmtoffset, is_dst): (i64, bool) = match tp.typ as i32 {
+        TZ => (tp.value as i64, false),
+        DTZ => (tp.value as i64, true),
+        DYNTZ => {
+            let mut extra = adt_datetime::DateTimeErrorExtra::default();
+            let Some(tzp) = adt_datetime::tz::FetchDynamicTimeZone(tbl, tp, &mut extra)? else {
+                adt_datetime::errors::DateTimeParseError(
+                    DTERR_BAD_ZONE_ABBREV,
+                    Some(&extra),
+                    "",
+                    "",
+                    None,
+                )?;
+                unreachable!("DateTimeParseError returns Err");
+            };
+            let now = xact::GetCurrentTransactionStartTimestamp();
+            let mut isdst = 0i32;
+            let off = crate::DetermineTimeZoneAbbrevOffsetTS(now, tp.token_bytes(), tzp, &mut isdst)?;
+            (-(off as i64), isdst != 0)
+        }
+        other => panic!("unrecognized timezone type {other}"),
+    };
 
-    Ok(srf.finish(fcinfo))
+    // Upcase (inverse of ParseDateTime's downcasing).
+    let name = tz_abbrev_text_image(&tp.token_bytes().to_ascii_uppercase());
+    let iv_img = tz_abbrev_interval_image(gmtoffset);
+    let values = [
+        Datum::from_usize(name.as_ptr() as usize),
+        Datum::from_usize(iv_img.as_ptr() as usize),
+        Datum::from_bool(is_dst),
+    ];
+    let d = tz_abbrev_row(flinfo, fcinfo, &values)?;
+    Ok(funcapi::srf_return_next(flinfo, fcinfo, d))
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {

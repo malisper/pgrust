@@ -1375,11 +1375,15 @@ fn get_index_clause_from_support<'mcx>(
     if shape.prosupport == 0 {
         return Ok(None);
     }
+    let prosupport = match shape.prosupport {
+        1023 | 1025 | 1364 | 1024 | 6242 => shape.prosupport,
+        p => fmgr_core::canonical_builtin_oid(p)?,
+    };
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
     let mut lossy = true;
-    let exprs = match shape.prosupport {
+    let exprs = match prosupport {
         1023 | 1025 | 1364 | 1024 | 6242 => {
-            let ptype = match shape.prosupport {
+            let ptype = match prosupport {
                 1023 => PatternType::Like,
                 1025 => PatternType::LikeIc,
                 1364 => PatternType::Regex,

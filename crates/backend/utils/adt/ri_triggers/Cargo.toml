@@ -40,6 +40,7 @@ types_guc = { path = "../../../../_support/types/types_guc" }
 snapmgr = { path = "../../time/snapmgr" }
 init_small = { path = "../../init/init_small" }
 varlena = { path = "../varlena" }
+detoast = { path = "../../../access/common/detoast" }
 ruleutils = { path = "../ruleutils" }
 rls_seams = { path = "../../misc/rls_seams" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }

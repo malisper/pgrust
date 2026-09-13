@@ -5,14 +5,14 @@ pub const CHAR_MAX: i8 = 127;
 pub struct PgLconv {
     /// LC_NUMERIC (not LC_MONETARY): to_char's `D` and `G`. C's
     /// PGLC_localeconv copies these alongside the monetary set.
-    pub decimal_point: &'static str,
-    pub thousands_sep: &'static str,
-    pub mon_decimal_point: &'static str,
-    pub mon_thousands_sep: &'static str,
+    pub decimal_point: &'static [u8],
+    pub thousands_sep: &'static [u8],
+    pub mon_decimal_point: &'static [u8],
+    pub mon_thousands_sep: &'static [u8],
     pub mon_grouping: &'static str,
-    pub currency_symbol: &'static str,
-    pub positive_sign: &'static str,
-    pub negative_sign: &'static str,
+    pub currency_symbol: &'static [u8],
+    pub positive_sign: &'static [u8],
+    pub negative_sign: &'static [u8],
     pub frac_digits: i8,
     pub p_cs_precedes: i8,
     pub n_cs_precedes: i8,
@@ -23,14 +23,14 @@ pub struct PgLconv {
 }
 
 static C_LOCALE_LCONV: PgLconv = PgLconv {
-    decimal_point: "",
-    thousands_sep: "",
-    mon_decimal_point: "",
-    mon_thousands_sep: "",
+    decimal_point: b"",
+    thousands_sep: b"",
+    mon_decimal_point: b"",
+    mon_thousands_sep: b"",
     mon_grouping: "",
-    currency_symbol: "",
-    positive_sign: "",
-    negative_sign: "",
+    currency_symbol: b"",
+    positive_sign: b"",
+    negative_sign: b"",
     frac_digits: CHAR_MAX,
     p_cs_precedes: CHAR_MAX,
     n_cs_precedes: CHAR_MAX,
@@ -88,22 +88,17 @@ fn localeconv_non_c() -> ::types_error::PgResult<&'static PgLconv> {
 
 // db_encoding_convert (pg_locale.c:502): convert one lconv string from the
 // locale's encoding into the database encoding (pg_any_to_server also
-// validates it when no conversion applies). The result feeds a `&str`; a
-// database encoding that is not UTF-8 keeps the lossy fallback for bytes that
-// are not valid UTF-8.
+// validates it when no conversion applies). The bytes stay as converted: a
+// SQL_ASCII database keeps them verbatim, UTF-8 or not.
 #[cfg(not(target_family = "wasm"))]
-fn db_encoding_convert(
+pub(crate) fn db_encoding_convert(
     mcx: ::mcx::Mcx<'_>,
     encoding: i32,
     raw: &[u8],
-) -> ::types_error::PgResult<String> {
-    let converted = match mbutils::pg_any_to_server(mcx, raw, encoding)? {
+) -> ::types_error::PgResult<Vec<u8>> {
+    Ok(match mbutils::pg_any_to_server(mcx, raw, encoding)? {
         Some(v) => v.as_slice().to_vec(),
         None => raw.to_vec(),
-    };
-    Ok(match String::from_utf8(converted) {
-        Ok(s) => s,
-        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
     })
 }
 
@@ -243,19 +238,21 @@ fn read_lconv(monetary: &str, numeric: &str) -> ::types_error::PgResult<PgLconv>
         let currency_symbol = db_encoding_convert(mcx, monetary_enc, &v.5)?;
         let positive_sign = db_encoding_convert(mcx, monetary_enc, &v.6)?;
         let negative_sign = db_encoding_convert(mcx, monetary_enc, &v.7)?;
-        let leak = |s: String| -> &'static str {
+        let leak = |s: Vec<u8>| -> &'static [u8] {
             if s.is_empty() {
-                ""
+                b""
             } else {
-                Box::leak(s.into_boxed_str())
+                Box::leak(s.into_boxed_slice())
             }
         };
+        let mon_grouping: &'static str =
+            if mon_grouping.is_empty() { "" } else { Box::leak(mon_grouping.into_boxed_str()) };
         Ok(PgLconv {
             decimal_point: leak(decimal_point),
             thousands_sep: leak(thousands_sep),
             mon_decimal_point: leak(mon_decimal_point),
             mon_thousands_sep: leak(mon_thousands_sep),
-            mon_grouping: leak(mon_grouping),
+            mon_grouping,
             currency_symbol: leak(currency_symbol),
             positive_sign: leak(positive_sign),
             negative_sign: leak(negative_sign),

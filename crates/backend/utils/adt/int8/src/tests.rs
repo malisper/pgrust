@@ -239,3 +239,17 @@ fn hashint8_folds_to_int4_hash() {
         );
     }
 }
+
+#[test]
+fn int8out_results_do_not_alias_across_carriers() {
+    let mut f1 = ::types_fmgr::FmgrInfo::new(fc_int8out, 461, 1, true, false);
+    let mut f2 = ::types_fmgr::FmgrInfo::new(fc_int8out, 461, 1, true, false);
+    let mut fci = ::types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, Datum::from_i64(11));
+    let d1 = f1.invoke(&mut fci).unwrap();
+    fci.set_arg(0, Datum::from_i64(22));
+    let d2 = f2.invoke(&mut fci).unwrap();
+    let cstr = |d: Datum| unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }.to_bytes().to_vec();
+    assert_eq!(cstr(d1), b"11");
+    assert_eq!(cstr(d2), b"22");
+}

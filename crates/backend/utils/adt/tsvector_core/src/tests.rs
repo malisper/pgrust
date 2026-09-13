@@ -291,3 +291,14 @@ fn tsvector_recv_rejects_invalid_shapes() {
     let img = recv(&wire).expect("datalen == MAXSTRPOS fits");
     assert_eq!(TsVec { payload: &img[4..] }.size(), 513);
 }
+
+#[test]
+fn ts_compare_string_returns_memcmp_difference() {
+    use crate::layout::ts_compare_string;
+    assert_eq!(ts_compare_string(b"a", b"z", false), -25);
+    assert_eq!(ts_compare_string(b"z", b"a", false), 25);
+    assert_eq!(ts_compare_string(b"ab", b"a", false), 1);
+    assert_eq!(ts_compare_string(b"a", b"ab", false), -1);
+    assert_eq!(ts_compare_string(b"ab", b"a", true), 1);
+    assert_eq!(ts_compare_string(b"a", b"ab", true), 0);
+}

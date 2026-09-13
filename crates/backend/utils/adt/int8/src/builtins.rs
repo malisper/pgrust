@@ -27,15 +27,6 @@ pub fn fc_int8send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     Ok(varlena_result(crate::int8send(mcx, a.value.as_i64())?))
 }
 
-// C pallocs the cstring result into the per-row context; here the backend
-// thread owns retained scratch (rules 7/10; fn_extra was measured out: its
-// dyn-Any downcast is a per-row virtual type_id call). The returned Datum
-// aliases the scratch: consume it before the next out-function call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; 24]> =
-        const { core::cell::UnsafeCell::new([0; 24]) };
-}
-
 pub fn fc_int8in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of int8in is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
@@ -45,16 +36,12 @@ pub fn fc_int8in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(Datum::from_i64(crate::int8in(&num, esc)?))
 }
 
-pub fn fc_int8out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_int8out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let val = a.value.as_i64();
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::int8out(val, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; 24];
+    let len = crate::int8out(val, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "int8out", &buf[..len]))
 }
 
 macro_rules! fc1 {

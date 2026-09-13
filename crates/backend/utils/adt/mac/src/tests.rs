@@ -191,9 +191,19 @@ fn fc_wrappers() {
 
     let mut fcinfo = LocalFcinfo::<1>::new(0);
     fcinfo.set_arg(0, mac_datum(&a));
-    let d = fc_macaddr_out(None, &mut fcinfo).unwrap();
+    let mut out_fn = types_fmgr::FmgrInfo::new(fc_macaddr_out, 437, 1, true, false);
+    let d = out_fn.invoke(&mut fcinfo).unwrap();
     let cstr = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
     assert_eq!(cstr.to_bytes(), b"08:00:2b:01:02:03");
+
+    let mut f1 = types_fmgr::FmgrInfo::new(fc_macaddr_out, 437, 1, true, false);
+    let mut f2 = types_fmgr::FmgrInfo::new(fc_macaddr_out, 437, 1, true, false);
+    let d1 = f1.invoke(&mut fcinfo).unwrap();
+    fcinfo.set_arg(0, mac_datum(&b));
+    let d2 = f2.invoke(&mut fcinfo).unwrap();
+    let cs = |d: ::datum::Datum| unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }.to_bytes().to_vec();
+    assert_eq!(cs(d1), b"08:00:2b:01:02:03");
+    assert_ne!(cs(d2), b"08:00:2b:01:02:03");
 
     let mut fcinfo = LocalFcinfo::<1>::new(0);
     fcinfo.set_arg(0, mac_datum(&a));

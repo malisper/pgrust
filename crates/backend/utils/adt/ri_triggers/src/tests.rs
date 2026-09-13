@@ -228,10 +228,26 @@ fn datum_image_eq_varlena_equal_and_unequal() {
     let dc = Datum::from_usize(c.as_ptr() as usize);
     let dd = Datum::from_usize(d.as_ptr() as usize);
 
-    assert!(datum_image_eq(da, db, false, -1, a.len(), b.len()));
-    assert!(!datum_image_eq(da, dc, false, -1, a.len(), c.len()));
+    assert!(datum_image_eq(da, db, false, -1, a.len(), b.len()).unwrap());
+    assert!(!datum_image_eq(da, dc, false, -1, a.len(), c.len()).unwrap());
     // Different lengths short-circuit before any slice is formed.
-    assert!(!datum_image_eq(da, dd, false, -1, a.len(), d.len()));
+    assert!(!datum_image_eq(da, dd, false, -1, a.len(), d.len()).unwrap());
+}
+
+#[test]
+fn datum_image_eq_ignores_varlena_header_form() {
+    let a = mk_varlena(b"hello");
+    let mut s = vec![0u8; 6];
+    // SAFETY: `s` holds the 1-byte header plus the 5-byte payload.
+    unsafe { types_tuple::varatt::set_varsize_short(s.as_mut_ptr(), 6) };
+    s[1..].copy_from_slice(b"hello");
+    let da = Datum::from_usize(a.as_ptr() as usize);
+    let ds = Datum::from_usize(s.as_ptr() as usize);
+    assert!(datum_image_eq(da, ds, false, -1, a.len(), s.len()).unwrap());
+    assert!(datum_image_eq(ds, da, false, -1, s.len(), a.len()).unwrap());
+    let t = mk_varlena(b"hellp");
+    let dt = Datum::from_usize(t.as_ptr() as usize);
+    assert!(!datum_image_eq(ds, dt, false, -1, s.len(), t.len()).unwrap());
 }
 
 #[test]
@@ -239,8 +255,8 @@ fn datum_image_eq_byval_widths() {
     let a = Datum::from_i32(0x0102_0304);
     let b = Datum::from_i32(0x0102_0304);
     let c = Datum::from_i32(0x0506_0708);
-    assert!(datum_image_eq(a, b, true, 4, 0, 0));
-    assert!(!datum_image_eq(a, c, true, 4, 0, 0));
+    assert!(datum_image_eq(a, b, true, 4, 0, 0).unwrap());
+    assert!(!datum_image_eq(a, c, true, 4, 0, 0).unwrap());
 }
 
 #[test]

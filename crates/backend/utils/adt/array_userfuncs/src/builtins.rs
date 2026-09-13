@@ -70,11 +70,7 @@ fn append_prepend_common(
 ) -> PgResult<Datum> {
     let (arr_i, elem_i) = if is_append { (0, 1) } else { (1, 0) };
     let flinfo = flinfo.expect("array_append/prepend: NULL flinfo");
-    // SAFETY: fcinfo.context, if an agg node, is the executor's live state.
-    let mcx = match unsafe { fcinfo.agg_context() } {
-        Some(m) => m,
-        None => fcinfo.result_mcx(),
-    };
+    let mcx = fcinfo.result_mcx();
 
     let (array, meta) = if !fcinfo.argisnull(arr_i) {
         let img = arg_array_bytes(fcinfo, arr_i, mcx)?;

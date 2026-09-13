@@ -37,24 +37,10 @@ pub fn fc_boolin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(Datum::from_bool(crate::boolin(&s, esc)?))
 }
 
-// C pallocs the 2-byte cstring per row; the backend thread owns retained
-// scratch (the int.c out-function precedent). The Datum aliases it until the
-// next out call on this thread.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; 2]> =
-        const { core::cell::UnsafeCell::new([0; 2]) };
-}
-
-pub fn fc_boolout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_boolout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let b = a.value.as_bool();
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        buf[0] = crate::boolout(b);
-        buf[1] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    Ok(::types_fmgr::cstring_scratch(flinfo, "boolout", &[crate::boolout(b)]))
 }
 
 macro_rules! fc_bool2 {

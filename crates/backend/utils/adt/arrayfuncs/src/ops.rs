@@ -1160,7 +1160,7 @@ pub fn fc_width_bucket_array(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo)
         let flinfo = flinfo.expect("width_bucket_array: NULL flinfo");
         let memo = cached_typentry(flinfo, element_type, TcWant::Cmp)?;
         let meta = memo.meta();
-        let mut cmpfn = memo.entry.cmp_proc_finfo();
+        let mut cmpfn = memo.entry.cmp_proc_finfo().clone();
 
         if meta.typlen > 0 {
             width_bucket_array_fixed(mcx, operand, &thresholds, collation, meta, &mut cmpfn, nitems)?

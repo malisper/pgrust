@@ -315,3 +315,9 @@ fn aclright_strings_match_c() {
         assert_eq!(crate::builtins::convert_aclright_to_string(1u64 << i), *want);
     }
 }
+
+#[test]
+fn aclitemin_rejects_a_grantor_name_that_is_not_utf8() {
+    let err = crate::io::aclitemin(b"=r/\xff", None).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT);
+}

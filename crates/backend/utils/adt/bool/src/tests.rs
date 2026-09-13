@@ -141,7 +141,8 @@ fn fc_wrappers_and_registry() {
 
     let mut fcinfo = LocalFcinfo::<1>::new(0);
     fcinfo.set_arg(0, Datum::from_bool(true));
-    let out = fc_boolout(None, &mut fcinfo).unwrap();
+    let mut out_fn = types_fmgr::FmgrInfo::new(fc_boolout, 1243, 1, true, false);
+    let out = out_fn.invoke(&mut fcinfo).unwrap();
     // SAFETY: fc_boolout returns a NUL-terminated cstring datum.
     let s = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
     assert_eq!(s.to_bytes(), b"t");
@@ -184,4 +185,18 @@ fn fc_booltext_result_mcx() {
         let r = unsafe { datum::VarlenaRef::from_ptr(d.as_usize() as *const u8) };
         assert_eq!(r.data(), want);
     }
+}
+
+#[test]
+fn boolout_results_do_not_alias_across_carriers() {
+    let mut f1 = types_fmgr::FmgrInfo::new(fc_boolout, 1243, 1, true, false);
+    let mut f2 = types_fmgr::FmgrInfo::new(fc_boolout, 1243, 1, true, false);
+    let mut fci = types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, Datum::from_bool(true));
+    let d1 = f1.invoke(&mut fci).unwrap();
+    fci.set_arg(0, Datum::from_bool(false));
+    let d2 = f2.invoke(&mut fci).unwrap();
+    let cstr = |d: Datum| unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }.to_bytes().to_vec();
+    assert_eq!(cstr(d1), b"t");
+    assert_eq!(cstr(d2), b"f");
 }

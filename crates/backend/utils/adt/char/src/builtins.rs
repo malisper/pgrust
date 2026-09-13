@@ -29,26 +29,12 @@ pub fn fc_charin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(Datum::from_char(crate::charin(s.to_bytes())))
 }
 
-// C pallocs the (at most 5-byte) cstring per call; backend-thread retained
-// scratch is the out-function precedent (bool.c/int.c). The Datum aliases it
-// until the next charout on this thread.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; 5]> =
-        const { core::cell::UnsafeCell::new([0; 5]) };
-}
-
-pub fn fc_charout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_charout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let ch = a.value.as_char();
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let mut img = [0u8; 4];
-        let n = crate::charout(ch, &mut img);
-        buf[..n].copy_from_slice(&img[..n]);
-        buf[n] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut img = [0u8; 4];
+    let n = crate::charout(ch, &mut img);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "charout", &img[..n]))
 }
 
 pub fn fc_charrecv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

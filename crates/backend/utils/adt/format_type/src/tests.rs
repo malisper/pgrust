@@ -6,6 +6,8 @@ use types_tuple::NameData;
 use crate::{format_type_be, format_type_with_typemod, quote_identifier, quote_identifier_bytes};
 
 const VARCHARTYPMODOUT: types_core::Oid = 2915;
+const NULL_TYPMODOUT: types_core::Oid = 2916;
+const NULL_TYPMOD_TYPE: types_core::Oid = 20003;
 
 // quote_identifier consults the quote_all_identifiers GUC; serialize the
 // tests whose expected output depends on its (default off) state.
@@ -51,6 +53,7 @@ fn install_fixture() {
                 INT4ARRAYOID => Some(shape("_int4", INT4OID, F_ARRAY_SUBSCRIPT_HANDLER)),
                 20000 => Some(shape("mytype", InvalidOid, InvalidOid)),
                 20001 => Some(shape("othertype", InvalidOid, InvalidOid)),
+                NULL_TYPMOD_TYPE => Some(shape("nulltm", InvalidOid, InvalidOid)),
                 // A SQL_ASCII catalog name carrying a non-UTF-8 byte.
                 20002 => {
                     let mut s = shape("x", InvalidOid, InvalidOid);
@@ -70,7 +73,11 @@ fn install_fixture() {
                 typreceive: InvalidOid,
                 typsend: InvalidOid,
                 typmodin: InvalidOid,
-                typmodout: if typid == VARCHAROID { VARCHARTYPMODOUT } else { InvalidOid },
+                typmodout: match typid {
+                    VARCHAROID => VARCHARTYPMODOUT,
+                    NULL_TYPMOD_TYPE => NULL_TYPMODOUT,
+                    _ => InvalidOid,
+                },
                 typelem: InvalidOid,
                 typlen: 4,
                 typbyval: true,
@@ -117,9 +124,31 @@ fn install_fixture() {
                 true,
                 false,
             )),
+            NULL_TYPMODOUT => Ok(types_fmgr::FmgrInfo::new(
+                null_typmodout_fn,
+                NULL_TYPMODOUT,
+                1,
+                true,
+                false,
+            )),
             _ => panic!("fmgr_info: unexpected oid {oid}"),
         });
     });
+}
+
+fn null_typmodout_fn(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> types_error::PgResult<datum::Datum> {
+    Ok(fcinfo.return_null())
+}
+
+#[test]
+fn typmodout_returning_null_is_an_error() {
+    let _g = qai_lock();
+    install_fixture();
+    let err = format_type_with_typemod(NULL_TYPMOD_TYPE, 7).unwrap_err();
+    assert_eq!(err.message(), "function 2916 returned NULL");
 }
 
 fn varchartypmodout_fn(

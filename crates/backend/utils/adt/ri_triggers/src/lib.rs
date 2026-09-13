@@ -2068,7 +2068,7 @@ fn ri_KeysEqual(
                     _ => datum_image_corrupt(),
                 }
             };
-            if !datum_image_eq(oldvalue, newvalue, att.attbyval, att.attlen, avail_old, avail_new) {
+            if !datum_image_eq(oldvalue, newvalue, att.attbyval, att.attlen, avail_old, avail_new)? {
                 return Ok(false);
             }
         } else {
@@ -2279,44 +2279,68 @@ fn datum_image_eq(
     typlen: i16,
     avail_a: usize,
     avail_b: usize,
-) -> bool {
+) -> PgResult<bool> {
     if typbyval {
         // Compare at typlen width: a formed-then-deformed datum may differ
         // from the original in the upper bits (C 49315de).
         let (x, y) = (a.as_usize(), b.as_usize());
-        return match typlen {
+        return Ok(match typlen {
             1 => x as u8 == y as u8,
             2 => x as u16 == y as u16,
             4 => x as u32 == y as u32,
             _ => x == y,
-        };
+        });
     }
     // SAFETY: by-ref datums point into the heap-tuple images they were fetched
     // from; `avail_a`/`avail_b` bound the readable extent from each pointer, and
     // every slice length below is validated against that bound before use.
     unsafe {
         let (pa, pb) = (a.as_usize() as *const u8, b.as_usize() as *const u8);
-        let (la, lb) = if typlen > 0 {
+        if typlen > 0 {
             let l = typlen as usize;
             // Fixed-width by-ref: the image must hold `typlen` bytes for each.
             if l > avail_a || l > avail_b {
                 datum_image_corrupt();
             }
-            (l, l)
-        } else {
-            assert!(typlen == -1, "datum_image_eq: cstring keys unreachable");
-            match (
-                types_tuple::varatt::varsize_bounded(pa, avail_a),
-                types_tuple::varatt::varsize_bounded(pb, avail_b),
-            ) {
-                (Some(la), Some(lb)) => (la, lb),
-                // A varlena header declaring a size past its tuple image: a
-                // crafted/forged length. Never happens for a well-formed tuple.
-                _ => datum_image_corrupt(),
-            }
+            return Ok(core::slice::from_raw_parts(pa, l) == core::slice::from_raw_parts(pb, l));
+        }
+        assert!(typlen == -1, "datum_image_eq: cstring keys unreachable");
+        let (la, lb) = match (
+            types_tuple::varatt::varsize_bounded(pa, avail_a),
+            types_tuple::varatt::varsize_bounded(pb, avail_b),
+        ) {
+            (Some(la), Some(lb)) => (la, lb),
+            // A varlena header declaring a size past its tuple image: a
+            // crafted/forged length. Never happens for a well-formed tuple.
+            _ => datum_image_corrupt(),
         };
-        la == lb && core::slice::from_raw_parts(pa, la) == core::slice::from_raw_parts(pb, lb)
+        varlena_image_eq(core::slice::from_raw_parts(pa, la), core::slice::from_raw_parts(pb, lb))
     }
+}
+
+// C compares detoasted payloads: the header form (short, 4B, compressed,
+// external) is not part of the image.
+fn varlena_image_eq(a: &[u8], b: &[u8]) -> PgResult<bool> {
+    use types_tuple::varatt::{varatt_is_1b, varatt_is_1b_e, varatt_is_4b_u, VARHDRSZ};
+    if detoast::toast_raw_datum_size(a) != detoast::toast_raw_datum_size(b) {
+        return Ok(false);
+    }
+    // SAFETY: both slices are complete varlena images (varsize_bounded).
+    let plain = |x: &[u8]| unsafe {
+        let p = x.as_ptr();
+        varatt_is_4b_u(p) || (varatt_is_1b(p) && !varatt_is_1b_e(p))
+    };
+    fn payload(x: &[u8]) -> &[u8] {
+        // SAFETY: a plain image is a short or 4B header plus payload.
+        if unsafe { varatt_is_1b(x.as_ptr()) } { &x[1..] } else { &x[VARHDRSZ..] }
+    }
+    if plain(a) && plain(b) {
+        return Ok(payload(a) == payload(b));
+    }
+    let cx = MemoryContext::new("datum_image_eq");
+    let da = detoast::detoast_attr(cx.mcx(), a)?;
+    let db = detoast::detoast_attr(cx.mcx(), b)?;
+    Ok(da[VARHDRSZ..] == db[VARHDRSZ..])
 }
 
 /// Bytes of `tuple`'s image reachable from the by-ref datum `d`: the distance

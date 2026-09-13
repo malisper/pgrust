@@ -26,26 +26,12 @@ pub fn fc_cash_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     Ok(Datum::from_i64(crate::cash_in(&s, esc)?))
 }
 
-// C pallocs the cstring per row; the backend thread owns retained scratch
-// (the int.c out-function precedent). The Datum aliases it until the next
-// out call on this thread.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; crate::CASH_OUT_BUFLEN + 1]> =
-        const { core::cell::UnsafeCell::new([0; crate::CASH_OUT_BUFLEN + 1]) };
-}
-
-pub fn fc_cash_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_cash_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let value = a.value.as_i64();
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let body: &mut [u8; crate::CASH_OUT_BUFLEN] =
-            (&mut buf[..crate::CASH_OUT_BUFLEN]).try_into().unwrap();
-        let len = crate::cash_out_into(value, body)?;
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; crate::CASH_OUT_BUFLEN];
+    let len = crate::cash_out_into(value, &mut buf)?;
+    Ok(::types_fmgr::cstring_scratch(flinfo, "cash_out", &buf[..len]))
 }
 
 macro_rules! fc_cash2 {

@@ -61,23 +61,23 @@ fn clamp_fpoint(lconvert: &PgLconv) -> i32 {
 fn dsymbol_of(lconvert: &PgLconv) -> u8 {
     // dsymbol is restricted to a single byte, unlike the other symbols.
     if lconvert.mon_decimal_point.len() == 1 {
-        lconvert.mon_decimal_point.as_bytes()[0]
+        lconvert.mon_decimal_point[0]
     } else {
         b'.'
     }
 }
 
-fn ssymbol_of(lconvert: &PgLconv, dsymbol: u8) -> &'static str {
+fn ssymbol_of(lconvert: &PgLconv, dsymbol: u8) -> &'static [u8] {
     if !lconvert.mon_thousands_sep.is_empty() {
         lconvert.mon_thousands_sep
     } else if dsymbol != b',' {
-        ","
+        b","
     } else {
-        "."
+        b"."
     }
 }
 
-fn nonempty_or(sym: &'static str, default: &'static str) -> &'static str {
+fn nonempty_or(sym: &'static [u8], default: &'static [u8]) -> &'static [u8] {
     if sym.is_empty() {
         default
     } else {
@@ -89,10 +89,10 @@ pub fn cash_in(str: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<
     let lconvert = pglc_localeconv()?;
     let fpoint = clamp_fpoint(lconvert);
     let dsymbol = dsymbol_of(lconvert);
-    let ssymbol = ssymbol_of(lconvert, dsymbol).as_bytes();
-    let csymbol = nonempty_or(lconvert.currency_symbol, "$").as_bytes();
-    let psymbol = nonempty_or(lconvert.positive_sign, "+").as_bytes();
-    let nsymbol = nonempty_or(lconvert.negative_sign, "-").as_bytes();
+    let ssymbol = ssymbol_of(lconvert, dsymbol);
+    let csymbol = nonempty_or(lconvert.currency_symbol, b"$");
+    let psymbol = nonempty_or(lconvert.positive_sign, b"+");
+    let nsymbol = nonempty_or(lconvert.negative_sign, b"-");
 
     let b = str.as_bytes();
     let mut i = 0usize;
@@ -214,19 +214,19 @@ pub fn cash_out_into(value: Cash, out: &mut [u8; CASH_OUT_BUFLEN]) -> PgResult<u
         }
     };
     let dsymbol = dsymbol_of(lconvert);
-    let ssymbol = ssymbol_of(lconvert, dsymbol).as_bytes();
-    let csymbol = nonempty_or(lconvert.currency_symbol, "$").as_bytes();
+    let ssymbol = ssymbol_of(lconvert, dsymbol);
+    let csymbol = nonempty_or(lconvert.currency_symbol, b"$");
 
     let (signsymbol, sign_posn, cs_precedes, sep_by_space) = if value < 0 {
         (
-            nonempty_or(lconvert.negative_sign, "-").as_bytes(),
+            nonempty_or(lconvert.negative_sign, b"-"),
             lconvert.n_sign_posn,
             lconvert.n_cs_precedes,
             lconvert.n_sep_by_space,
         )
     } else {
         (
-            lconvert.positive_sign.as_bytes(),
+            lconvert.positive_sign,
             lconvert.p_sign_posn,
             lconvert.p_cs_precedes,
             lconvert.p_sep_by_space,

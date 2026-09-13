@@ -63,3 +63,17 @@ fn text_casts() {
     assert_eq!(text_char(b"\\377"), -1);
     assert_eq!(text_char(b""), 0);
 }
+
+#[test]
+fn charout_results_do_not_alias_across_carriers() {
+    let mut f1 = types_fmgr::FmgrInfo::new(crate::builtins::fc_charout, 1246, 1, true, false);
+    let mut f2 = types_fmgr::FmgrInfo::new(crate::builtins::fc_charout, 1246, 1, true, false);
+    let mut fci = types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_char(b'a' as i8));
+    let d1 = f1.invoke(&mut fci).unwrap();
+    fci.set_arg(0, ::datum::Datum::from_char(b'b' as i8));
+    let d2 = f2.invoke(&mut fci).unwrap();
+    let cstr = |d: ::datum::Datum| unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }.to_bytes().to_vec();
+    assert_eq!(cstr(d1), b"a");
+    assert_eq!(cstr(d2), b"b");
+}

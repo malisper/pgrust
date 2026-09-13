@@ -13,15 +13,6 @@ use ::types_fmgr::{
     PGFunction, ThinBuiltin, ThinFcinfo,
 };
 
-// C pallocs each cstring result into the per-row context; here the backend
-// thread owns retained scratch (rules 7/10; fn_extra was measured out: its
-// dyn-Any downcast is a per-row virtual type_id call). The returned Datum
-// aliases the scratch: consume it before the next out-function call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; 16]> =
-        const { core::cell::UnsafeCell::new([0; 16]) };
-}
-
 fn in_arg<'a>(fcinfo: &'a Fcinfo) -> alloc::borrow::Cow<'a, str> {
     // SAFETY: catalog arg 0 of the in-functions is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
@@ -35,16 +26,12 @@ pub fn fc_int2in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(Datum::from_i16(crate::int2in(&num, esc)?))
 }
 
-pub fn fc_int2out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_int2out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let v = a.value.as_i16();
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::int2out(v, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; 16];
+    let len = crate::int2out(v, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "int2out", &buf[..len]))
 }
 
 pub fn fc_int2vectorin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -105,16 +92,12 @@ pub fn fc_int4in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(Datum::from_i32(crate::int4in(&num, esc)?))
 }
 
-pub fn fc_int4out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_int4out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let v = a.value.as_i32();
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::int4out(v, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; 16];
+    let len = crate::int4out(v, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "int4out", &buf[..len]))
 }
 
 pub fn fc_int2recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

@@ -924,7 +924,7 @@ fn read_array_binary<'mcx>(
             ));
         }
         if itemlen == -1 {
-            values.push(Datum::null());
+            values.push(receive_function_call(proc, None, meta.typioparam, typmod, mcx)?);
             nulls.push(true);
             continue;
         }

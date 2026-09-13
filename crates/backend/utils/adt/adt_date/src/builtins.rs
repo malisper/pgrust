@@ -19,13 +19,6 @@ use crate::{DateADT, TimeTzADT};
 use adt_datetime::{Interval, MAXDATELEN};
 use adt_timestamp::{interval, PartValue, TIMESTAMP_NOT_FINITE};
 
-// C pallocs the cstring per row; the backend thread owns retained scratch
-// (the nameout precedent). The Datum aliases it until the next out call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; MAXDATELEN + 1]> =
-        const { core::cell::UnsafeCell::new([0; MAXDATELEN + 1]) };
-}
-
 // PGRUST_ADT_IN_FASTUTF8 (load-speed prototype, DEFAULT OFF): from_utf8_lossy
 // walks the bytes with the chunked lossy iterator even when the input is
 // entirely valid (the always case for COPY input, which is already
@@ -79,15 +72,11 @@ pub fn fc_date_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     Ok(Datum::from_i32(crate::date_in(&s, esc)?))
 }
 
-pub fn fc_date_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_date_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let date = arg_date(fcinfo, 0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::date_out(date, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf: crate::DateBuf = [0; MAXDATELEN + 1];
+    let len = crate::date_out(date, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "date_out", &buf[..len]))
 }
 
 pub fn fc_date_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -294,15 +283,11 @@ pub fn fc_time_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     Ok(Datum::from_i64(crate::time_in(&s, typmod, esc)?))
 }
 
-pub fn fc_time_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_time_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let time = fcinfo.arg_i64(0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::time_out(time, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf: crate::DateBuf = [0; MAXDATELEN + 1];
+    let len = crate::time_out(time, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "time_out", &buf[..len]))
 }
 
 pub fn fc_make_time(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -387,15 +372,11 @@ pub fn fc_timetz_time(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     Ok(Datum::from_i64(arg_timetz(fcinfo, 0).time))
 }
 
-pub fn fc_timetz_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_timetz_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let tt = arg_timetz(fcinfo, 0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::timetz_out(&tt, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf: crate::DateBuf = [0; MAXDATELEN + 1];
+    let len = crate::timetz_out(&tt, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "timetz_out", &buf[..len]))
 }
 
 macro_rules! timetz_cmp_ops {
@@ -506,15 +487,11 @@ pub fn fc_interval_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     interval_result(fcinfo, &iv)
 }
 
-pub fn fc_interval_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_interval_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = interval::interval_out(&iv, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf: crate::DateBuf = [0; MAXDATELEN + 1];
+    let len = interval::interval_out(&iv, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "interval_out", &buf[..len]))
 }
 
 pub fn fc_interval_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -667,26 +644,18 @@ pub fn fc_timestamptz_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_i64(adt_timestamp::timestamptz_in(&s, typmod, esc)?))
 }
 
-pub fn fc_timestamp_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_timestamp_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let t = fcinfo.arg_i64(0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = adt_timestamp::timestamp_out(t, buf)?;
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf: crate::DateBuf = [0; MAXDATELEN + 1];
+    let len = adt_timestamp::timestamp_out(t, &mut buf)?;
+    Ok(::types_fmgr::cstring_scratch(flinfo, "timestamp_out", &buf[..len]))
 }
 
-pub fn fc_timestamptz_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_timestamptz_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let t = fcinfo.arg_i64(0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = adt_timestamp::timestamptz_out(t, buf)?;
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf: crate::DateBuf = [0; MAXDATELEN + 1];
+    let len = adt_timestamp::timestamptz_out(t, &mut buf)?;
+    Ok(::types_fmgr::cstring_scratch(flinfo, "timestamptz_out", &buf[..len]))
 }
 
 pub fn fc_timestamp_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -1014,24 +983,24 @@ pub fn fc_timetztypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     anytime_typmodin(fcinfo, true)
 }
 
-fn anytime_typmodout(fcinfo: &mut Fcinfo, istz: bool) -> PgResult<Datum> {
+fn anytime_typmodout(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    istz: bool,
+) -> PgResult<Datum> {
     let typmod = fcinfo.arg_i32(0);
     let tz: &[u8] = if istz { b" with time zone" } else { b" without time zone" };
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = adt_timestamp::builtins::typmod_paren_suffix_out(typmod, tz, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf: crate::DateBuf = [0; MAXDATELEN + 1];
+    let len = adt_timestamp::builtins::typmod_paren_suffix_out(typmod, tz, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "timetypmodout", &buf[..len]))
 }
 
-pub fn fc_timetypmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    anytime_typmodout(fcinfo, false)
+pub fn fc_timetypmodout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    anytime_typmodout(flinfo, fcinfo, false)
 }
 
-pub fn fc_timetztypmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    anytime_typmodout(fcinfo, true)
+pub fn fc_timetztypmodout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    anytime_typmodout(flinfo, fcinfo, true)
 }
 
 #[cold]

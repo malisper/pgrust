@@ -30,6 +30,34 @@ pub fn varlena_result(v: Varlena<'_>) -> Datum {
     d
 }
 
+// C pallocs each cstring out-function result per row; the resolved FmgrInfo
+// owns retained scratch instead (rule 7). The datum aliases it until the next
+// call through the same FmgrInfo; sibling expression nodes own their own.
+pub struct OutScratch(pub alloc::vec::Vec<u8>);
+
+#[cold]
+#[inline(never)]
+fn no_flinfo(name: &str) -> ! {
+    panic!("{name}: cstring result needs a resolved FmgrInfo's scratch; direct callers use the value core")
+}
+
+pub fn cstring_scratch(
+    flinfo: Option<&mut crate::fcinfo::FmgrInfo>,
+    name: &'static str,
+    bytes: &[u8],
+) -> Datum {
+    let Some(flinfo) = flinfo else { no_flinfo(name) };
+    if !flinfo.has_fn_extra() {
+        flinfo.set_fn_extra(OutScratch(alloc::vec::Vec::new()));
+    }
+    let buf = &mut flinfo.fn_extra_mut::<OutScratch>().unwrap().0;
+    buf.clear();
+    buf.reserve(bytes.len() + 1);
+    buf.extend_from_slice(bytes);
+    buf.push(0);
+    Datum::from_usize(buf.as_ptr() as usize)
+}
+
 #[inline]
 pub fn cstring_result(v: PgVec<'_, u8>) -> Datum {
     debug_assert_eq!(v.last(), Some(&0));

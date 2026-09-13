@@ -202,12 +202,12 @@ fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
     }
     let mut finfo = fmgr_seams::fmgr_info::call(typmodout)?;
     let ctx = mcx::MemoryContext::new("print_typmod");
-    let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(InvalidOid);
-    // SAFETY: ctx outlives the call; the cstring is copied into the format!
-    // below before ctx drops.
-    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
-    fcinfo.set_arg(0, Datum::from_i32(typmod));
-    let out = finfo.invoke(&mut fcinfo)?;
+    let out = types_fmgr::function_call1_coll_in(
+        &mut finfo,
+        InvalidOid,
+        ctx.mcx(),
+        Datum::from_i32(typmod),
+    )?;
     // SAFETY: typmodout fns return a NUL-terminated cstring datum.
     let s = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
     Ok(format!("{typname}{}", s.to_str().expect("typmodout output is ASCII")))

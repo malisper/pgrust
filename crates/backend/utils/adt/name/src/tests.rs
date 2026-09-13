@@ -156,9 +156,19 @@ fn fc_wrappers_and_table() {
 
     let mut fci = LocalFcinfo::<1>::new(0);
     fci.set_arg(0, Datum::from_usize(a.data.as_ptr() as usize));
-    let d = fc_nameout(None, &mut fci).unwrap();
+    let mut out_fn = types_fmgr::FmgrInfo::new(fc_nameout, 1248, 1, true, false);
+    let d = out_fn.invoke(&mut fci).unwrap();
     let s = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
     assert_eq!(s.to_bytes(), b"alpha");
+
+    let mut f1 = types_fmgr::FmgrInfo::new(fc_nameout, 1248, 1, true, false);
+    let mut f2 = types_fmgr::FmgrInfo::new(fc_nameout, 1248, 1, true, false);
+    let d1 = f1.invoke(&mut fci).unwrap();
+    fci.set_arg(0, Datum::from_usize(b.data.as_ptr() as usize));
+    let d2 = f2.invoke(&mut fci).unwrap();
+    let cs = |d: Datum| unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }.to_bytes().to_vec();
+    assert_eq!(cs(d1), b"alpha");
+    assert_eq!(cs(d2), b.name_str());
 
     let mut prev = 0;
     for b in NAME_BUILTINS {

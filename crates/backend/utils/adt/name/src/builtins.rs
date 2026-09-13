@@ -81,14 +81,6 @@ fc_namecmp! {
     fc_btnamecmp: btnamecmp -> from_i32;
 }
 
-// C pallocs the cstring per row; the backend thread owns retained scratch
-// (the int.c out-function precedent). The Datum aliases it until the next
-// out call on this thread.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; NAMELEN + 1]> =
-        const { core::cell::UnsafeCell::new([0; NAMELEN + 1]) };
-}
-
 // C pallocs a NAMEDATALEN block per call; the resolved FmgrInfo owns one
 // retained block instead (the varlena textin precedent). The Datum aliases it
 // until the next call through the same FmgrInfo.
@@ -110,16 +102,9 @@ pub fn fc_namein(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     Ok(Datum::from_usize(nd.data.as_ptr() as usize))
 }
 
-pub fn fc_nameout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_nameout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let s = arg_name(fcinfo, 0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let name = s.name_str();
-        buf[..name.len()].copy_from_slice(name);
-        buf[name.len()] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    Ok(::types_fmgr::cstring_scratch(flinfo, "nameout", s.name_str()))
 }
 
 // C text_name (name.c): namein over the text body (mbcliplen truncation).

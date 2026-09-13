@@ -1,5 +1,5 @@
 use datum::Datum;
-use types_core::{InvalidOid, NAMEDATALEN};
+use types_core::InvalidOid;
 use types_error::PgResult;
 use types_fmgr::{varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
@@ -15,27 +15,10 @@ pub fn fc_enum_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     ))
 }
 
-// C pstrdups the label per call; retained backend scratch, the bool/oid
-// out-function precedent. The Datum aliases it until the next out call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; NAMEDATALEN as usize]> =
-        const { core::cell::UnsafeCell::new([0; NAMEDATALEN as usize]) };
-}
-
-fn label_cstring(label: &[u8]) -> Datum {
-    OUT_SCRATCH.with(|s| {
-        // SAFETY: single-threaded backend; no other live borrow of the scratch.
-        let buf = unsafe { &mut *s.get() };
-        buf[..label.len()].copy_from_slice(label);
-        buf[label.len()] = 0;
-        Datum::from_usize(buf.as_ptr() as usize)
-    })
-}
-
-pub fn fc_enum_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_enum_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let en = crate::enum_out(a.value.as_oid())?;
-    Ok(label_cstring(en.enumlabel.name_str()))
+    Ok(::types_fmgr::cstring_scratch(flinfo, "enum_out", en.enumlabel.name_str()))
 }
 
 pub fn fc_enum_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

@@ -92,12 +92,12 @@ fn num_prepare_locale(num: &NUMDesc) -> ::types_error::PgResult<NumLocale> {
         let decimal: &'static [u8] = if !num.is_ldecimal() {
             b"."
         } else if !l.decimal_point.is_empty() {
-            l.decimal_point.as_bytes()
+            l.decimal_point
         } else {
             b"."
         };
         let thousands: &'static [u8] = if !l.thousands_sep.is_empty() {
-            l.thousands_sep.as_bytes()
+            l.thousands_sep
         } else if decimal != b"," {
             b","
         } else {
@@ -105,19 +105,19 @@ fn num_prepare_locale(num: &NUMDesc) -> ::types_error::PgResult<NumLocale> {
         };
         NumLocale {
             negative: if !l.negative_sign.is_empty() {
-                l.negative_sign.as_bytes()
+                l.negative_sign
             } else {
                 b"-"
             },
             positive: if !l.positive_sign.is_empty() {
-                l.positive_sign.as_bytes()
+                l.positive_sign
             } else {
                 b"+"
             },
             decimal,
             thousands,
             currency: if !l.currency_symbol.is_empty() {
-                l.currency_symbol.as_bytes()
+                l.currency_symbol
             } else {
                 b" "
             },

@@ -146,10 +146,11 @@ pub fn ts_compare_string(a: &[u8], b: &[u8], prefix: bool) -> i32 {
         1
     } else {
         let n = a.len().min(b.len());
-        let mut cmp = match a[..n].cmp(&b[..n]) {
-            core::cmp::Ordering::Less => -1,
-            core::cmp::Ordering::Equal => 0,
-            core::cmp::Ordering::Greater => 1,
+        // memcmp's raw value is user-visible (gin_cmp_tslexeme): the first
+        // differing bytes' difference, as glibc and libSystem return it.
+        let mut cmp = match a[..n].iter().zip(&b[..n]).find(|(x, y)| x != y) {
+            Some((x, y)) => *x as i32 - *y as i32,
+            None => 0,
         };
         if prefix {
             if cmp == 0 && a.len() > b.len() {

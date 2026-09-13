@@ -1316,7 +1316,11 @@ pub fn function_selectivity<'mcx>(
     let Some(shape) = syscache_seams::pg_proc_cost_shape::call(funcid)? else {
         return Err(crate::cache_lookup_failed("function", funcid));
     };
-    let ptype = match shape.prosupport {
+    let prosupport = match shape.prosupport {
+        0 | 1023 | 1025 | 1364 | 1024 | 6242 => shape.prosupport,
+        p => fmgr_core::canonical_builtin_oid(p)?,
+    };
+    let ptype = match prosupport {
         0 => return Ok(0.3333333),
         1023 => PatternType::Like,
         1025 => PatternType::LikeIc,

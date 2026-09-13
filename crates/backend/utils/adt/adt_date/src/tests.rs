@@ -624,3 +624,23 @@ fn make_time_error_seconds_render_like_c_percent_g() {
     assert_eq!(msg(25, 0, 999999.5), "time field value out of range: 25:00:1e+06");
     assert_eq!(msg(25, 0, 0.000123456789), "time field value out of range: 25:00:0.000123457");
 }
+
+#[test]
+fn date_out_results_do_not_alias_across_carriers() {
+    let expect = |d: DateADT| {
+        let mut buf: DateBuf = [0; MAXDATELEN + 1];
+        let n = date_out(d, &mut buf);
+        buf[..n].to_vec()
+    };
+    let mut f1 = types_fmgr::FmgrInfo::new(crate::builtins::fc_date_out, 1085, 1, true, false);
+    let mut f2 = types_fmgr::FmgrInfo::new(crate::builtins::fc_date_out, 1085, 1, true, false);
+    let mut fci = types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_i32(0));
+    let d1 = f1.invoke(&mut fci).unwrap();
+    fci.set_arg(0, ::datum::Datum::from_i32(1));
+    let d2 = f2.invoke(&mut fci).unwrap();
+    let cstr = |d: ::datum::Datum| unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }.to_bytes().to_vec();
+    assert_eq!(cstr(d1), expect(0));
+    assert_eq!(cstr(d2), expect(1));
+    assert_ne!(expect(0), expect(1));
+}

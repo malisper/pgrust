@@ -415,6 +415,10 @@ fn internal_builtin_oid(funcid: Oid) -> PgResult<Option<Oid>> {
     Ok(internal_builtin_of(funcid)?.map(|b| b.foid))
 }
 
+pub fn canonical_builtin_oid(funcid: Oid) -> PgResult<Oid> {
+    Ok(internal_builtin_of(funcid)?.map_or(funcid, |b| b.foid))
+}
+
 // A user-created internal-language fn (new oid) must resolve through the
 // canonical entry's oid: the stub's late lookup keys on flinfo.fn_oid, which
 // is the new oid, so late and extra ports are resolved here instead.

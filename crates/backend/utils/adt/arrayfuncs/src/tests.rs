@@ -2407,3 +2407,39 @@ fn array_in_size_limit_is_soft_under_escontext() {
     assert!(esc.ctx.error_occurred());
     assert!(esc.ctx.error().is_none());
 }
+
+fn fc_nn_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    if fcinfo.arg(0).as_usize() == 0 {
+        return Err(Box::new(
+            ::types_error::PgError::error("domain nn does not allow null values")
+                .with_sqlstate(::types_error::ERRCODE_NOT_NULL_VIOLATION),
+        ));
+    }
+    fc_mytextrecv(None, fcinfo)
+}
+
+#[test]
+fn recv_null_element_still_calls_a_non_strict_receiver() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let m = meta_text();
+    let mut w: std::vec::Vec<u8> = std::vec::Vec::new();
+    w.extend_from_slice(&1i32.to_be_bytes()); // ndim
+    w.extend_from_slice(&1i32.to_be_bytes()); // flags: has nulls
+    w.extend_from_slice(&TEXTOID.to_be_bytes());
+    w.extend_from_slice(&1i32.to_be_bytes()); // dim[0]
+    w.extend_from_slice(&1i32.to_be_bytes()); // lbound[0]
+    w.extend_from_slice(&(-1i32).to_be_bytes()); // NULL element
+
+    let mut buf = StringInfo::with_capacity_in(mcx, w.len()).unwrap();
+    buf.append_bytes(&w).unwrap();
+    let mut rp = FmgrInfo::new(fc_nn_recv, 46, 1, false, false);
+    let e = array_recv(mcx, &mut buf, &m, &mut rp, -1).unwrap_err();
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
+
+    let mut buf = StringInfo::with_capacity_in(mcx, w.len()).unwrap();
+    buf.append_bytes(&w).unwrap();
+    let mut strict = FmgrInfo::new(fc_nn_recv, 46, 1, true, false);
+    let img = array_recv(mcx, &mut buf, &m, &mut strict, -1).unwrap();
+    assert!(crate::foundation::arr_hasnull(&img));
+}

@@ -116,6 +116,14 @@ fn lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+// No catalog role name holds invalid UTF-8, so such bytes match nothing.
+fn role_oid_of(name: &[u8]) -> PgResult<types_core::Oid> {
+    match core::str::from_utf8(name) {
+        Ok(s) => get_role_oid(s, true),
+        Err(_) => Ok(0),
+    }
+}
+
 fn priv_for_char(c: u8) -> Option<u64> {
     ACL_ALL_RIGHTS_STR
         .iter()
@@ -193,7 +201,7 @@ pub fn aclparse<'a>(
     if name.is_empty() {
         aip.ai_grantee = ACL_ID_PUBLIC;
     } else {
-        aip.ai_grantee = get_role_oid(&lossy(&name), true)?;
+        aip.ai_grantee = role_oid_of(&name)?;
         if aip.ai_grantee == 0 {
             return ereturn_soft(
                 escontext,
@@ -215,7 +223,7 @@ pub fn aclparse<'a>(
                     .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
             );
         }
-        aip.ai_grantor = get_role_oid(&lossy(&name2), true)?;
+        aip.ai_grantor = role_oid_of(&name2)?;
         if aip.ai_grantor == 0 {
             return ereturn_soft(
                 escontext,

@@ -422,3 +422,17 @@ fn div_min_by_neg_one_all_divisor_widths() {
         assert_eq!(e.message(), "division by zero");
     }
 }
+
+#[test]
+fn cash_out_results_do_not_alias_across_carriers() {
+    let mut f1 = types_fmgr::FmgrInfo::new(crate::builtins::fc_cash_out, 887, 1, true, false);
+    let mut f2 = types_fmgr::FmgrInfo::new(crate::builtins::fc_cash_out, 887, 1, true, false);
+    let mut fci = types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_i64(100));
+    let d1 = f1.invoke(&mut fci).unwrap();
+    fci.set_arg(0, ::datum::Datum::from_i64(200));
+    let d2 = f2.invoke(&mut fci).unwrap();
+    let cstr = |d: ::datum::Datum| unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }.to_bytes().to_vec();
+    assert_eq!(cstr(d1), out(100).into_bytes());
+    assert_eq!(cstr(d2), out(200).into_bytes());
+}

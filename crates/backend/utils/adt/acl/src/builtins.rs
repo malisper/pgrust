@@ -1230,16 +1230,47 @@ pub(crate) fn convert_aclright_to_string(aclright: u64) -> &'static str {
     }
 }
 
-struct AclExplodeRows {
-    tuples: Vec<Vec<u8>>,
-}
+struct AclExplodeIdx([i32; 2]);
 
-fn collect_aclexplode_rows(fcinfo: &Fcinfo) -> PgResult<AclExplodeRows> {
-    let mcx = fcinfo.result_mcx();
+fn fc_aclexplode(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("aclexplode: resolved FmgrInfo required");
+    // SAFETY: the executor arms the per-call result context before the call;
+    // it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
     // SAFETY: strict fn, arg 0 is a non-null aclitem[] varlena.
     let v = unsafe { fcinfo.arg_varlena_packed(0) }?;
-    let n = crate::varlena::check_acl_payload(v.data())?;
-
+    let n = crate::varlena::check_acl_payload(v.data())? as i32;
+    if !flinfo.has_fn_extra() {
+        let fctx = funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(Box::new(AclExplodeIdx([0, -1])));
+    }
+    let slot = funcapi_srf::per_MultiFuncCall(flinfo)
+        .user_fctx
+        .as_mut()
+        .expect("aclexplode: idx set at first call")
+        .downcast_mut::<AclExplodeIdx>()
+        .expect("aclexplode: user_fctx is AclExplodeIdx");
+    let idx = &mut slot.0;
+    let mut hit = None;
+    while idx[0] < n {
+        idx[1] += 1;
+        if idx[1] == N_ACL_RIGHTS as i32 {
+            idx[1] = 0;
+            idx[0] += 1;
+            if idx[0] >= n {
+                break;
+            }
+        }
+        let item = crate::varlena::read_acl_item(v.data(), idx[0] as usize);
+        let priv_bit = 1u64 << idx[1];
+        if aclitem_get_privs(&item) & priv_bit != 0 {
+            hit = Some((item, priv_bit));
+            break;
+        }
+    }
+    let Some((item, priv_bit)) = hit else {
+        return Ok(funcapi_srf::srf_return_done(flinfo, fcinfo));
+    };
     let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, 4)?;
     tupdesc::TupleDescInitEntry(&mut desc, 1, Some("grantor"), OIDOID, -1, 0)?;
     tupdesc::TupleDescInitEntry(&mut desc, 2, Some("grantee"), OIDOID, -1, 0)?;
@@ -1247,54 +1278,20 @@ fn collect_aclexplode_rows(fcinfo: &Fcinfo) -> PgResult<AclExplodeRows> {
     tupdesc::TupleDescInitEntry(&mut desc, 4, Some("is_grantable"), BOOLOID, -1, 0)?;
     desc.tdtypeid = RECORDOID;
     typcache_seams::assign_record_type_typmod::call(&mut desc)?;
-
-    let mut tuples = Vec::new();
-    for i in 0..n {
-        let item = crate::varlena::read_acl_item(v.data(), i);
-        for right in 0..N_ACL_RIGHTS {
-            let priv_bit = 1u64 << right;
-            if aclitem_get_privs(&item) & priv_bit == 0 {
-                continue;
-            }
-            let ptext = varlena_result(varlena::cstring_to_text(
-                mcx,
-                convert_aclright_to_string(priv_bit).as_bytes(),
-            )?);
-            let values = [
-                Datum::from_oid(item.ai_grantor),
-                Datum::from_oid(item.ai_grantee),
-                ptext,
-                Datum::from_bool(aclitem_get_goptions(&item) & priv_bit != 0),
-            ];
-            let tuple = heaptuple::heap_form_tuple(mcx, &desc, &values, &[false; 4])?;
-            tuples.push(tuple.image().to_vec());
-        }
-    }
-    Ok(AclExplodeRows { tuples })
-}
-
-fn fc_aclexplode(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let flinfo = flinfo.expect("aclexplode: resolved FmgrInfo required");
-    if !flinfo.has_fn_extra() {
-        let rows = collect_aclexplode_rows(fcinfo)?;
-        let fctx = funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(rows));
-    }
-    let fctx = funcapi_srf::per_MultiFuncCall(flinfo);
-    let idx = fctx.call_cntr as usize;
-    let rows = fctx
-        .user_fctx
-        .as_ref()
-        .expect("aclexplode: rows set at first call")
-        .downcast_ref::<AclExplodeRows>()
-        .expect("aclexplode: user_fctx is AclExplodeRows");
-    match rows.tuples.get(idx) {
-        Some(img) => {
-            let d = byref_result(fcinfo.result_mcx(), img)?;
-            Ok(funcapi_srf::srf_return_next(flinfo, fcinfo, d))
-        }
-        None => Ok(funcapi_srf::srf_return_done(flinfo, fcinfo)),
-    }
+    let ptext = varlena_result(varlena::cstring_to_text(
+        mcx,
+        convert_aclright_to_string(priv_bit).as_bytes(),
+    )?);
+    let values = [
+        Datum::from_oid(item.ai_grantor),
+        Datum::from_oid(item.ai_grantee),
+        ptext,
+        Datum::from_bool(aclitem_get_goptions(&item) & priv_bit != 0),
+    ];
+    let tuple = heaptuple::heap_form_tuple(mcx, &desc, &values, &[false; 4])?;
+    let d = Datum::from_usize(tuple.header_ptr() as usize);
+    core::mem::forget(tuple);
+    Ok(funcapi_srf::srf_return_next(flinfo, fcinfo, d))
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {

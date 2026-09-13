@@ -620,3 +620,13 @@ fn icu_converter_failure_does_not_panic() {
     mbutils::SetDatabaseEncoding(6).unwrap();
     assert!(r.is_ok(), "an ICU converter failure panicked instead of being reported");
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn lconv_strings_keep_non_utf8_bytes_under_sql_ascii() {
+    mbutils::SetDatabaseEncoding(0).unwrap(); // PG_SQL_ASCII
+    let ctx = mcx::MemoryContext::new_bump("t");
+    const PG_LATIN1: i32 = 8;
+    let got = crate::lconv::db_encoding_convert(ctx.mcx(), PG_LATIN1, b"\xa3").unwrap();
+    assert_eq!(got, b"\xa3");
+}

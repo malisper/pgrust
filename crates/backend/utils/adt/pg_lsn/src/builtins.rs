@@ -26,13 +26,6 @@ unsafe fn num_arg(fcinfo: &Fcinfo, i: usize) -> PgResult<Num<'_>> {
     Ok(Num::from_payload(payload))
 }
 
-// C pallocs the cstring per row; the backend thread owns retained scratch
-// (the nameout precedent). The Datum aliases it until the next out call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; MAXPG_LSNLEN + 1]> =
-        const { core::cell::UnsafeCell::new([0; MAXPG_LSNLEN + 1]) };
-}
-
 pub fn fc_pg_lsn_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of the in-function is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
@@ -42,15 +35,11 @@ pub fn fc_pg_lsn_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     Ok(Datum::from_i64(crate::pg_lsn_in(&s, esc)? as i64))
 }
 
-pub fn fc_pg_lsn_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_pg_lsn_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let lsn = arg_lsn(fcinfo, 0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::pg_lsn_out_into(lsn, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; MAXPG_LSNLEN + 1];
+    let len = crate::pg_lsn_out_into(lsn, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "pg_lsn_out", &buf[..len]))
 }
 
 pub fn fc_pg_lsn_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
