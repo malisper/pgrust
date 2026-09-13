@@ -777,6 +777,8 @@ fn xlog_filename_parse_roundtrip() {
         assert!(!crate::removal::IsXLogFileName("00000001000000000000000g"));
         assert!(!crate::removal::IsXLogFileName("000000010000000000000001.partial"));
         assert!(crate::removal::IsPartialXLogFileName("000000010000000000000001.partial"));
+        assert!(!crate::removal::IsPartialXLogFileName("AAAAAAAAAAAAAAAAAAAAAAA\u{e9}BBBBBBB"));
+        assert!(!crate::removal::IsPartialXLogFileName("AAAAAAAAAAAAAAAAAAAAAAA\u{e9}.partial"));
     });
 }
 

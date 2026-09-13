@@ -634,8 +634,12 @@ impl<'mcx> XLogReaderState<'mcx> {
                 }
             }
         }
-        if self.queue.is_empty() {
-            self.blocks_pool.clear();
+        // XLogReleasePreviousRecord frees the record's block metadata with
+        // it; the pool holds only the still-queued records' blocks.
+        let released = self.queue.first().map_or(self.blocks_pool.len(), |r| r.blocks_start as usize);
+        self.blocks_pool.drain(..released);
+        for r in self.queue.iter_mut() {
+            r.blocks_start -= released as u32;
         }
         next_lsn
     }

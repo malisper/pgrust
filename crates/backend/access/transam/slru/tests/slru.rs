@@ -5,6 +5,7 @@ use std::sync::{Mutex, Once, OnceLock};
 use types_storage::sync::SyncRequestHandler;
 
 static PAGE_HITS: AtomicU64 = AtomicU64::new(0);
+static XLOG_FLUSH_FAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PAGE_READS: AtomicU64 = AtomicU64::new(0);
 
 fn shmem_registry() -> &'static Mutex<HashMap<String, usize>> {
@@ -82,7 +83,15 @@ fn install_seams() {
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
         waitevent_seams::pgstat_report_wait_end::set(|| {});
 
-        transam_xlog_seams::xlog_flush::set(|_| Ok(()));
+        transam_xlog_seams::xlog_flush::set(|_| {
+            if XLOG_FLUSH_FAILS.load(Ordering::Relaxed) {
+                return Err(Box::new(types_error::PgError::new(
+                    types_error::ERROR,
+                    "flush request not satisfied".to_string(),
+                )));
+            }
+            Ok(())
+        });
         transam_xlog_seams::count_ckpt_slru_written::set(|| {});
 
         xlogutils_seams::in_recovery::set(|| false);
@@ -152,6 +161,21 @@ fn shmem_size_shape() {
     assert!(base > 64 * 8192);
     assert_eq!(base % 32, 0);
     assert_eq!(SimpleLruShmemSize(64, 2) - base, 64 * 2 * 8);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // libc file I/O; macOS Miri shims incomplete
+fn write_page_xlog_flush_error_balances_crit_section() {
+    let ctl = init("slru_flush_err", "slru_flush_err_dir", 1);
+    let mut bank = LwGuard::acquire(SimpleLruGetBankLock(&ctl, 3), lwlock::LW_EXCLUSIVE).unwrap();
+    let slotno = SimpleLruZeroPage(&ctl, 3, &mut bank).unwrap();
+    ctl.set_group_lsn(slotno * ctl.lsn_groups_per_page() as usize, 0x1000, &bank);
+    XLOG_FLUSH_FAILS.store(true, Ordering::Relaxed);
+    let before = init_small::globals::CritSectionCount();
+    let res = SimpleLruWritePage(&ctl, slotno, &mut bank);
+    XLOG_FLUSH_FAILS.store(false, Ordering::Relaxed);
+    assert!(res.is_err());
+    assert_eq!(init_small::globals::CritSectionCount(), before);
 }
 
 #[test]

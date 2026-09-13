@@ -321,15 +321,10 @@ fn collect_tablespaces(
                 relpath = Some(linkpath[datadirpathlen + 1..].to_string());
             }
 
-            // Backslash-escaped link path into the tablespace map.
-            let mut escapedpath = String::new();
-            for &c in lp {
-                if c == b'\n' || c == b'\r' || c == b'\\' {
-                    escapedpath.push('\\');
-                }
-                escapedpath.push(c as char);
-            }
-            tblspcmapfile.extend_from_slice(format!("{d_name} {escapedpath}\n").as_bytes());
+            tblspcmapfile.extend_from_slice(d_name.as_bytes());
+            tblspcmapfile.push(b' ');
+            tblspcmapfile.extend_from_slice(&escape_tablespace_link_path(lp));
+            tblspcmapfile.push(b'\n');
         } else if md.is_dir() {
             // allow_in_place_tablespaces: a directory directly under pg_tblspc.
             // Store a relative path.
@@ -669,9 +664,26 @@ fn IsBackupHistoryFileName(fname: &str) -> bool {
     fname.len() > XLOG_FNAME_LEN && hex_run == XLOG_FNAME_LEN && fname.ends_with(".backup")
 }
 
+fn escape_tablespace_link_path(linkpath: &[u8]) -> Vec<u8> {
+    let mut escapedpath = Vec::with_capacity(linkpath.len());
+    for &c in linkpath {
+        if c == b'\n' || c == b'\r' || c == b'\\' {
+            escapedpath.push(b'\\');
+        }
+        escapedpath.push(c);
+    }
+    escapedpath
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tablespace_map_link_path_bytes_are_verbatim() {
+        assert_eq!(escape_tablespace_link_path("/tmp/tbs_\u{e9}".as_bytes()), "/tmp/tbs_\u{e9}".as_bytes());
+        assert_eq!(escape_tablespace_link_path(b"/t\xff/a\\b\nc\rd"), b"/t\xff/a\\\\b\\\nc\\\rd");
+    }
 
     #[test]
     fn check_backup_label_accepts_ordinary_labels() {

@@ -134,8 +134,8 @@ pub(crate) fn IsXLogFileName(fname: &str) -> bool {
 
 pub(crate) fn IsPartialXLogFileName(fname: &str) -> bool {
     fname.len() == 24 + ".partial".len()
-        && IsXLogFileName(&fname[..24])
         && fname.ends_with(".partial")
+        && IsXLogFileName(&fname[..24])
 }
 
 pub(crate) fn XLogFromFileName(fname: &str, wal_segsz: i32) -> (TimeLineID, XLogSegNo) {

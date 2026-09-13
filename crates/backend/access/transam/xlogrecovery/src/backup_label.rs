@@ -385,7 +385,7 @@ pub(crate) fn read_backup_label() -> PgResult<Option<BackupLabel>> {
 
 pub(crate) struct TablespaceInfo {
     pub oid: u32,
-    pub path: String,
+    pub path: Vec<u8>,
 }
 
 fn parse_tablespace_map_content(content: &[u8]) -> Result<Vec<TablespaceInfo>, ()> {
@@ -418,7 +418,7 @@ fn parse_tablespace_map_content(content: &[u8]) -> Result<Vec<TablespaceInfo>, (
             };
             tablespaces.push(TablespaceInfo {
                 oid,
-                path: String::from_utf8_lossy(&line[sp + 1..]).into_owned(),
+                path: line[sp + 1..].to_vec(),
             });
         } else if !was_backslash && ch == b'\\' {
             was_backslash = true;
@@ -705,9 +705,16 @@ mod tests {
         let ts = parse_tablespace_map_content(b"16384 /path/one\n16385 /path two\n").unwrap();
         assert_eq!(ts.len(), 2);
         assert_eq!(ts[0].oid, 16384);
-        assert_eq!(ts[0].path, "/path/one");
+        assert_eq!(ts[0].path, b"/path/one");
         assert_eq!(ts[1].oid, 16385);
-        assert_eq!(ts[1].path, "/path two");
+        assert_eq!(ts[1].path, b"/path two");
+    }
+
+    #[test]
+    fn tablespace_path_non_utf8_bytes_preserved_like_c() {
+        let ts = parse_tablespace_map_content(b"16384 /data/caf\xe9\n16385 /tbs_\xc3\xa9\n").unwrap();
+        assert_eq!(ts[0].path, b"/data/caf\xe9");
+        assert_eq!(ts[1].path, "/tbs_\u{e9}".as_bytes());
     }
 
     #[test]

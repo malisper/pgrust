@@ -824,3 +824,40 @@ fn wal_read_reports_wal_read_wait_event() {
     unsafe { libc::close(v.seg.ws_file) };
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn released_records_free_their_block_metadata() {
+    let mut w = WalSim::new();
+    let mut lsns = Vec::new();
+    for i in 0..200u32 {
+        let body = block_body(
+            &[BlockSpec {
+                block_id: 0,
+                rlocator: (1663, 5, 16384),
+                blkno: i,
+                data: b"d",
+                image: None,
+            }],
+            b"m",
+        );
+        lsns.push(w.append(10, 0x00, 9, &body));
+    }
+    let mut src = SimRead { wal: &w, end: w.insert };
+
+    let cx = MemoryContext::new("t");
+    let mut r = reader(&cx);
+    r.XLogBeginRead(lsns[0]);
+    // The prefetcher's steady state: the queue is refilled before it drains.
+    assert!(r.XLogReadAhead(&mut src, false).unwrap().is_some());
+    assert!(r.XLogReadAhead(&mut src, false).unwrap().is_some());
+    let mut max_pool = 0;
+    for (i, &lsn) in lsns[..lsns.len() - 2].iter().enumerate() {
+        assert_eq!(r.XLogNextRecord(), Some(lsn));
+        let (_, _, blkno, _) = r.XLogRecGetBlockTagExtended(0).unwrap();
+        assert_eq!(blkno, i as u32);
+        assert_eq!(r.XLogRecGetBlockData(0).unwrap(), b"d");
+        assert!(r.XLogReadAhead(&mut src, false).unwrap().is_some());
+        max_pool = max_pool.max(r.blocks_pool.len());
+    }
+    assert!(max_pool <= 3, "blocks_pool grew to {max_pool}");
+}

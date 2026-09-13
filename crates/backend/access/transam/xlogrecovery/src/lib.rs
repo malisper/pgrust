@@ -119,6 +119,9 @@ static LAST_REPLAYED_END_REC_PTR: AtomicU64 = AtomicU64::new(0);
 static LAST_REPLAYED_TLI: AtomicU32 = AtomicU32::new(0);
 static REPLAY_END_REC_PTR: AtomicU64 = AtomicU64::new(0);
 static REPLAY_END_TLI: AtomicU32 = AtomicU32::new(0);
+// XLogRecoveryCtl->info_lck (xlogrecovery.c): the (LSN, TLI) pairs above
+// are published and read as a unit.
+static REPLAY_LCK: transam_xlog::ctl::SpinLock = transam_xlog::ctl::SpinLock::new();
 static SIGNAL_FILE_STANDBY: AtomicBool = AtomicBool::new(false);
 static SIGNAL_FILE_RECOVERY: AtomicBool = AtomicBool::new(false);
 
@@ -202,14 +205,16 @@ fn EnableStandbyMode() {
 }
 
 pub fn GetXLogReplayRecPtr() -> (XLogRecPtr, TimeLineID) {
-    (
-        LAST_REPLAYED_END_REC_PTR.load(Relaxed),
-        LAST_REPLAYED_TLI.load(Relaxed),
-    )
+    REPLAY_LCK.with(|| {
+        (
+            LAST_REPLAYED_END_REC_PTR.load(Relaxed),
+            LAST_REPLAYED_TLI.load(Relaxed),
+        )
+    })
 }
 
 pub fn GetCurrentReplayRecPtr() -> (XLogRecPtr, TimeLineID) {
-    (REPLAY_END_REC_PTR.load(Relaxed), REPLAY_END_TLI.load(Relaxed))
+    REPLAY_LCK.with(|| (REPLAY_END_REC_PTR.load(Relaxed), REPLAY_END_TLI.load(Relaxed)))
 }
 
 // stat(2)-succeeds existence probe over the fd-crate front (DST P1 inc-3).
@@ -1436,7 +1441,10 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
                 let link_result: std::io::Result<()> =
                     Err(std::io::Error::from_raw_os_error(52));
                 #[cfg(not(target_family = "wasm"))]
-                let link_result = std::os::unix::fs::symlink(&ti.path, &linkloc);
+                let link_result = std::os::unix::fs::symlink(
+                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&ti.path),
+                    &linkloc,
+                );
                 if let Err(e) = link_result {
                     // xlogrecovery.c:704-707: errcode_for_file_access() + "%m".
                     { ereport(ERROR)
@@ -2134,9 +2142,11 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
     // Pop the error context stack (xlogrecovery.c:2030-2031).
     drop(errcallback);
 
-    LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);
-    LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
-    LAST_REPLAYED_TLI.store(*replay_tli, Relaxed);
+    REPLAY_LCK.with(|| {
+        LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);
+        LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
+        LAST_REPLAYED_TLI.store(*replay_tli, Relaxed);
+    });
 
     // Wakeup walsenders (xlogrecovery.c:2056): on the standby the WAL is
     // flushed first (waking only physical walsenders, from the walreceiver)
@@ -2207,8 +2217,10 @@ fn apply_wal_record_under_errcallback(
         }
     }
 
-    REPLAY_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
-    REPLAY_END_TLI.store(*replay_tli, Relaxed);
+    REPLAY_LCK.with(|| {
+        REPLAY_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
+        REPLAY_END_TLI.store(*replay_tli, Relaxed);
+    });
 
     if xlogutils::standby_state() != xlogutils::STANDBY_DISABLED
         && xid != types_core::InvalidTransactionId
@@ -2447,17 +2459,19 @@ pub fn PerformWalRecovery() -> PgResult<()> {
 fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
     let mut reached_recovery_target = false;
 
-    if rec.src.redo_start_lsn < rec.check_point_loc {
-        LAST_REPLAYED_READ_REC_PTR.store(InvalidXLogRecPtr, Relaxed);
-        LAST_REPLAYED_END_REC_PTR.store(rec.src.redo_start_lsn, Relaxed);
-        LAST_REPLAYED_TLI.store(rec.src.redo_start_tli, Relaxed);
-    } else {
-        LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);
-        LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
-        LAST_REPLAYED_TLI.store(rec.check_point_tli, Relaxed);
-    }
-    REPLAY_END_REC_PTR.store(LAST_REPLAYED_END_REC_PTR.load(Relaxed), Relaxed);
-    REPLAY_END_TLI.store(LAST_REPLAYED_TLI.load(Relaxed), Relaxed);
+    REPLAY_LCK.with(|| {
+        if rec.src.redo_start_lsn < rec.check_point_loc {
+            LAST_REPLAYED_READ_REC_PTR.store(InvalidXLogRecPtr, Relaxed);
+            LAST_REPLAYED_END_REC_PTR.store(rec.src.redo_start_lsn, Relaxed);
+            LAST_REPLAYED_TLI.store(rec.src.redo_start_tli, Relaxed);
+        } else {
+            LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);
+            LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
+            LAST_REPLAYED_TLI.store(rec.check_point_tli, Relaxed);
+        }
+        REPLAY_END_REC_PTR.store(LAST_REPLAYED_END_REC_PTR.load(Relaxed), Relaxed);
+        REPLAY_END_TLI.store(LAST_REPLAYED_TLI.load(Relaxed), Relaxed);
+    });
     targets::SetLatestXTime(0);
     targets::SetCurrentChunkStartTime(0);
     targets::SetRecoveryPause(false);

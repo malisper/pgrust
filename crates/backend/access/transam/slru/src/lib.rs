@@ -854,8 +854,9 @@ fn SlruPhysicalWritePage(
         if max_lsn != InvalidXLogRecPtr {
             // A failing XLogFlush must PANIC; the crit section promotes it.
             globals::StartCriticalSection();
-            transam_xlog_seams::xlog_flush::call(max_lsn)?;
+            let flushed = transam_xlog_seams::xlog_flush::call(max_lsn);
             globals::EndCriticalSection();
+            flushed?;
         }
     }
 

@@ -503,6 +503,9 @@ fn panic_text(payload: &(dyn Any + Send)) -> Option<&str> {
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
 }
 
+// The leader's uncommitted enum value a bound helper must see (0 = none).
+static EXPECT_UNCOMMITTED_ENUM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 fn query_task_binder_hook(_source: &parallel::ParallelShared) {
     let Some(target) = BINDER_TARGET.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return;
@@ -523,6 +526,10 @@ fn query_task_binder_hook(_source: &parallel::ParallelShared) {
                     || resowner::ResourceOwnerStateClean()
                 {
                     return Err(PgError::error("query-task state was not fully bound").into());
+                }
+                let expected_enum = EXPECT_UNCOMMITTED_ENUM.load(Relaxed);
+                if expected_enum != 0 && !pg_enum::EnumUncommitted(expected_enum) {
+                    return Err(PgError::error("leader's uncommitted enums were not bound").into());
                 }
                 Ok(())
             })?;
@@ -723,6 +730,9 @@ fn assert_query_task_helper_clean() -> PgResult<()> {
     }
     if !snapmgr::SnapshotStateClean() {
         return Err(PgError::error("query-task helper boundary: snapshot state is live").into());
+    }
+    if pg_enum::HasUncommittedEnums() {
+        return Err(PgError::error("query-task helper boundary: uncommitted enums are live").into());
     }
     Ok(())
 }
@@ -971,7 +981,11 @@ fn query_task_binder_restores_clean_helper_across_outcomes() {
         security_restriction_context: 0,
         set_role_is_active: false,
     });
-    let target = parallel::CreateParallelContext("postgres", "substrate_e2e_noop", 0).unwrap();
+    // ALTER TYPE ... ADD VALUE in the leader's open transaction: the helper
+    // must bind the sets (C: RestoreUncommittedEnums in ParallelWorkerMain).
+    pg_enum::RestoreUncommittedEnums(&[76], &[77]).unwrap();
+    EXPECT_UNCOMMITTED_ENUM.store(77, Relaxed);
+    let target = parallel::CreateParallelContext("postgres", "substrate_e2e_noop", 1).unwrap();
     parallel::InitializeParallelDSM(target).unwrap();
     miscinit::ReplaceSessionIdentityState(helper_identity);
     parallel::InstallQueryTaskBinding(target, parallel::QueryTaskBindingPolicy::default()).unwrap();
@@ -1051,6 +1065,8 @@ fn query_task_binder_restores_clean_helper_across_outcomes() {
     parallel::DestroyParallelContext(target).unwrap();
     g::SetMyDatabaseId(42);
     end_parallel_ready_xact();
+    EXPECT_UNCOMMITTED_ENUM.store(0, Relaxed);
+    assert!(!pg_enum::HasUncommittedEnums());
     for join in joins {
         assert_eq!(join.join().unwrap(), 0);
     }

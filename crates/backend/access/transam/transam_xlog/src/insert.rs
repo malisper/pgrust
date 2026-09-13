@@ -503,6 +503,7 @@ pub(crate) fn AdvanceXLInsertBuffer(upto: XLogRecPtr, tli: TimeLineID, opportuni
         let new_page = ctl.page_ptr(nextidx);
 
         ctl.xlblocks[nextidx].store(InvalidXLogRecPtr, std::sync::atomic::Ordering::Release);
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 
         // SAFETY: this buffer slot is unmapped (xlblocks invalidated above,
         // old contents written out); we are the only initializer under

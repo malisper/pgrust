@@ -359,6 +359,10 @@ impl QueryTaskBindingGuard {
                 shared.temp_namespace_id,
                 shared.temp_toast_namespace_id,
             );
+            pg_enum::RestoreUncommittedEnums(
+                &shared.uncommitted_enum_types,
+                &shared.uncommitted_enum_values,
+            )?;
             miscinit::RestoreClientConnectionInfo(&shared.clientconninfo)?;
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindClient)?;
