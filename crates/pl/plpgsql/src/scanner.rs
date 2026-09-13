@@ -239,6 +239,12 @@ pub static UNRESERVED_PL_KEYWORDS: &[(&str, i32)] = &[
 ];
 
 pub fn scan_keyword_lookup(s: &str, keywords: &[(&'static str, i32)]) -> Option<i32> {
+    scan_keyword_entry(s, keywords).map(|(_, tok)| tok)
+}
+
+// ScanKeywordLookup + GetScanKeyword: the matched entry, so the keyword's
+// own spelling is kept ("elsif" and "elseif" share K_ELSIF).
+pub fn scan_keyword_entry(s: &str, keywords: &[(&'static str, i32)]) -> Option<(&'static str, i32)> {
     if s.len() > 20 {
         return None;
     }
@@ -250,7 +256,7 @@ pub fn scan_keyword_lookup(s: &str, keywords: &[(&'static str, i32)]) -> Option<
     keywords
         .iter()
         .find(|(kw, _)| kw.as_bytes() == lower)
-        .map(|&(_, tok)| tok)
+        .copied()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -474,14 +480,9 @@ impl<'mcx> PlScanner<'mcx> {
             }
             WordRes::Word(word) => {
                 if !word.quoted {
-                    if let Some(tok) = scan_keyword_lookup(&word.ident, UNRESERVED_PL_KEYWORDS) {
-                        let canonical = UNRESERVED_PL_KEYWORDS
-                            .iter()
-                            .find(|&&(_, t)| t == tok)
-                            .map(|&(kw, _)| kw)
-                            .expect("token from this table");
+                    if let Some((kw, tok)) = scan_keyword_entry(&word.ident, UNRESERVED_PL_KEYWORDS) {
                         aux1.lval.word = Some(word);
-                        aux1.lval.keyword = Some(canonical);
+                        aux1.lval.keyword = Some(kw);
                         return tok;
                     }
                 }

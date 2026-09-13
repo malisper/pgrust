@@ -17,7 +17,9 @@ pub const PLPGSQL_RESOLVE_ERROR: i32 = guc_tables::consts::PLPGSQL_RESOLVE_ERROR
 pub const PLPGSQL_RESOLVE_VARIABLE: i32 = guc_tables::consts::PLPGSQL_RESOLVE_VARIABLE;
 pub const PLPGSQL_RESOLVE_COLUMN: i32 = guc_tables::consts::PLPGSQL_RESOLVE_COLUMN;
 
+const TYPTYPE_BASE: i8 = b'b' as i8;
 const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
+const TYPSTORAGE_PLAIN: i8 = b'p' as i8;
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 const TYPTYPE_PSEUDO: i8 = b'p' as i8;
 
@@ -230,7 +232,18 @@ impl CompState {
             typcollation
         };
         let (typinput, typioparam) = lsyscache::typ::getTypeInputInfo(typoid)?;
-        let elem = lsyscache::typ::get_element_type(typoid)?;
+        // pl_comp.c:2024-2042: a true, toastable array (int2vector and
+        // oidvector are plain-storage), or a varlena domain over one.
+        let typisarray = if typtype == TYPTYPE_BASE {
+            OidIsValid(lsyscache::typ::get_element_type(typoid)?)
+                && lsyscache::typ::get_typstorage(typoid)? != TYPSTORAGE_PLAIN
+        } else if typtype == TYPTYPE_DOMAIN {
+            typlen == -1
+                && lsyscache::typ::get_typstorage(typoid)? != TYPSTORAGE_PLAIN
+                && OidIsValid(lsyscache::typ::get_base_element_type(typoid)?)
+        } else {
+            false
+        };
         const RECORDOID: Oid = 2249;
         // pl_comp.c:1990-2016 typtype switch: composite (and RECORD) are
         // TTYPE_REC; a domain is TTYPE_REC iff its base type is a rowtype
@@ -264,7 +277,7 @@ impl CompState {
             typbyval,
             typtype,
             collation: coll,
-            typisarray: OidIsValid(elem),
+            typisarray,
             atttypmod: typmod,
             typinput,
             typioparam,

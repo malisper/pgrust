@@ -1660,8 +1660,10 @@ fn coerce_function_result_tuple(
             // Generic RECORD caller: pass the row back with a blessed typmod.
             let src = rv.src_desc.clone().expect("RecValue carries its source tupdesc");
             let mut td = tupdesc::CreateTupleDescCopy(out_mcx, &src)?;
-            td.tdtypeid = RECORDOID;
-            if td.tdtypmod < 0 {
+            if !OidIsValid(td.tdtypeid) {
+                td.tdtypeid = RECORDOID;
+            }
+            if td.tdtypeid == RECORDOID && td.tdtypmod < 0 {
                 typcache::assign_record_type_typmod(&mut td)?;
             }
             let mut values = rv.values.clone();

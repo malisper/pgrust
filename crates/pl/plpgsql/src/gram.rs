@@ -933,7 +933,6 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         let t = self.yylex()?;
         let argrow: Dno = if t.0 == ('(' as i32) {
             let arg_loc = t.2;
-            self.comp.identifier_lookup = IdentifierLookup::Declare;
             let mut varnos = Vec::new();
             loop {
                 let (argname, arg_name_loc) = self.decl_varname()?;
@@ -950,7 +949,6 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 }
                 return Err(self.yyerror("syntax error", sep.2));
             }
-            self.comp.identifier_lookup = IdentifierLookup::Normal;
             let row_lineno = self.lineno(arg_loc);
             self.comp.build_row("(unnamed row)", row_lineno, varnos)
         } else {
@@ -1738,7 +1736,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 let name = if !w.ident.is_empty() {
                     w.ident.clone()
                 } else {
-                    w.idents.last().cloned().unwrap_or_default()
+                    w.idents.join(".")
                 };
                 let lineno = self.lineno(loc);
                 match &self.comp.datums[w.dno as usize] {
@@ -1875,8 +1873,8 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                         t.2,
                     ));
                 }
-                let var = self.comp.build_rec(&name, var_lineno, true);
                 let argquery = self.read_cursor_args(curvar, K_LOOP)?;
+                let var = self.comp.build_rec(&name, var_lineno, true);
                 let (body, end_label, end_loc) = self.parse_loop_body()?;
                 self.check_labels(label.as_deref(), end_label.as_deref(), end_loc)?;
                 self.comp.ns_pop();
@@ -3054,6 +3052,36 @@ mod tests {
         // Unknown location: C's parser_errposition is a no-op.
         let e = parser.sql_error_callback(Box::new(PgError::error("x")), -1);
         assert_eq!((e.internal_position, e.internal_query), (None, None));
+    }
+
+    // pl_scanner.c:292: the unreserved keyword keeps the spelling that
+    // matched ("elsif" and "elseif" share K_ELSIF), which decl_varname and
+    // the datum namespace then use verbatim.
+    #[test]
+    fn unreserved_keyword_keeps_its_matched_spelling() {
+        for (src, spelling) in [(&b"elsif"[..], "elsif"), (&b"ELSEIF"[..], "elseif")] {
+            let cx = mcx::MemoryContext::new("plpgsql keyword spelling test");
+            let mut comp = crate::comp::CompState::new();
+            let mut parser = parser_for!(cx, comp, src);
+            let t = parser.yylex().unwrap();
+            assert_eq!(t.0, crate::scanner::K_ELSIF);
+            assert_eq!(t.1.keyword, Some(spelling));
+        }
+    }
+
+    // pl_gram.y:1626 for_variable: NameOfDatum keeps every component of a
+    // qualified name, so the integer-FOR private variable is "blk.i" and
+    // does not shadow the outer "i".
+    #[test]
+    fn for_variable_keeps_the_qualified_name() {
+        let cx = mcx::MemoryContext::new("plpgsql for_variable test");
+        let mut comp = crate::comp::CompState::new();
+        comp.ns_push_label(Some("blk"), LABEL_BLOCK);
+        let dno = comp.build_variable("i", 1, scalar_int_type(), true).unwrap();
+        let mut parser = parser_for!(cx, comp, b"blk.i in 1..1");
+        let (name, _, scalar, row, _) = parser.parse_for_variable().unwrap();
+        assert_eq!(name, "blk.i");
+        assert_eq!((scalar, row), (Some(dno), None));
     }
 
     fn scalar_int_type() -> PlType {

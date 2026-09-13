@@ -111,6 +111,7 @@ pub struct RecDesc {
     pub typmods: Vec<i32>,
     pub typlens: Vec<i16>,
     pub typbyvals: Vec<bool>,
+    pub colls: Vec<Oid>,
     pub dropped: Vec<bool>,
 }
 
@@ -123,6 +124,7 @@ impl RecDesc {
             typmods: Vec::with_capacity(natts),
             typlens: Vec::with_capacity(natts),
             typbyvals: Vec::with_capacity(natts),
+            colls: Vec::with_capacity(natts),
             dropped: Vec::with_capacity(natts),
         };
         for a in td.attrs.iter() {
@@ -134,6 +136,7 @@ impl RecDesc {
             d.typmods.push(a.atttypmod);
             d.typlens.push(a.attlen);
             d.typbyvals.push(a.attbyval);
+            d.colls.push(a.attcollation);
             d.dropped.push(a.attisdropped);
         }
         d
@@ -1107,6 +1110,23 @@ impl<'a> Estate<'a> {
         self.copy_to_datum_ctx(value, isnull, typlen, typbyval)
     }
 
+    // exec_assign_value's expand_array arm (pl_exec.c:5108-5114): the array
+    // lands in the datum context detoasted and decompressed, as the flat copy
+    // expand_array makes (array_expanded.c:131); the R/W expanded form itself
+    // is not held by this port's variables.
+    fn assign_array_to_datum_ctx(&self, value: Datum) -> PgResult<Datum> {
+        let p = value.as_usize() as *const u8;
+        // SAFETY: non-null by-ref varlena datum.
+        unsafe {
+            if types_tuple::varatt::varatt_is_4b_u(p) {
+                return self.copy_to_datum_ctx(value, false, -1, false);
+            }
+            let attr = core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p));
+            let out = detoast::detoast_attr(self.eval_ctx.mcx(), attr)?;
+            self.copy_to_datum_ctx(Datum::from_usize(out.as_ptr() as usize), false, -1, false)
+        }
+    }
+
     // ------------------------------------------------------------------
     // Expression evaluation
     // ------------------------------------------------------------------
@@ -1600,9 +1620,7 @@ impl<'a> Estate<'a> {
         if let DatumVal::Rec(Some(rv)) = &self.datums[f.recparentno as usize] {
             match rec_lookup_field(&rv.desc, &f.fieldname) {
                 Some(RecFieldRef::User(i)) => {
-                    let t = rv.desc.types[i];
-                    let coll = lsyscache::typ::get_typcollation(t)?;
-                    return Ok(Some((t, rv.desc.typmods[i], coll)));
+                    return Ok(Some((rv.desc.types[i], rv.desc.typmods[i], rv.desc.colls[i])));
                 }
                 Some(RecFieldRef::Sys(a)) => {
                     return Ok(Some((a.atttypid, a.atttypmod, a.attcollation)));
@@ -3210,11 +3228,12 @@ impl<'a> Estate<'a> {
     ) -> PgResult<()> {
         match &self.func.datums[target as usize] {
             PlDatum::Var(v) => {
-                let (reqtype, reqtypmod, typlen, typbyval, notnull, refname) = (
+                let (reqtype, reqtypmod, typlen, typbyval, typisarray, notnull, refname) = (
                     v.datatype.typoid,
                     v.datatype.atttypmod,
                     v.datatype.typlen,
                     v.datatype.typbyval,
+                    v.datatype.typisarray,
                     v.notnull,
                     v.refname.clone(),
                 );
@@ -3228,7 +3247,11 @@ impl<'a> Estate<'a> {
                         ),
                     ));
                 }
-                let stored = self.assign_copy_to_datum_ctx(newvalue, isnull, typlen, typbyval)?;
+                let stored = if typisarray && !isnull && !typbyval {
+                    self.assign_array_to_datum_ctx(newvalue)?
+                } else {
+                    self.assign_copy_to_datum_ctx(newvalue, isnull, typlen, typbyval)?
+                };
                 self.set_var(target, stored, isnull, !isnull && !typbyval);
                 Ok(())
             }
@@ -3571,7 +3594,6 @@ impl<'a> Estate<'a> {
         if n == 0 {
             if let Some(t) = tuptab {
                 self.move_row_null(var, t)?;
-                let _ = spi::SPI_freetuptable(t);
             }
             self.exec_eval_cleanup();
         } else {
@@ -3588,7 +3610,6 @@ impl<'a> Estate<'a> {
                     None => {}
                     Some(r) => {
                         rc = r;
-                        let _ = spi::SPI_freetuptable(t);
                         break 'outer;
                     }
                 }
@@ -3598,6 +3619,9 @@ impl<'a> Estate<'a> {
             SPI_cursor_fetch(cursor, true, if prefetch_ok { 50 } else { 1 })?;
             tuptab = spi::SPI_tuptable();
             n = spi::SPI_processed();
+        }
+        if let Some(t) = tuptab {
+            let _ = spi::SPI_freetuptable(t);
         }
 
         self.exec_set_found(found);
