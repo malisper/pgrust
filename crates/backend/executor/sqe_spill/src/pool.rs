@@ -538,14 +538,9 @@ impl SpillPool {
             for_each_ref_word_mut(buf, &hdr, |word| {
                 if !word.is_unswizzled() && bad_addr.is_none() {
                     let addr = word.0 as usize;
-                    // Owning var page: greatest frame base ≤ addr.
-                    let vi = match vars.binary_search_by(|&(_, b)| b.cmp(&addr)) {
-                        Ok(exact) => exact,
-                        Err(0) => {
-                            bad_addr = Some(addr);
-                            return None;
-                        }
-                        Err(ins) => ins - 1,
+                    let Some(vi) = owner_of(vars, addr) else {
+                        bad_addr = Some(addr);
+                        return None;
                     };
                     let (vp, base) = vars[vi];
                     Some(VarRef::encode(vp.0, (addr - base - 8) as u32))
@@ -567,6 +562,17 @@ impl SpillPool {
         self.unpin(PagePin { id: row, _not_send: PhantomData });
         tok.consumed = true;
         Ok(())
+    }
+}
+
+/// The var page owning a swizzled payload address: the greatest frame
+/// base strictly below it. A payload never sits at its own page's base
+/// (cells start past the header), so an exact base match names the NEXT
+/// page's frame, not the owner.
+pub(crate) fn owner_of(vars: &[(PageId, usize)], addr: usize) -> Option<usize> {
+    match vars.binary_search_by(|&(_, b)| b.cmp(&addr)) {
+        Ok(0) | Err(0) => None,
+        Ok(i) | Err(i) => Some(i - 1),
     }
 }
 

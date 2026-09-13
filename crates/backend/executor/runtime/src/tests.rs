@@ -5332,3 +5332,43 @@ fn unwind_through_morsel_frame_does_not_wedge_finalization() {
 
     pool.shutdown();
 }
+
+/// A panic escaping a task body unwinds the worker loop: its execution
+/// permit returns to the pool (the respawned worker needs it) and the
+/// ring registration clears.
+#[test]
+fn worker_panic_releases_execution_permit() {
+    uring_stub::install();
+    struct PanicWork;
+    impl TaskSetWork for PanicWork {
+        fn run_morsel(&self, _worker: usize, _range: MorselRange) {
+            panic!("task body panic (expected by worker_panic_releases_execution_permit)");
+        }
+        fn finalize(&self) {}
+    }
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 2,
+        standbys: 1,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let permits = rt.execution_permits();
+    let (_h, _waiter) = rt.submit(QuerySpec {
+        query_id: 1,
+        tasksets: vec![TaskSetSpec {
+            source: Arc::new(SyntheticMorselSource::new(1)),
+            work: Arc::new(PanicWork) as Arc<dyn TaskSetWork>,
+            deps: vec![],
+        }],
+    });
+    let exited = |rt: &Runtime| (0..rt.nthreads()).any(|w| rt.worker_ring(w).is_none());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !(exited(&rt) && permits.available() == 2) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(exited(&rt), "the panicked worker must clear its ring registration");
+    assert_eq!(permits.available(), 2, "the panicked worker's permit must return to the pool");
+    pool.shutdown();
+}

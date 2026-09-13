@@ -31,7 +31,7 @@ pub fn empty_bank_answer(node: &PlanNode) -> AnswerSet {
     if let Some(w) = &node.params.window {
         let mut tys: Vec<crate::typmeta::TypMeta> =
             w.emit.iter().map(|&c| node.ty_of(c)).collect();
-        tys.extend(w.funcs.iter().map(|f| f.out));
+        tys.extend(w.all_funcs().map(|f| f.out));
         return AnswerSet::empty(tys);
     }
     if node.params.group_cols.is_empty() && !node.agg.is_empty() {
@@ -423,5 +423,37 @@ fn populate_admitted(ctx: &SqeCtx, fp: &ConjFp, survivors: u64, rows: u64) -> bo
                 rows > 0 && (survivors as f64) > ctx.faces.cfg.condcache_max_density * rows as f64;
             n >= 2 && !dense
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::typmeta::TypMeta;
+
+    #[test]
+    fn empty_bank_window_answer_carries_the_chain_columns() {
+        let window = WindowSpec {
+            emit: vec![1],
+            funcs: vec![WinFuncSpec::new(WinOp::Rank, None, None)],
+            chain: Some(WinChain {
+                n_ord: 1,
+                frame: FrameSpec::default(),
+                funcs: vec![WinFuncSpec::new(WinOp::RowNumber, None, None)],
+            }),
+            ..Default::default()
+        };
+        let node = PlanNode {
+            family: Family::WindowServe,
+            q: 0,
+            cols: vec![1],
+            col_tys: vec![TypMeta::INT4],
+            pred: None,
+            agg: Vec::new(),
+            params: Params { window: Some(window), ..Default::default() },
+        };
+        let a = empty_bank_answer(&node);
+        assert_eq!(a.nrows, 0);
+        assert_eq!(a.cols.len(), 3, "emit ++ funcs ++ chain.funcs");
     }
 }

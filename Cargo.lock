@@ -10791,6 +10791,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_portal",
  "types_rel",
  "types_scan",
  "types_slot",

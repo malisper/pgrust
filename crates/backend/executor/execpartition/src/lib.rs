@@ -187,7 +187,7 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         if self.dispatches[0].rel.rd_rel.relispartition {
             let PartitionTupleRouting { dispatches, root_check, .. } = &mut *self;
             let rel = &dispatches[0].rel;
-            if !exec_partition_check(mcx, root_check, rel, slot)? {
+            if !exec_partition_check_in(mcx, eval_mcx, root_check, rel, slot)? {
                 return Err(partition_constraint_violation(mcx, rel, slot, None, None));
             }
         }
@@ -246,7 +246,7 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                 // ExecPartitionCheck against the current (relcache-fresh)
                 // constraint: a partition ATTACHed after this routing
                 // snapshot narrows the default partition's constraint.
-                if !exec_partition_check(mcx, default_check, rel, cur_slot)? {
+                if !exec_partition_check_in(mcx, eval_mcx, default_check, rel, cur_slot)? {
                     return Err(partition_constraint_violation(
                         mcx,
                         rel,
@@ -345,7 +345,13 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                         }
                         None => &mut *slot,
                     };
-                    if !exec_partition_check(mcx, &mut leaf_checks[idx], target, check_slot)? {
+                    if !exec_partition_check_in(
+                        mcx,
+                        eval_mcx,
+                        &mut leaf_checks[idx],
+                        target,
+                        check_slot,
+                    )? {
                         return Err(partition_constraint_violation(
                             mcx,
                             target,
@@ -380,6 +386,20 @@ pub fn exec_partition_check<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
+    exec_partition_check_in(mcx, mcx, cache, rel, slot)
+}
+
+/// [`exec_partition_check`] evaluating in `eval_mcx`, the caller's
+/// per-tuple memory (C ExecPartitionCheck runs ExecCheck in
+/// GetPerTupleExprContext(estate)); `mcx` only compiles the cached
+/// constraint.
+pub fn exec_partition_check_in<'mcx>(
+    mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
+    cache: &mut Option<PgBox<'mcx, execexpr::ExprState<'mcx>>>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
     // Recursion tripwire: constraint compile/eval must never route back here.
     #[cfg(debug_assertions)]
     let _depth = {
@@ -407,9 +427,9 @@ pub fn exec_partition_check<'mcx>(
         *cache = Some(state);
     }
     let state = cache.as_mut().expect("just built");
-    // C evaluates in the caller econtext's per-tuple memory; by-ref call
-    // results ride the armed result mcx.
-    state.arm_result_mcx(mcx);
+    // SAFETY: eval_mcx outlives this call; the by-ref call results it
+    // holds are consumed before the caller resets it.
+    unsafe { state.arm_result_mcx_raw(eval_mcx) };
     let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
     let r = execexpr::exec_eval_expr(state, &mut slots)?;
     Ok(r.isnull || r.value.as_bool())

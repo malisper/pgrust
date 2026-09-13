@@ -536,10 +536,17 @@ fn cool_bank(sh: &Arc<Shared>, bank: &BankReg) {
             bytes += eb;
         }
     }
-    let u = sh.unconsumed.load(Ordering::Relaxed);
-    sh.unconsumed.fetch_sub(bytes.min(u), Ordering::Relaxed);
+    debit_unconsumed(&sh.unconsumed, bytes);
     sh.ctr.cooled_ext.fetch_add(n, Ordering::Relaxed);
     sh.ctr.cooled_bytes.fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Saturating budget debit: concurrent consumes must never wrap the
+/// counter (a wrapped value trips the budget guard on every drain).
+fn debit_unconsumed(unconsumed: &AtomicU64, bytes: u64) {
+    let _ = unconsumed.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |u| {
+        Some(u.saturating_sub(bytes))
+    });
 }
 
 fn observe(sh: &Arc<Shared>, ev: &StreamFaultEvent) {
@@ -577,8 +584,7 @@ fn observe(sh: &Arc<Shared>, ev: &StreamFaultEvent) {
         if let Some(bytes) = consumed {
             c.pf_consumed_ext.fetch_add(1, Ordering::Relaxed);
             c.pf_consumed_bytes.fetch_add(bytes, Ordering::Relaxed);
-            let u = sh.unconsumed.load(Ordering::Relaxed);
-            sh.unconsumed.fetch_sub(bytes.min(u), Ordering::Relaxed);
+            debit_unconsumed(&sh.unconsumed, bytes);
         }
     }
     // Frontier advance.
@@ -876,8 +882,7 @@ fn issue_batch(
     // would (a) inflate the waste witness and (b) evict hot-set bytes at
     // the warm boundary.
     let mut inserted_log: Vec<(u64, u64)> = Vec::new();
-    let log_arg: Option<&mut Vec<(u64, u64)>> =
-        if cooling() { Some(&mut inserted_log) } else { None };
+    let log_arg: Option<&mut Vec<(u64, u64)>> = Some(&mut inserted_log);
     let t0 = std::time::Instant::now();
     let stats = if wrapped {
         let uw = crate::bank::unwrappers()
@@ -924,11 +929,12 @@ fn issue_batch(
         part.prefetch_extent_run_holes(entry, batch, sh.coalesce, sh.hole, None, log_arg)
     };
     let dt = t0.elapsed().as_nanos() as u64;
-    if cooling() {
+    {
         // Un-mark batch keys that did NOT insert (already resident,
         // in-flight elsewhere, CRC/IO skip, or no unwrapper): their marks
-        // are not probation tags. A mark a demand access consumed in the
-        // window is already gone; `remove` on it is a no-op.
+        // are not probation tags, and `unconsumed` is credited only for
+        // inserted bytes. A mark a demand access consumed in the window
+        // is already gone; `remove` on it is a no-op.
         let inserted: std::collections::HashSet<(u64, u64)> =
             inserted_log.iter().copied().collect();
         let mut touched = sh.touched.lock().unwrap();
@@ -1046,5 +1052,28 @@ pub fn snapshot() -> WitnessSnapshot {
         pf_wasted_bytes: c.pf_wasted_bytes.load(Ordering::Relaxed),
         cooled_ext: c.cooled_ext.load(Ordering::Relaxed),
         cooled_bytes: c.cooled_bytes.load(Ordering::Relaxed),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debit_unconsumed_saturates_under_concurrent_consumes() {
+        let u = AtomicU64::new(1_000);
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..200 {
+                        debit_unconsumed(&u, 700);
+                    }
+                });
+            }
+        });
+        assert_eq!(u.load(Ordering::Relaxed), 0);
+        let u = AtomicU64::new(1_000);
+        debit_unconsumed(&u, 300);
+        assert_eq!(u.load(Ordering::Relaxed), 700);
     }
 }

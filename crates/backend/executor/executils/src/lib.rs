@@ -420,7 +420,10 @@ pub fn exec_project_with_subplans_outer<'mcx>(
     result: ExecSlotId,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
-    state.arm_result_mcx(mcx);
+    // C ExecProject: by-ref results and callee scratch live in the
+    // per-tuple memory reset at the next row, never the query context.
+    // SAFETY: the per-tuple context object outlives the plan (reset-only).
+    unsafe { state.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
     exectuples::exec_clear_tuple(estate.slot_mut(result), mcx);
     let mut resume: Option<execexpr::Resume> = None;
     loop {
@@ -559,7 +562,8 @@ pub fn exec_project_with_subplans<'mcx>(
     result: ExecSlotId,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
-    state.arm_result_mcx(mcx);
+    // SAFETY: the per-tuple context object outlives the plan (reset-only).
+    unsafe { state.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
     exectuples::exec_clear_tuple(estate.slot_mut(result), mcx);
     let mut resume: Option<execexpr::Resume> = None;
     loop {

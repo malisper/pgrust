@@ -193,3 +193,17 @@ fn find_pool_seg(name: &str) -> String {
     }
     panic!("no fileset dir under {}", super::TMP_DIR);
 }
+
+#[test]
+fn unswizzle_owner_is_the_frame_strictly_below_the_address() {
+    use crate::pool::owner_of;
+    let vars = [(PageId(3), 0x1_0000), (PageId(7), 0x2_0000), (PageId(9), 0x5_0000)];
+    assert_eq!(owner_of(&vars, 0x1_0028), Some(0));
+    // Page 3's frame ends exactly where page 7's begins: a payload in its
+    // last cell swizzles to page 7's base and still belongs to page 3.
+    assert_eq!(owner_of(&vars, 0x2_0000), Some(0));
+    assert_eq!(owner_of(&vars, 0x5_0000), Some(1));
+    assert_eq!(owner_of(&vars, 0x5_0008), Some(2));
+    assert_eq!(owner_of(&vars, 0x1_0000), None);
+    assert_eq!(owner_of(&vars, 0xfff8), None);
+}

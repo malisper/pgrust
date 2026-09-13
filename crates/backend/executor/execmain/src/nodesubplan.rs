@@ -834,7 +834,8 @@ fn project_lhs_nested_subplans<'mcx>(
     mut outer: Option<&mut SlotData<'mcx>>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
-    proj.arm_result_mcx(mcx);
+    // SAFETY: the per-tuple context object outlives the plan (reset-only).
+    unsafe { proj.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
     exectuples::exec_clear_tuple(estate.slot_mut(lhs_slot), mcx);
     let mut resume: Option<::execexpr::Resume> = None;
     loop {

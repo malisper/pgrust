@@ -266,6 +266,7 @@ impl Pool {
                 Err(std::sync::TryLockError::Poisoned(e)) => return e.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     crate::cancel::poll_now();
+                    crate::cancel::checkpoint();
                     for _ in 0..64 {
                         std::hint::spin_loop();
                     }
@@ -588,6 +589,24 @@ impl Drop for Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A driver blocked behind another generation unwinds at the next
+    /// poll once its statement's cancel token fires.
+    #[test]
+    fn blocked_run_lock_waiter_unwinds_when_canceled() {
+        fn fired() -> Option<crate::cancel::Payload> {
+            Some(Box::new("canceled"))
+        }
+        let pool = Pool::new(1);
+        let holder = pool.run_lock.lock().unwrap();
+        let _arm = crate::cancel::arm(fired);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = pool.acquire_run_lock();
+        }));
+        drop(holder);
+        let p = r.expect_err("a canceled waiter must unwind");
+        assert_eq!(p.downcast_ref::<&str>(), Some(&"canceled"));
+    }
 
     /// [RULED 2026-08-18] The claim-depth guard's gate: full width iff
     /// the claim plane is at least 4 units per worker; below that the

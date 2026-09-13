@@ -43,6 +43,9 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
     // blocking_io_section is only reachable from task bodies inside
     // worker_step, where the permit is held.
     let _blocking_reg = unsafe { crate::blocking::PermitThreadReg::new(rt.execution_permits()) };
+    // Exit discipline on every path, unwind included: a task-body panic
+    // must not leak this worker's permit (the pool would shrink for good).
+    let mut exit = LoopExit { rt, worker, held: false };
     if crate::sched::step_v2() {
         // STEP-V2 (agg192-contention, 48xl finding #1): permit held ACROSS
         // steps (released around parks and at exit) — the per-step global
@@ -51,7 +54,6 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
         // invalidated-slot window (publish/completion wake_all; the epoch is
         // captured before the failing step, so the park is lost-wakeup-free).
         // `PGRUST_RUNTIME_STEP_V2=0` restores the loop below.
-        let mut held = false;
         let mut retries = 0u32;
         // GL-STMTTASK-2 change 4 (PGRUST_POOL_WAKE_SPINNER, default OFF):
         // this worker's directed-wake slot + search-phase accounting. The
@@ -65,7 +67,7 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
         }
         loop {
             let epoch = rt.park_epoch();
-            if !held {
+            if !exit.held {
                 // Flip fix: the loop-top acquire can BLOCK (permits held
                 // by inline statements / suspended bodies) — a blocked
                 // thread is not a searcher; drop the mark for the wait and
@@ -76,7 +78,7 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
                 }
                 rt.execution_permits().acquire();
                 crate::io::note_permit(true);
-                held = true;
+                exit.held = true;
                 if spinner_mode && !local.spinning() {
                     rt.spin_enter_worker(&mut local);
                 }
@@ -101,7 +103,7 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
                         retries = 0;
                         crate::io::note_permit(false);
                         rt.execution_permits().release();
-                        held = false;
+                        exit.held = false;
                         if spinner_mode {
                             rt.park_worker_directed(epoch, &parker, &mut local);
                         } else {
@@ -115,7 +117,7 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
                     retries = 0;
                     crate::io::note_permit(false);
                     rt.execution_permits().release();
-                    held = false;
+                    exit.held = false;
                     if spinner_mode {
                         rt.park_worker_directed(epoch, &parker, &mut local);
                     } else {
@@ -125,18 +127,16 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
                 Step::Stop => break,
             }
         }
-        if held {
-            crate::io::note_permit(false);
-            rt.execution_permits().release();
-        }
     } else {
         loop {
             let epoch = rt.park_epoch();
             rt.execution_permits().acquire();
             crate::io::note_permit(true);
+            exit.held = true;
             let step = rt.worker_step(&mut local);
             crate::io::note_permit(false);
             rt.execution_permits().release();
+            exit.held = false;
             // Task boundary (§2.9): drain this worker's CQEs non-blockingly.
             crate::io::boundary_reap();
             match step {
@@ -151,8 +151,23 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
             }
         }
     }
-    rt.register_worker_ring(worker, None);
-    crate::io::worker_exit();
+}
+
+struct LoopExit<'a> {
+    rt: &'a Arc<Runtime>,
+    worker: usize,
+    held: bool,
+}
+
+impl Drop for LoopExit<'_> {
+    fn drop(&mut self) {
+        if self.held {
+            crate::io::note_permit(false);
+            self.rt.execution_permits().release();
+        }
+        self.rt.register_worker_ring(self.worker, None);
+        crate::io::worker_exit();
+    }
 }
 
 /// Handle to a spawned pool (join-able; tests and clean shutdown).

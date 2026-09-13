@@ -721,3 +721,63 @@ fn stage_varwalk_knob_ab() {
 }
 
 // --- end AGGSEQ-STAGE sub-region ---------------------------------------------
+
+fn int4_numeric_param_tlist<'mcx>(mcx: Mcx<'mcx>) -> NodeList<'mcx> {
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let f = Node::mk(
+        mcx,
+        FuncExpr {
+            funcid: 1740,
+            funcresulttype: 1700,
+            funcretset: false,
+            funcvariadic: false,
+            funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+            funccollid: 0,
+            inputcollid: 0,
+            args: NodeList::make1(mcx, var).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let p = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::Param {
+            paramkind: ::types_nodes::primnodes::ParamKind::PARAM_EXEC,
+            paramid: 0,
+            paramtype: INT4OID,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let t1 = Node::mk_target_entry(mcx, f, 1, None, false).unwrap();
+    let t2 = Node::mk_target_entry(mcx, p, 2, None, false).unwrap();
+    NodeList::make2(mcx, t1, t2).unwrap()
+}
+
+/// A PARAM_EXEC-dependent targetlist rides the subplan projection driver,
+/// which must project into the per-tuple memory like the plain arm.
+#[test]
+fn param_projection_results_live_in_per_tuple_memory() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_seqscan(1, int4_numeric_param_tlist(mcx), NodeList::default());
+        let page: Vec<i32> = (1..=200).collect();
+        let pages: Vec<&[i32]> = (0..20).map(|_| page.as_slice()).collect();
+        let oid = fresh_oid();
+        register_table(oid, pages.iter().map(|vals| build_page(vals)).collect());
+        let rel = test_relation(mcx, oid);
+        let mut estate = EStateData::new_in(mcx);
+        estate.es_snapshot = Some(static_mvcc_snapshot());
+        estate.es_param_exec_vals.push(::types_portal::params::ParamExecData::EMPTY);
+        let mut state = exec_init_seq_scan_rel(mcx, &node, &mut estate, rel).unwrap();
+        assert_eq!(count_rows(&mut state, &mut estate), 4000);
+        exec_rescan_seq_scan(&mut state, &mut estate).unwrap();
+        let before = mcx.context().used();
+        assert_eq!(count_rows(&mut state, &mut estate), 4000);
+        let growth = mcx.context().used() - before;
+        assert!(growth < 4000 * 4, "query context grew by {growth} bytes over the param-projection drive");
+        teardown(state, &mut estate);
+    });
+}

@@ -146,7 +146,10 @@ fn layout(bank: &Bank, group_cols: &[u32]) -> Layout {
 /// says int8 is signed, so the typed lane folds signed at every width;
 /// byte-identical on the banks of record, correct on negatives).
 #[inline(always)]
-fn field_signed(bits: u32, x: u64) -> i64 {
+fn field_fold(unsigned: bool, bits: u32, x: u64) -> i64 {
+    if unsigned {
+        return x as i64;
+    }
     match bits {
         16 => x as u16 as i16 as i64,
         32 => x as u32 as i32 as i64,
@@ -844,9 +847,14 @@ fn engine<K: EKey>(
     let mut cnts: Vec<i64> = Vec::new();
     let mut sums: Vec<i128> = Vec::new();
     let mut avgs: Vec<(i128, i64)> = Vec::new();
+    let unsigned: Vec<bool> = lay
+        .fields
+        .iter()
+        .map(|&(a, _, _)| crate::typmeta::is_unsigned_word(bank.typ(a).oid))
+        .collect();
     for &(k, c, sr, sw) in all.iter() {
         for (fi, &(_, bits, sh)) in lay.fields.iter().enumerate() {
-            key_out[fi].push(field_signed(bits, k.field(sh, bits)));
+            key_out[fi].push(field_fold(unsigned[fi], bits, k.field(sh, bits)));
         }
         cnts.push(c as i64);
         sums.push(sr as i128);
@@ -912,5 +920,19 @@ pub fn run_survivor_gather(ctx: &SqeCtx, node: &PlanNode) -> AnswerSet {
         engine::<u64>(ctx, node, &lay, filt_col, sum_col, avg_col, cache.as_deref())
     } else {
         engine::<u128>(ctx, node, &lay, filt_col, sum_col, avg_col, cache.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::field_fold;
+
+    #[test]
+    fn unsigned_word_keys_zero_extend() {
+        assert_eq!(field_fold(true, 32, 0xFFFF_FFFE), 4_294_967_294);
+        assert_eq!(field_fold(true, 32, 0x8000_0001), 2_147_483_649);
+        assert_eq!(field_fold(false, 32, 0xFFFF_FFFE), -2);
+        assert_eq!(field_fold(false, 16, 0xFFFF), -1);
+        assert_eq!(field_fold(true, 8, 0xFF), 255);
     }
 }

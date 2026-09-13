@@ -1155,6 +1155,15 @@ impl ScanFace for HeapFace<'_, '_> {
                                 Ok(_) => out.push_bytes(ci, Some(vscratch)),
                                 Err("text-external") if det => {
                                     match unsafe { detoast_external(mcx, p, vscratch) } {
+                                        Ok(_) if !out.bytes_fit(ci, vscratch.len()) => {
+                                            if vfail.is_none() {
+                                                vfail = Some(FaceError {
+                                                    attno,
+                                                    what: "text-arena-overflow",
+                                                });
+                                            }
+                                            out.push_bytes(ci, None);
+                                        }
                                         Ok(_) => out.push_bytes(ci, Some(vscratch)),
                                         Err(e) => {
                                             if vfail.is_none() {

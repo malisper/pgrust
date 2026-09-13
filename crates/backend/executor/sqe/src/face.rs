@@ -123,12 +123,23 @@ impl FaceFill {
         }
     }
 
+    /// Whether `add` more payload bytes still land within BYTE lane
+    /// `ci`'s u32 span offsets (writers refuse past this, never wrap).
+    #[inline]
+    pub fn bytes_fit(&self, ci: usize, add: usize) -> bool {
+        span_fits(self.cols[ci].bytes.len(), add)
+    }
+
     /// Append one row's payload to BYTE lane `ci` (row-major writers;
     /// `None` = SQL NULL). The byte twin of `push`.
     #[inline(always)]
     pub fn push_bytes(&mut self, ci: usize, payload: Option<&[u8]>) {
         let c = &mut self.cols[ci];
         debug_assert!(c.is_bytes(), "push_bytes on a word lane");
+        debug_assert!(
+            payload.is_none_or(|b| span_fits(c.bytes.len(), b.len())),
+            "byte-lane arena past the u32 span offsets"
+        );
         let r = c.spans.len();
         let wi = r >> 6;
         if wi >= c.vwords.len() {
@@ -307,9 +318,22 @@ impl SqeConfig {
     }
 }
 
+pub(crate) fn span_fits(len: usize, add: usize) -> bool {
+    len <= u32::MAX as usize && add <= u32::MAX as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn span_fits_bounds_the_u32_offset() {
+        assert!(span_fits(0, u32::MAX as usize));
+        assert!(span_fits(u32::MAX as usize, 8));
+        assert!(!span_fits(u32::MAX as usize + 1, 0));
+        assert!(!span_fits(0, u32::MAX as usize + 1));
+        assert!(!span_fits(usize::MAX, 1));
+    }
 
     #[test]
     fn heap_v1_config_is_lawful() {
