@@ -142,7 +142,7 @@ const INITIAL_MEMTUPSIZE: usize = 1024;
 const MKSORT_MIN: usize = 128;
 
 #[inline(always)]
-pub(crate) fn cfi() -> PgResult<()> {
+pub fn cfi() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
         return cfi_slow();
     }

@@ -396,6 +396,19 @@ fn sum_accum_positive_negative_split() {
     assert!(numeric_avg(Some(&mut empty)).unwrap().is_none());
 }
 
+// accum_sum_rescale (numeric.c:12553, :12557) pfrees the replaced digit
+// buffers: ever-wider inputs must not retain every superseded pair.
+#[test]
+fn sum_accum_rescale_frees_old_digit_buffers() {
+    let ctx = ::mcx::MemoryContext::new("agg-test");
+    let mut state = NumericAggState::new(false);
+    for i in 0..2000 {
+        do_numeric_accum(&mut state, ctx.mcx(), n(&format!("1e{}", 4 * i)).num()).unwrap();
+    }
+    assert!(ctx.used() < 200_000, "retained {} bytes", ctx.used());
+    assert_eq!(out(&numeric_sum(Some(&mut state)).unwrap().unwrap()).len(), 7997);
+}
+
 #[test]
 fn sum_specials() {
     let ctx = ::mcx::MemoryContext::new_bump("agg-test");

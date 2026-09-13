@@ -194,6 +194,12 @@ thread_local! {
         core::cell::RefCell::new(Vec::with_capacity(2 * TEXTBUFLEN));
 }
 
+// pg_locale_libc.c:581 palloc(bufsize1 + bufsize2): MaxAllocSize admission
+// of the combined NUL-terminated comparison buffer.
+pub(crate) fn strncoll_buf_admission(len1: usize, len2: usize) -> ::types_error::PgResult<()> {
+    ::mcx::check_alloc_size(len1 + 1 + len2 + 1)
+}
+
 pub(crate) fn strncoll_libc(arg1: &[u8], arg2: &[u8], lt: LibcLocale) -> i32 {
     COLL_SCRATCH.with(|cell| {
         let mut buf = cell.borrow_mut();

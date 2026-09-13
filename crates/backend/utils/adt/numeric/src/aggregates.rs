@@ -10,9 +10,9 @@ use crate::{Num, NumericDigit, NBASE, NUMERIC_NEG, NUMERIC_POS};
 
 /// C's NumericSumAccum: 32-bit digit limbs with lazy carry, positive and
 /// negative inputs accumulated separately. Digit buffers live in the agg
-/// context arena the state itself occupies (C pallocs them in agg_context and
-/// pfrees on rescale; the arena reclaims wholesale instead), so the state
-/// stays drop-free — every method taking `Mcx` must get that same context.
+/// context the state itself occupies (C pallocs them in agg_context and
+/// pfrees on rescale), so the state stays drop-free — every method taking
+/// `Mcx` must get that same context.
 pub struct NumericSumAccum {
     ndigits: i32,
     weight: i32,
@@ -169,8 +169,8 @@ impl NumericSumAccum {
             let new_neg = alloc_zeroed_digits(mcx, accum_ndigits as usize)?;
             if old_ndigits > 0 {
                 // SAFETY: fresh buffers of accum_ndigits >= weightdiff +
-                // old_ndigits slots; old buffers live per the arena contract.
-                // C pfrees the old pair; the bump arena reclaims at reset.
+                // old_ndigits slots; the old pair was allocated from this
+                // same context by alloc_zeroed_digits and is not read again.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         self.pos_digits,
@@ -182,6 +182,10 @@ impl NumericSumAccum {
                         new_neg.add(weightdiff),
                         old_ndigits as usize,
                     );
+                    let old = core::alloc::Layout::array::<i32>(old_ndigits as usize)
+                        .expect("digit buffer layout");
+                    mcx.deallocate(core::ptr::NonNull::new_unchecked(self.pos_digits.cast()), old);
+                    mcx.deallocate(core::ptr::NonNull::new_unchecked(self.neg_digits.cast()), old);
                 }
             }
             self.pos_digits = new_pos;

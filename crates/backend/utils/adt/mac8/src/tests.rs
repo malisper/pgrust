@@ -49,7 +49,7 @@ fn in_eui64_notations() {
         "08002b0102030405",
         "  08:00:2B:01:02:03:04:05  ",
     ] {
-        assert_eq!(macaddr8_in(s, None).unwrap(), CANON8, "{s}");
+        assert_eq!(macaddr8_in(s.as_bytes(), None).unwrap(), CANON8, "{s}");
     }
 }
 
@@ -61,16 +61,16 @@ fn in_eui48_expands_with_fffe() {
         "08002b010203",
         "0800.2b01.0203",
     ] {
-        assert_eq!(macaddr8_in(s, None).unwrap(), CANON6AS8, "{s}");
+        assert_eq!(macaddr8_in(s.as_bytes(), None).unwrap(), CANON6AS8, "{s}");
     }
 }
 
 #[test]
 fn in_c_state_machine_quirks() {
     // Trailing lone digit after 6 bytes falls out of the pair loop unread.
-    assert_eq!(macaddr8_in("08002b0102031", None).unwrap(), CANON6AS8);
+    assert_eq!(macaddr8_in(b"08002b0102031", None).unwrap(), CANON6AS8);
     // Trailing spacer after the final byte is consumed and accepted.
-    assert_eq!(macaddr8_in("08:00:2b:01:02:03:", None).unwrap(), CANON6AS8);
+    assert_eq!(macaddr8_in(b"08:00:2b:01:02:03:", None).unwrap(), CANON6AS8);
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn in_rejects_garbage() {
         "08\u{80}:00:2b:01:02:03",
         "not a mac",
     ] {
-        let err = macaddr8_in(s, None).unwrap_err();
+        let err = macaddr8_in(s.as_bytes(), None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION, "{s}");
         assert_eq!(
             err.message(),
@@ -98,7 +98,7 @@ fn in_rejects_garbage() {
 
     let mut soft = SoftErrorContext::new(true);
     assert_eq!(
-        macaddr8_in("bogus", Some(&mut soft)).unwrap(),
+        macaddr8_in(b"bogus", Some(&mut soft)).unwrap(),
         MacAddr8::default()
     );
     assert!(soft.error_occurred());
@@ -226,4 +226,21 @@ fn builtins_table_oid_ascending() {
     for w in MAC8_BUILTINS.windows(2) {
         assert!(w[0].foid < w[1].foid);
     }
+}
+
+// mac8.c:120: the pair loop reads the raw input bytes and stops when only one
+// trailing byte remains, so a lone non-UTF-8 byte after six octets is
+// ignored, and a rejected input is echoed byte-for-byte in the message.
+#[test]
+fn in_takes_raw_bytes_not_lossy_utf8() {
+    assert_eq!(
+        macaddr8_in(b"001122334455\xff", None).unwrap(),
+        MacAddr8::from_bytes([0, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55])
+    );
+    let err = macaddr8_in(b"00112233\xff", None).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+    assert_eq!(
+        err.message_raw.as_deref(),
+        Some(&b"invalid input syntax for type macaddr8: \"00112233\xff\""[..])
+    );
 }

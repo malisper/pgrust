@@ -886,6 +886,7 @@ pub fn fc_mode_final(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     }
 
     loop {
+        ::tuplesort::cfi()?;
         let Some((nd, abbrev)) =
             st.sort.as_mut().expect("live sortstate").getdatum_abbrev(true)?
         else {
@@ -1017,6 +1018,7 @@ fn hypothetical_rank_common(
 
     let mut rank: i64 = 1;
     loop {
+        ::tuplesort::cfi()?;
         let OsaGroupState { sort, fetch_slot, gcx, .. } = st;
         let slot = fetch_slot.as_mut().expect("tuple-path fetch slot");
         if !sort.as_mut().unwrap().gettupleslot(true, false, slot, *gcx)? {
@@ -1126,6 +1128,7 @@ pub fn fc_hypothetical_dense_rank_final(
     // row needs an owned copy (C passes copy=true here unconditionally).
     let spilled = st.sort.as_ref().unwrap().spilled();
     loop {
+        ::tuplesort::cfi()?;
         let OsaGroupState { sort, fetch_slot, extra_slot, compare_tuple, gcx, .. } = st;
         let (cur, prev) = if use_extra {
             (extra_slot.as_mut().unwrap(), fetch_slot.as_mut().unwrap())

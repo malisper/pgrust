@@ -65,10 +65,9 @@ fn mac8_result(fcinfo: &mut Fcinfo, addr: &MacAddr8) -> PgResult<Datum> {
 pub fn fc_macaddr8_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of the in-function is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
-    let s = String::from_utf8_lossy(s.to_bytes());
     // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
     let esc = unsafe { fcinfo.soft_error_context() };
-    let addr = crate::macaddr8_in(&s, esc)?;
+    let addr = crate::macaddr8_in(s.to_bytes(), esc)?;
     mac8_result(fcinfo, &addr)
 }
 

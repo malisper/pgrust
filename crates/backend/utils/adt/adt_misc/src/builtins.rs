@@ -1345,10 +1345,29 @@ fn read_dir_err(e: &std::io::Error, location: &str) -> Box<PgError> {
         .into()
 }
 
-// atooid: strtoul semantics — leading digits, 0 (skipped) when non-numeric.
+// atooid: (Oid) strtoul(x, NULL, 10) — leading whitespace and sign, ULONG_MAX
+// on overflow, then truncation to 32 bits.
 pub(crate) fn atooid(name: &str) -> Oid {
-    let digits: &str = &name[..name.bytes().take_while(u8::is_ascii_digit).count()];
-    digits.parse().unwrap_or(0)
+    let b = name.as_bytes();
+    let mut i = 0;
+    while i < b.len() && (b[i] == b' ' || (b'\t'..=b'\r').contains(&b[i])) {
+        i += 1;
+    }
+    let neg = i < b.len() && b[i] == b'-';
+    if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+        i += 1;
+    }
+    let mut v: u64 = 0;
+    let mut any = false;
+    while i < b.len() && b[i].is_ascii_digit() {
+        any = true;
+        v = v.saturating_mul(10).saturating_add((b[i] - b'0') as u64);
+        i += 1;
+    }
+    if !any {
+        return 0;
+    }
+    (if neg { v.wrapping_neg() } else { v }) as u32
 }
 
 fn directory_is_empty(path: &str) -> PgResult<bool> {
@@ -1356,7 +1375,11 @@ fn directory_is_empty(path: &str) -> PgResult<bool> {
         Ok(dir) => dir,
         Err(e) => return Err(open_dir_err(&e, path)),
     };
-    Ok(dir.next().is_none())
+    match dir.next() {
+        None => Ok(true),
+        Some(Err(e)) => Err(read_dir_err(&e, path)),
+        Some(Ok(_)) => Ok(false),
+    }
 }
 
 pub fn fc_pg_tablespace_databases(

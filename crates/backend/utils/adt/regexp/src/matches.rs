@@ -295,6 +295,87 @@ pub fn build_regexp_match_result<'mcx>(
     Ok(())
 }
 
+// Cross-call form of a finished setup. C keeps the match context (string,
+// offsets) in the SRF's multi-call context and builds one row per call; the
+// per-call context here is reset between calls, so the SRF owns copies of
+// the string and the offset array and never materializes every row at once.
+pub struct OwnedMatches {
+    text: OwnedText,
+    match_locs: Vec<i32>,
+    pub nmatches: i32,
+    pub npatterns: i32,
+}
+
+enum OwnedText {
+    Bytes(Vec<u8>),
+    Wide(Vec<PgWChar>),
+}
+
+fn owned_vec<T: Copy>(name: &str, src: &[T]) -> PgResult<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(src.len()).map_err(|_| ::mcx::oom_named(name, src.len()))?;
+    v.extend_from_slice(src);
+    Ok(v)
+}
+
+impl RegexpMatchesCtx<'_, '_> {
+    pub fn into_owned(self, name: &str) -> PgResult<OwnedMatches> {
+        let text = match &self.wide_str {
+            Some(wide) => OwnedText::Wide(owned_vec(name, wide)?),
+            None => OwnedText::Bytes(owned_vec(name, self.orig_str)?),
+        };
+        Ok(OwnedMatches {
+            text,
+            match_locs: owned_vec(name, &self.match_locs)?,
+            nmatches: self.nmatches,
+            npatterns: self.npatterns,
+        })
+    }
+}
+
+impl OwnedMatches {
+    fn fetch<'mcx>(&self, mcx: Mcx<'mcx>, so: i32, eo: i32) -> PgResult<PgVec<'mcx, u8>> {
+        match &self.text {
+            OwnedText::Wide(wide) => mbutils::pg_wchar2mb_with_len(mcx, &wide[so as usize..eo as usize]),
+            OwnedText::Bytes(orig) => slice_in(mcx, &orig[so as usize..eo as usize]),
+        }
+    }
+
+    // build_regexp_match_result for match `idx`.
+    pub fn match_row<'mcx>(
+        &self,
+        mcx: Mcx<'mcx>,
+        idx: i32,
+        mut push: impl FnMut(Option<PgVec<'mcx, u8>>) -> PgResult<()>,
+    ) -> PgResult<()> {
+        let mut loc = (idx * self.npatterns * 2) as usize;
+        for _ in 0..self.npatterns {
+            let so = self.match_locs[loc];
+            let eo = self.match_locs[loc + 1];
+            loc += 2;
+            if so < 0 || eo < 0 {
+                push(None)?;
+            } else {
+                push(Some(self.fetch(mcx, so, eo)?))?;
+            }
+        }
+        Ok(())
+    }
+
+    // build_regexp_split_result for piece `idx`.
+    pub fn split_piece<'mcx>(&self, mcx: Mcx<'mcx>, idx: i32) -> PgResult<PgVec<'mcx, u8>> {
+        let startpos = if idx > 0 { self.match_locs[(idx * 2 - 1) as usize] } else { 0 };
+        if startpos < 0 {
+            return Err(PgError::error("invalid match ending position").into());
+        }
+        let endpos = self.match_locs[(idx * 2) as usize];
+        if endpos < startpos {
+            return Err(PgError::error("invalid match starting position").into());
+        }
+        self.fetch(mcx, startpos, endpos)
+    }
+}
+
 pub fn build_regexp_split_result<'mcx>(
     splitctx: &RegexpMatchesCtx<'_, 'mcx>,
 ) -> PgResult<PgVec<'mcx, u8>> {

@@ -145,6 +145,12 @@ fn init_icu_converter() -> PgResult<*mut ffi::UConverter> {
     Ok(conv)
 }
 
+// pg_locale_icu.c:606 palloc_array(UChar, len_uchar + 1): MaxAllocSize
+// admission of the terminated UTF-16 buffer.
+pub(crate) fn uchar_buf_admission(ulen: i32) -> PgResult<()> {
+    ::mcx::check_alloc_size((ulen as usize + 1) * core::mem::size_of::<UChar>())
+}
+
 // uchar_length + uchar_convert fused: converts src into buf (terminated),
 // returning the UChar length.
 fn to_uchars(
@@ -171,6 +177,7 @@ fn to_uchars(
             errname(api, status)
         )));
     }
+    uchar_buf_admission(ulen)?;
     buf.clear();
     buf.resize(ulen as usize + 1, 0);
     let mut status = ffi::U_ZERO_ERROR;

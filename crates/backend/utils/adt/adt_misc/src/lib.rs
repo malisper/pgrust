@@ -176,15 +176,15 @@ pub fn fc_pg_input_error_info(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let Some(flinfo) = flinfo else { null_flinfo("pg_input_error_info") };
-    let mut escontext = ErrorSaveNode::new(true);
-    let ok = input_is_valid_common(flinfo, fcinfo, &mut escontext)?;
-
     let mcx = fcinfo.result_mcx();
     let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
     if resolved.class != funcapi::TypeFuncClass::Composite {
         return Err(not_row_type());
     }
     let tupdesc = resolved.result_tuple_desc.expect("composite result has tupdesc");
+
+    let mut escontext = ErrorSaveNode::new(true);
+    let ok = input_is_valid_common(flinfo, fcinfo, &mut escontext)?;
 
     let mut values = [Datum::null(); 4];
     let mut isnull = [true; 4];

@@ -412,6 +412,52 @@ fn match_and_matches() {
     assert_eq!(rows, vec![b"bar".to_vec(), b"beque".to_vec(), b"bazil".to_vec(), b"barf".to_vec(), b"bonk".to_vec()]);
 }
 
+// The SRFs keep an owned snapshot across calls and build one row per call
+// (regexp.c:1448-1454); the rows must equal the ctx-driven ones, and a
+// multibyte string exercises the wide-char snapshot.
+#[test]
+fn owned_snapshot_rows_match_ctx_rows() {
+    full_setup();
+    let cx = MemoryContext::new("test");
+    let m = cx.mcx();
+    use crate::matches::{build_regexp_split_result, regexp_matches_setup, regexp_split_setup};
+
+    let owned = regexp_matches_setup(m, "aéb aéé x".as_bytes(), b"a(\xc3\xa9+)(z)?", Some(b"g"), C)
+        .unwrap()
+        .into_owned("t")
+        .unwrap();
+    assert_eq!((owned.nmatches, owned.npatterns), (2, 2));
+    let mut rows = Vec::new();
+    for i in 0..owned.nmatches {
+        let mut row: Vec<Option<Vec<u8>>> = Vec::new();
+        owned.match_row(m, i, |e| {
+            row.push(e.map(|v| v.as_slice().to_vec()));
+            Ok(())
+        })
+        .unwrap();
+        rows.push(row);
+    }
+    assert_eq!(
+        rows,
+        vec![vec![Some("é".as_bytes().to_vec()), None], vec![Some("éé".as_bytes().to_vec()), None]]
+    );
+
+    let mut ctx = regexp_split_setup(m, "a,éé,b".as_bytes(), b",", None, C, "regexp_split_to_table()").unwrap();
+    let mut want = Vec::new();
+    while ctx.next_match <= ctx.nmatches {
+        want.push(build_regexp_split_result(&ctx).unwrap().as_slice().to_vec());
+        ctx.next_match += 1;
+    }
+    let owned = regexp_split_setup(m, "a,éé,b".as_bytes(), b",", None, C, "regexp_split_to_table()")
+        .unwrap()
+        .into_owned("t")
+        .unwrap();
+    let got: Vec<Vec<u8>> =
+        (0..=owned.nmatches).map(|i| owned.split_piece(m, i).unwrap().as_slice().to_vec()).collect();
+    assert_eq!(got, want);
+    assert_eq!(got, vec![b"a".to_vec(), "éé".as_bytes().to_vec(), b"b".to_vec()]);
+}
+
 #[test]
 fn substr_and_split() {
     full_setup();

@@ -127,10 +127,21 @@ fn null_member() -> Box<PgError> {
     )
 }
 
+#[track_caller]
+#[cold]
+fn null_member_elog() -> Box<PgError> {
+    Box::new(PgError::error("multirange values cannot contain null members"))
+}
+
 pub fn fc_multirange_constructor0(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    if fcinfo.nargs() != 0 {
+        return Err(Box::new(PgError::error(
+            "niladic multirange constructor must not receive arguments",
+        )));
+    }
     let flinfo = flinfo.expect("multirange constructor: NULL flinfo");
     let mltrngtypid = ::funcapi::get_fn_expr_rettype(flinfo);
     let mcx = fcinfo.result_mcx();
@@ -147,7 +158,7 @@ pub fn fc_multirange_constructor1(
     let mltrngtypid = ::funcapi::get_fn_expr_rettype(flinfo);
     let mcx = fcinfo.result_mcx();
     if fcinfo.argisnull(0) {
-        return Err(null_member());
+        return Err(null_member_elog());
     }
     let r = arg_range(fcinfo, 0, mcx)?;
     let mi = cached_multirange_info(flinfo, mltrngtypid)?;
@@ -189,7 +200,7 @@ pub fn fc_multirange_constructor2(
         return mr_result(fcinfo, &img);
     }
     if fcinfo.argisnull(0) {
-        return Err(null_member());
+        return Err(null_member_elog());
     }
     // SAFETY: arg 0 is a non-null array varlena.
     let p = unsafe { fcinfo.arg_ptr(0) };

@@ -1185,3 +1185,13 @@ mod deserialize_checked_bounds {
         let _ = range_deserialize_checked(&INT4, &img).err().unwrap();
     }
 }
+
+// range_bound_escape reserves exactly the escaped length, so a bound of
+// 536870912 plain bytes stays under the StringInfo ceiling as in C.
+#[test]
+fn bound_escape_reserves_exact_length() {
+    assert_eq!(crate::io::bound_escape_len(b"abc", false), 3);
+    assert_eq!(crate::io::bound_escape_len(b"", true), 2);
+    assert_eq!(crate::io::bound_escape_len(b"a\"b\\c", true), 9);
+    assert_eq!(crate::io::bound_escape_len(&[b'a'; 4096], false), 4096);
+}

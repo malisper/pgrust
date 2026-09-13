@@ -7,7 +7,6 @@ mod tests;
 
 extern crate alloc;
 
-use alloc::format;
 
 use ::adt_mac::{is_c_space, MacAddr};
 use ::datum::Bytea;
@@ -101,16 +100,17 @@ fn hex2_to_uchar(bytes: &[u8], pos: usize, badhex: &mut bool) -> u8 {
 
 #[cold]
 #[inline(never)]
-fn invalid_syntax_err(input: &str) -> PgError {
-    PgError::error(format!(
-        "invalid input syntax for type {}: \"{input}\"",
-        "macaddr8"
-    ))
-    .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
+// mac8.c:229: the input bytes verbatim in the message (a SQL_ASCII database
+// can hand over non-UTF-8 bytes).
+fn invalid_syntax_err(input: &[u8]) -> PgError {
+    let mut msg = b"invalid input syntax for type macaddr8: \"".to_vec();
+    msg.extend_from_slice(input);
+    msg.push(b'"');
+    PgError::error_raw_message(msg).with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
 }
 
-pub fn macaddr8_in(str: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<MacAddr8> {
-    match macaddr8_in_internal(str.as_bytes()) {
+pub fn macaddr8_in(str: &[u8], escontext: Option<&mut SoftErrorContext>) -> PgResult<MacAddr8> {
+    match macaddr8_in_internal(str) {
         Some(addr) => Ok(addr),
         None => ereturn(escontext, MacAddr8::default(), invalid_syntax_err(str)),
     }

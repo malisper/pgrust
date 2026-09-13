@@ -502,11 +502,12 @@ pub fn fc_regexp_split_to_array_no_flags(
     fc_split_to_array(fcinfo, false)
 }
 
-// Cross-call SRF rows are owned (std) allocations: per-call memory resets
-// between SRF calls, and the fn_extra carrier is heap-boxed.
+// Cross-call SRF state is an owned (std) snapshot: per-call memory resets
+// between SRF calls, and the fn_extra carrier is heap-boxed. Rows are built
+// one per call, as C does from its multi-call match context.
 enum SrfRows {
-    Matches(Vec<Vec<Option<Vec<u8>>>>),
-    Texts(Vec<Vec<u8>>),
+    Matches(crate::matches::OwnedMatches),
+    Texts(crate::matches::OwnedMatches),
 }
 
 fn srf_drive(
@@ -531,30 +532,27 @@ fn srf_drive(
         .expect("user_fctx is SrfRows");
     let mcx = fcinfo.result_mcx();
     let out: Option<Datum> = match rows {
-        SrfRows::Matches(v) => match v.get(idx) {
-            None => None,
-            Some(row) => {
-                let mut datums: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, row.len())?;
-                let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, row.len())?;
-                for e in row {
-                    match e {
-                        Some(b) => {
-                            datums.push(text_datum(mcx, b)?);
-                            nulls.push(false);
-                        }
-                        None => {
-                            datums.push(Datum::from_usize(0));
-                            nulls.push(true);
-                        }
+        SrfRows::Matches(m) if (idx as i32) < m.nmatches => {
+            let n = m.npatterns as usize;
+            let mut datums: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;
+            let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+            m.match_row(mcx, idx as i32, |e| {
+                match e {
+                    Some(b) => {
+                        datums.push(text_datum(mcx, &b)?);
+                        nulls.push(false);
+                    }
+                    None => {
+                        datums.push(Datum::from_usize(0));
+                        nulls.push(true);
                     }
                 }
-                Some(text_array_datum(mcx, &datums, &nulls)?)
-            }
-        },
-        SrfRows::Texts(v) => match v.get(idx) {
-            None => None,
-            Some(payload) => Some(text_datum(mcx, payload)?),
-        },
+                Ok(())
+            })?;
+            Some(text_array_datum(mcx, &datums, &nulls)?)
+        }
+        SrfRows::Texts(m) if (idx as i32) <= m.nmatches => Some(text_datum(mcx, &m.split_piece(mcx, idx as i32)?)?),
+        _ => None,
     };
     match out {
         Some(d) => Ok(funcapi_srf::srf_return_next(flinfo, fcinfo, d)),
@@ -572,36 +570,14 @@ fn collect_matches(fcinfo: &Fcinfo, with_flags: bool) -> PgResult<SrfRows> {
         None
     };
     let mcx = fcinfo.result_mcx();
-    let mut ctx = crate::matches::regexp_matches_setup(
+    let ctx = crate::matches::regexp_matches_setup(
         mcx,
         s.data(),
         p.data(),
         flags.as_ref().map(|f| f.data()),
         fcinfo.get_collation(),
     )?;
-    let nm = ctx.nmatches.max(0) as usize;
-    ::mcx::check_alloc_size(nm.saturating_mul(24))?;
-    let mut rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
-    rows.try_reserve_exact(nm).map_err(|_| ::mcx::oom_named("regexp_matches", nm))?;
-    while ctx.next_match < ctx.nmatches {
-        let mut row: Vec<Option<Vec<u8>>> = Vec::with_capacity(ctx.npatterns as usize);
-        crate::matches::build_regexp_match_result(&ctx, |e| {
-            let e = match e {
-                Some(v) => {
-                    let mut o = Vec::new();
-                    o.try_reserve_exact(v.len()).map_err(|_| ::mcx::oom_named("regexp_matches", v.len()))?;
-                    o.extend_from_slice(v.as_slice());
-                    Some(o)
-                }
-                None => None,
-            };
-            row.push(e);
-            Ok(())
-        })?;
-        rows.push(row);
-        ctx.next_match += 1;
-    }
-    Ok(SrfRows::Matches(rows))
+    Ok(SrfRows::Matches(ctx.into_owned("regexp_matches")?))
 }
 
 fn collect_split(fcinfo: &Fcinfo, with_flags: bool) -> PgResult<SrfRows> {
@@ -614,7 +590,7 @@ fn collect_split(fcinfo: &Fcinfo, with_flags: bool) -> PgResult<SrfRows> {
         None
     };
     let mcx = fcinfo.result_mcx();
-    let mut ctx = crate::matches::regexp_split_setup(
+    let ctx = crate::matches::regexp_split_setup(
         mcx,
         s.data(),
         p.data(),
@@ -622,19 +598,7 @@ fn collect_split(fcinfo: &Fcinfo, with_flags: bool) -> PgResult<SrfRows> {
         fcinfo.get_collation(),
         "regexp_split_to_table()",
     )?;
-    let ns = (ctx.nmatches + 1).max(1) as usize;
-    ::mcx::check_alloc_size(ns.saturating_mul(24))?;
-    let mut rows: Vec<Vec<u8>> = Vec::new();
-    rows.try_reserve_exact(ns).map_err(|_| ::mcx::oom_named("regexp_split_to_table", ns))?;
-    while ctx.next_match <= ctx.nmatches {
-        let piece = crate::matches::build_regexp_split_result(&ctx)?;
-        let mut o = Vec::new();
-        o.try_reserve_exact(piece.len()).map_err(|_| ::mcx::oom_named("regexp_split_to_table", piece.len()))?;
-        o.extend_from_slice(piece.as_slice());
-        rows.push(o);
-        ctx.next_match += 1;
-    }
-    Ok(SrfRows::Texts(rows))
+    Ok(SrfRows::Texts(ctx.into_owned("regexp_split_to_table")?))
 }
 
 pub fn fc_regexp_matches(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

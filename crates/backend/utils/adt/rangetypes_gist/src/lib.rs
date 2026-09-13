@@ -46,7 +46,9 @@ const CLS_CONTAIN_EMPTY: usize = 4;
 const CLS_EMPTY: usize = 8;
 const CLS_COUNT: usize = 9;
 
-const LIMIT_RATIO: f32 = 0.3;
+// C's macro is a double literal: the float4 ratio is promoted before the
+// compare, so a ratio of exactly 3/10 (rounded up as float4) passes.
+const LIMIT_RATIO: f64 = 0.3;
 
 const INFINITE_BOUND_PENALTY: f32 = 2.0;
 const CONTAIN_EMPTY_PENALTY: f32 = 1.0;
@@ -962,7 +964,7 @@ fn consider_split(
     let right_count = context.entries_count - left_count;
 
     let ratio = left_count.min(right_count) as f32 / context.entries_count as f32;
-    if ratio > LIMIT_RATIO {
+    if ratio as f64 > LIMIT_RATIO {
         let overlap = if context.has_subtype_diff {
             call_subtype_diff(mcx, cache, left_upper.val, right_lower.val)? as f32
         } else {

@@ -85,6 +85,7 @@ impl PgLocale {
     pub fn pg_strncoll(&self, arg1: &[u8], arg2: &[u8]) -> PgResult<i32> {
         debug_assert!(!self.collate_is_c, "pg_strncoll on a collate_is_c locale");
         if self.provider == COLLPROVIDER_LIBC {
+            libc_locale::strncoll_buf_admission(arg1.len(), arg2.len())?;
             Ok(libc_locale::strncoll_libc(arg1, arg2, self.lt))
         } else if self.provider == COLLPROVIDER_ICU {
             icu::strncoll(arg1, arg2, self.icu)

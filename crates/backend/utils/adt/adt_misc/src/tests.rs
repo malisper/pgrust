@@ -113,6 +113,12 @@ fn atooid_strtoul_semantics() {
     assert_eq!(crate::builtins::atooid("123abc"), 123);
     assert_eq!(crate::builtins::atooid("."), 0);
     assert_eq!(crate::builtins::atooid("pgsql_tmp"), 0);
+    // strtoul: sign and whitespace accepted, unsigned long then truncated to Oid.
+    assert_eq!(crate::builtins::atooid("4294967297"), 1);
+    assert_eq!(crate::builtins::atooid(" +5"), 5);
+    assert_eq!(crate::builtins::atooid("-1"), 4294967295);
+    assert_eq!(crate::builtins::atooid("99999999999999999999"), 4294967295);
+    assert_eq!(crate::builtins::atooid("+"), 0);
 }
 
 #[test]

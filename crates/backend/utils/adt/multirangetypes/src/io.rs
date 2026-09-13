@@ -268,7 +268,9 @@ pub fn multirange_recv<'m>(
     let req = ::mcx::mul_size(core::mem::size_of::<*const u8>(), range_count as isize as usize)?;
     ::mcx::check_alloc_size(req)?;
     let range_count = range_count as usize;
-    let mut ranges: PgVec<'_, &'m [u8]> = ::mcx::vec_with_capacity_in(mcx, range_count)?;
+    // C's array is 8 bytes per pointer; a 16-byte slice per entry would trip
+    // MaxAllocSize on a count C admits, so grow on demand instead.
+    let mut ranges: PgVec<'_, &'m [u8]> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     for _ in 0..range_count {
         let range_len = ::pqformat::pq_getmsgint(buf, 4)? as usize;

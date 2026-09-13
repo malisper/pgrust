@@ -276,17 +276,23 @@ pub fn range_deparse<'m>(
     Ok(out)
 }
 
+// C appends only what the bound needs; reserving 2 * len + 2 up front would
+// trip the StringInfo ceiling on a large bound C outputs fine.
+pub(crate) fn bound_escape_len(value: &[u8], nq: bool) -> usize {
+    value.len() + value.iter().filter(|&&ch| ch == b'"' || ch == b'\\').count() + if nq { 2 } else { 0 }
+}
+
 // range_bound_escape (rangetypes.c).
 fn bound_escape(out: &mut ::stringinfo::StringInfo<'_>, value: &[u8]) -> PgResult<()> {
     let nq = value.is_empty()
         || value.iter().any(|&ch| {
             matches!(ch, b'"' | b'\\' | b'(' | b')' | b'[' | b']' | b',') || is_space(ch)
         });
-    let extra = 2 * value.len() + 2;
+    let extra = bound_escape_len(value, nq);
     out.append_written(extra, |dst| {
         let mut w = 0usize;
-        // SAFETY: writes below total <= 2 * value.len() + 2 = `extra` bytes
-        // at `dst` (each byte emits at most twice, plus 2 quotes).
+        // SAFETY: writes below total exactly `extra` bytes at `dst` (each
+        // byte once, escaped ones twice, plus 2 quotes when nq).
         unsafe {
             if nq {
                 *dst.add(w) = b'"';

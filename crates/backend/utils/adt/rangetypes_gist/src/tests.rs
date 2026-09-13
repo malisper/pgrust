@@ -187,6 +187,34 @@ fn picksplit_assigns_every_offset_once() {
     assert!(llo.val.as_i32() <= lup.val.as_i32());
 }
 
+// rangetypes_gist.c:45 LIMIT_RATIO is a double: a 3/10 float4 ratio
+// (0.30000001 promoted) is accepted, so three identical low ranges split
+// away from seven identical high ones instead of falling back to 4/6.
+#[test]
+fn consider_split_accepts_ratio_of_exactly_limit() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let mut c = cache(true);
+    let mut ranges: Vec<&[u8]> = vec![&[]];
+    for _ in 0..3 {
+        ranges.push(mk(mcx, &mut c, bound(0, true, true), bound(1, false, false)));
+    }
+    for _ in 0..7 {
+        ranges.push(mk(mcx, &mut c, bound(10, true, true), bound(11, false, false)));
+    }
+    let mut v = GistSplitVec {
+        spl_left: Vec::new(),
+        spl_ldatum: Datum::from_usize(0),
+        spl_ldatum_exists: false,
+        spl_right: Vec::new(),
+        spl_rdatum: Datum::from_usize(0),
+        spl_rdatum_exists: false,
+    };
+    double_sorting_split(mcx, &mut c, &ranges, &mut v).unwrap();
+    assert_eq!(v.spl_left, vec![1, 2, 3]);
+    assert_eq!(v.spl_right, vec![4, 5, 6, 7, 8, 9, 10]);
+}
+
 #[test]
 fn class_split_mixed_classes() {
     let cx = MemoryContext::new("t");

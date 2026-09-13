@@ -667,3 +667,16 @@ fn default_collation_sb_case_uses_database_ctype() {
     assert_eq!(upper(&loc(true, lt)), b"\xC4AB");
     assert_eq!(lower(&loc(true, libc_locale::LibcLocale::NONE)), b"\xC4ab");
 }
+
+// pg_locale_libc.c:581 / pg_locale_icu.c:606: the scratch buffers go through
+// palloc, so inputs whose combined buffer exceeds MaxAllocSize are the
+// "invalid memory alloc request size" error, not a comparison or conversion.
+#[test]
+fn collation_scratch_buffers_have_palloc_admission() {
+    assert!(libc_locale::strncoll_buf_admission(600_000_000, 473_741_821).is_ok());
+    let e = libc_locale::strncoll_buf_admission(600_000_000, 600_000_000).unwrap_err();
+    assert_eq!(e.message(), "invalid memory alloc request size 1200000002");
+    assert!(icu::uchar_buf_admission(536_870_910).is_ok());
+    let e = icu::uchar_buf_admission(536_870_911).unwrap_err();
+    assert_eq!(e.message(), "invalid memory alloc request size 1073741824");
+}

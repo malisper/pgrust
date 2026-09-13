@@ -2,7 +2,7 @@ use super::*;
 use ::adt_rangetypes::{make_range, ElemInfo, RangeInfo};
 use ::mcx::MemoryContext;
 use ::types_error::PgResult;
-use ::types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use ::types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, LocalFcinfo};
 
 fn fc_i32_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (a, b) = (fcinfo.arg(0).as_i32(), fcinfo.arg(1).as_i32());
@@ -289,6 +289,39 @@ mod recv_wire {
                 0x1000_0000usize * core::mem::size_of::<*const u8>()
             )
         );
+    }
+
+    // C sizes the pointer array at 8 bytes per range; a count it admits must
+    // reach the wire read (08P01 on a truncated payload), not a Rust-side
+    // MaxAllocSize rejection of a wider element.
+    #[test]
+    fn admitted_count_with_truncated_payload_is_protocol_error() {
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let e = recv(mcx, &0x0400_0000u32.to_be_bytes()).expect_err("truncated payload");
+        assert_eq!(e.sqlstate, ERRCODE_PROTOCOL_VIOLATION);
+        assert_eq!(e.message, "insufficient data left in message");
+    }
+}
+
+// multirangetypes.c:1041/:973/:1070: the constructor sanity checks are
+// elog(ERROR)s (XX000), reachable through non-strict internal aliases.
+#[test]
+fn constructor_guards_are_elog_errors() {
+    let ctx = MemoryContext::new_bump("t");
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    // SAFETY: mcx outlives the call.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+    fcinfo.set_arg_null(0);
+    let mut flinfo = FmgrInfo::new(crate::builtins::fc_multirange_constructor0, 4229, 0, false, false);
+    let e = crate::builtins::fc_multirange_constructor0(Some(&mut flinfo), &mut fcinfo).unwrap_err();
+    assert_eq!(e.sqlstate, ::types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(e.message, "niladic multirange constructor must not receive arguments");
+    for f in [crate::builtins::fc_multirange_constructor1, crate::builtins::fc_multirange_constructor2] {
+        let mut flinfo = FmgrInfo::new(f, 4230, 1, false, false);
+        let e = f(Some(&mut flinfo), &mut fcinfo).unwrap_err();
+        assert_eq!(e.sqlstate, ::types_error::ERRCODE_INTERNAL_ERROR);
+        assert_eq!(e.message, "multirange values cannot contain null members");
     }
 }
 

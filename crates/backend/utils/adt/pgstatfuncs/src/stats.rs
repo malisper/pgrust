@@ -1,7 +1,7 @@
 use ::datum::Datum;
 use ::types_core::BackendType;
 use ::types_error::PgResult;
-use ::types_fmgr::{byref_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use ::types_fmgr::{byref_result, varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
 use pgstat::io::{
     io_context_from_index, pgstat_get_io_context_name, pgstat_get_io_object_name,
@@ -628,13 +628,11 @@ pub fn fc_pg_stat_get_archiver(
 
 const NAMEDATALEN: usize = 64;
 
-// namestrcpy's byte clip, pulled back to a char boundary to stay valid UTF-8.
-fn clip_slot_name(s: &str) -> &str {
-    let mut end = s.len().min(NAMEDATALEN - 1);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+// namestrcpy over text_to_cstring: the first NAMEDATALEN-1 bytes up to a NUL,
+// whatever character boundary that lands on (name.c:233-237).
+fn clip_slot_name(s: &[u8]) -> &[u8] {
+    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+    &s[..end.min(NAMEDATALEN - 1)]
 }
 
 pub(crate) fn pgstat_fetch_replslot(
@@ -651,18 +649,21 @@ pub fn fc_pg_stat_get_replication_slot(
     let flinfo = flinfo.expect("pg_stat_get_replication_slot: resolved FmgrInfo required");
     let mut namebuf = [0u8; NAMEDATALEN];
     let name_len = {
-        let clipped = clip_slot_name(crate::arg_text_str(fcinfo, 0)?);
-        namebuf[..clipped.len()].copy_from_slice(clipped.as_bytes());
+        // SAFETY: catalog arg 0 is text (strict function).
+        let arg = unsafe { fcinfo.arg_varlena_packed(0)? };
+        let clipped = clip_slot_name(arg.data());
+        namebuf[..clipped.len()].copy_from_slice(clipped);
         clipped.len()
     };
-    let name = core::str::from_utf8(&namebuf[..name_len]).expect("clipped from valid UTF-8");
+    let name = &namebuf[..name_len];
 
     // C zero-fills when the slot has no stats entry (create message lost).
-    let slotent = pgstat_fetch_replslot(name)?.unwrap_or_default();
+    // Slot names are validated ASCII, so a clipped non-UTF-8 name matches none.
+    let slotent = pgstat_fetch_replslot(&String::from_utf8_lossy(name))?.unwrap_or_default();
 
     let mut values = [Datum::from_usize(0); COLS];
     let mut nulls = [false; COLS];
-    values[0] = text_datum(fcinfo, name)?;
+    values[0] = varlena_result(varlena::cstring_to_text(fcinfo.result_mcx(), name)?);
     values[1] = Datum::from_i64(slotent.spill_txns);
     values[2] = Datum::from_i64(slotent.spill_count);
     values[3] = Datum::from_i64(slotent.spill_bytes);
@@ -702,4 +703,16 @@ pub fn fc_pg_stat_get_subscription_stats(
         values[10] = Datum::from_i64(subentry.stat_reset_timestamp);
     }
     record_datum(flinfo, fcinfo, &values, &nulls)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn slot_name_clips_at_63_bytes_like_namestrcpy() {
+        let mut s = [b'a'; 62].to_vec();
+        s.extend_from_slice("é".as_bytes());
+        assert_eq!(super::clip_slot_name(&s).len(), 63);
+        assert_eq!(super::clip_slot_name(b"ab\0cd"), b"ab");
+        assert_eq!(super::clip_slot_name(b"short"), b"short");
+    }
 }
