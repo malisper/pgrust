@@ -1069,12 +1069,38 @@ trait VarProc: VarOps + Sized {
     }
 }
 
-fn var_ssup_lower<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
-    let img = detoasted_image(mcx, d)?;
-    let r = var::key_readable(img);
-    let (start, len) = (r.lower.as_ptr(), r.lower.len());
-    // SAFETY: the lower slice borrows the detoasted image living in mcx.
-    Ok(unsafe { core::slice::from_raw_parts(start, len) })
+// gbt_*_ssup_cmp detoast each key and pfree the copy after the comparison
+// (btree_bytea.c:177, btree_bit.c:222); tuplesort hands every comparison its
+// long-lived context, so nothing may be left behind in `mcx`.
+fn var_ssup_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<std::borrow::Cow<'m, [u8]>> {
+    use std::borrow::Cow;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: d is a non-null varlena datum from tuplesort.
+    unsafe {
+        if varatt::varatt_is_4b_u(p) {
+            Ok(Cow::Borrowed(core::slice::from_raw_parts(p, varatt::varsize_4b(p))))
+        } else if varatt::varatt_is_1b(p) && !varatt::varatt_is_1b_e(p) {
+            let src = core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ_SHORT),
+                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
+            );
+            let total = VARHDRSZ + src.len();
+            let mut buf = Vec::with_capacity(total);
+            buf.extend_from_slice(&varatt::set_varsize_4b_word(total as u32).to_ne_bytes());
+            buf.extend_from_slice(src);
+            Ok(Cow::Owned(buf))
+        } else {
+            let raw = core::slice::from_raw_parts(p, varatt::varsize_any(p));
+            let scratch = mcx::MemoryContext::new("gbt ssup detoast");
+            let flat = detoast::detoast_attr(scratch.mcx(), raw)?.to_vec();
+            let _ = mcx;
+            Ok(Cow::Owned(flat))
+        }
+    }
+}
+
+fn ssup_lower(img: &[u8]) -> &[u8] {
+    var::key_readable(img).lower
 }
 
 struct TextV;
@@ -1089,8 +1115,8 @@ impl VarOps for TextV {
 }
 impl VarProc for TextV {
     fn ssup_cmp(x: Datum, y: Datum, coll: Oid, mcx: Mcx<'_>) -> PgResult<i32> {
-        let a = var_ssup_lower(mcx, x)?;
-        let b = var_ssup_lower(mcx, y)?;
+        let (ai, bi) = (var_ssup_image(mcx, x)?, var_ssup_image(mcx, y)?);
+        let (a, b) = (ssup_lower(&ai), ssup_lower(&bi));
         varlena::bttextcmp(&a[VARHDRSZ..], &b[VARHDRSZ..], coll)
     }
 }
@@ -1107,8 +1133,8 @@ impl VarOps for BpcharV {
 }
 impl VarProc for BpcharV {
     fn ssup_cmp(x: Datum, y: Datum, coll: Oid, mcx: Mcx<'_>) -> PgResult<i32> {
-        let a = var_ssup_lower(mcx, x)?;
-        let b = var_ssup_lower(mcx, y)?;
+        let (ai, bi) = (var_ssup_image(mcx, x)?, var_ssup_image(mcx, y)?);
+        let (a, b) = (ssup_lower(&ai), ssup_lower(&bi));
         varchar::bpcharcmp(&a[VARHDRSZ..], &b[VARHDRSZ..], coll)
     }
 }
@@ -1122,8 +1148,8 @@ impl VarOps for ByteaV {
 }
 impl VarProc for ByteaV {
     fn ssup_cmp(x: Datum, y: Datum, _coll: Oid, mcx: Mcx<'_>) -> PgResult<i32> {
-        let a = var_ssup_lower(mcx, x)?;
-        let b = var_ssup_lower(mcx, y)?;
+        let (ai, bi) = (var_ssup_image(mcx, x)?, var_ssup_image(mcx, y)?);
+        let (a, b) = (ssup_lower(&ai), ssup_lower(&bi));
         Ok(varlena::bytea::byteacmp(&a[VARHDRSZ..], &b[VARHDRSZ..]))
     }
 }
@@ -1140,8 +1166,8 @@ impl VarOps for NumericV {
 }
 impl VarProc for NumericV {
     fn ssup_cmp(x: Datum, y: Datum, _coll: Oid, mcx: Mcx<'_>) -> PgResult<i32> {
-        let a = var_ssup_lower(mcx, x)?;
-        let b = var_ssup_lower(mcx, y)?;
+        let (ai, bi) = (var_ssup_image(mcx, x)?, var_ssup_image(mcx, y)?);
+        let (a, b) = (ssup_lower(&ai), ssup_lower(&bi));
         Ok(adt_numeric::cmp_numerics(
             adt_numeric::Num::from_payload(&a[VARHDRSZ..]),
             adt_numeric::Num::from_payload(&b[VARHDRSZ..]),
@@ -1182,8 +1208,8 @@ impl VarOps for BitV {
 impl VarProc for BitV {
     // upstream 558c4ea9a43b (18.5): Use the proper comparator in gbt_bit_ssup_cmp.
     fn ssup_cmp(x: Datum, y: Datum, _coll: Oid, mcx: Mcx<'_>) -> PgResult<i32> {
-        let a = var_ssup_lower(mcx, x)?;
-        let b = var_ssup_lower(mcx, y)?;
+        let (ai, bi) = (var_ssup_image(mcx, x)?, var_ssup_image(mcx, y)?);
+        let (a, b) = (ssup_lower(&ai), ssup_lower(&bi));
         Ok(adt_varbit::bit_cmp_payload(&a[VARHDRSZ..], &b[VARHDRSZ..]))
     }
     fn query_for_node(q: &[u8]) -> std::borrow::Cow<'_, [u8]> {
@@ -1603,6 +1629,10 @@ fn lookup(function: &str) -> Option<PGFunction> {
     num_entries!("bool", BoolT);
     num_entries!("inet", InetT);
 
+    // numeric penalty is special-cased; it must win over var_entries!("numeric").
+    if function == "gbt_numeric_penalty" {
+        return Some(fc_gbt_numeric_penalty);
+    }
     var_entries!("text", TextV);
     var_entries!("bytea", ByteaV);
     var_entries!("numeric", NumericV);
@@ -1636,8 +1666,6 @@ fn lookup(function: &str) -> Option<PGFunction> {
         // bit's sortsupport doubles for varbit; macaddr's SQL name differs.
         "gbt_varbit_sortsupport" => var_sortsupport::<BitV>,
         "gbt_macaddr_sortsupport" => num_sortsupport::<MacT>,
-        // numeric penalty is special-cased.
-        "gbt_numeric_penalty" => fc_gbt_numeric_penalty,
         // Shared module functions.
         "gbt_decompress" => fc_gbt_decompress,
         "gbt_var_decompress" => fc_gbt_var_decompress,

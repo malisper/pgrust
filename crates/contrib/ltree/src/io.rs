@@ -227,11 +227,13 @@ struct PLevel {
     variants: Vec<NodeItem>,
 }
 
-// C keeps the nodeitem array under palloc's MaxAllocSize; the per-level
-// 65535 cap alone leaves the total unbounded across levels.
-fn admit_variant(total: &mut usize) -> Result<(), PgError> {
-    *total += 1;
-    ::mcx::check_alloc_size(total.saturating_mul(core::mem::size_of::<NodeItem>())).map_err(|e| *e)
+// C sizes every level's nodeitem array by the whole query's pipe count:
+// palloc0(sizeof(nodeitem) * (numOR + 1)) at the level's first label
+// (ltree_io.c:322, :329); sizeof(nodeitem) is 24 on the 64-bit layout.
+const C_NODEITEM_SIZE: usize = 24;
+
+fn level_alloc_check(num_or: usize) -> Result<(), PgError> {
+    ::mcx::check_alloc_size(C_NODEITEM_SIZE.saturating_mul(num_or + 1)).map_err(|e| *e)
 }
 
 /// C's `atoi`, which lquery_in's repeat-count parser relies on for its
@@ -269,7 +271,7 @@ fn atoi(buf: &[u8], i: usize) -> i32 {
 
 pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     let n = buf.len();
-    let mut total_variants = 0usize;
+    let mut num_or = 0usize;
 
     let mut num = 0i32;
     {
@@ -278,6 +280,8 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
             let cl = mblen(&buf[i..])?;
             if buf[i] == b'.' {
                 num += 1;
+            } else if buf[i] == b'|' {
+                num_or += 1;
             }
             i += cl;
         }
@@ -322,7 +326,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
         match state {
             LQPRS_WAITLEVEL => {
                 if is_label(&buf[i..], cl) {
-                    admit_variant(&mut total_variants)?;
+                    level_alloc_check(num_or)?;
                     levels[cur].variants.push(NodeItem {
                         start: i,
                         len: 0,
@@ -332,7 +336,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                     lvar = 0;
                     state = LQPRS_WAITDELIM;
                 } else if c == b'!' {
-                    admit_variant(&mut total_variants)?;
+                    level_alloc_check(num_or)?;
                     levels[cur].variants.push(NodeItem {
                         start: i + 1,
                         len: 0,
@@ -358,7 +362,6 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                             "Number of variants exceeds the maximum allowed (65535).",
                         ));
                     }
-                    admit_variant(&mut total_variants)?;
                     levels[cur].variants.push(NodeItem {
                         start: i,
                         len: 0,
@@ -1155,6 +1158,27 @@ pub fn deparse_ltxtquery(image: &[u8]) -> Result<Vec<u8>, PgError> {
     };
     inf.run(true)?;
     Ok(inf.out)
+}
+
+#[cfg(test)]
+mod parse_lquery_alloc_tests {
+    use super::parse_lquery;
+
+    // ltree_io.c:322 sizes each level's nodeitem array by the whole query's
+    // pipe count, so palloc0 rejects the request before any syntax check.
+    // bug-inventory 2026-09-13 batch-46 (fp-contrib-ltree-ltree_io#1): the
+    // port reported 42601 at character 2 instead of C's XX000.
+    #[test]
+    fn pipe_count_hits_c_palloc_limit_before_syntax() {
+        let mut q = b"a?".to_vec();
+        q.resize(2 + 44_739_243, b'|');
+        let e = parse_lquery(&q).unwrap_err();
+        assert_eq!(e.message(), "invalid memory alloc request size 1073741856");
+        assert_ne!(e.sqlstate, types_error::ERRCODE_SYNTAX_ERROR);
+        let mut ok = b"a?".to_vec();
+        ok.resize(2 + 44_739_241, b'|');
+        assert_eq!(parse_lquery(&ok).unwrap_err().sqlstate, types_error::ERRCODE_SYNTAX_ERROR);
+    }
 }
 
 #[cfg(test)]

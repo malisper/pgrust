@@ -296,7 +296,7 @@ fn fc_dblink_get_connections(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo
     }
     let mut elems = Vec::with_capacity(names.len());
     for n in &names {
-        elems.push(types_fmgr::varlena_result(varlena::cstring_to_text(mcx, n.as_bytes())?));
+        elems.push(types_fmgr::varlena_result(varlena::cstring_to_text(mcx, n)?));
     }
     let image = arrayfuncs::construct_array(mcx, &elems, types_core::TEXTOID, -1, false, b'i')?;
     let ptr = image.as_ptr() as usize;
@@ -581,18 +581,24 @@ fn fc_dblink_get_notify(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     let flinfo = flinfo.expect("dblink_get_notify: resolved FmgrInfo required");
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let conname = if fcinfo.nargs() == 1 { Some(arg_text(fcinfo, 0)?) } else { None };
-    if !conn_present(&conname)? {
+    // dblink_get_named_conn errors for a missing name; the unnamed form hands
+    // a NULL pconn->conn to PQconsumeInput/PQnotifies, which yield nothing.
+    if conname.is_some() && !conn_present(&conname)? {
         return Err(registry::conn_not_avail(conname.as_deref()));
     }
-    let notifies = on_conn(&conname, |rc| {
-        rc.conn.consume_input();
-        let mut out = Vec::new();
-        while let Some(n) = rc.conn.next_notify() {
-            out.push(n);
+    let notifies = if conn_present(&conname)? {
+        on_conn(&conname, |rc| {
             rc.conn.consume_input();
-        }
-        out
-    })?;
+            let mut out = Vec::new();
+            while let Some(n) = rc.conn.next_notify() {
+                out.push(n);
+                rc.conn.consume_input();
+            }
+            out
+        })?
+    } else {
+        Vec::new()
+    };
 
     let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
     for n in &notifies {

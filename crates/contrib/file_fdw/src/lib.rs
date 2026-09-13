@@ -897,7 +897,7 @@ fn file_acquire_sample_rows<'mcx>(
     *totalrows = 0.0;
     *totaldeadrows = 0.0;
     loop {
-        postgres_seams::check_for_interrupts::call()?;
+        vacuum_seams::vacuum_delay_point::call(true)?;
 
         tupcontext.reset();
         // SAFETY: reset-only context; heap_form_tuple copies out before the

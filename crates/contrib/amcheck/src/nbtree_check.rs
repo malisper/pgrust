@@ -66,8 +66,8 @@ const INVALID_BTREE_LEVEL: u32 = InvalidBlockNumber;
 const INTERVAL_BTREE_FAM_OID: Oid = 1982;
 const Anum_pg_index_indcheckxmin: i32 = 12;
 const OPAQUE_MAXALIGN: usize = 16;
-// C divergence: C's TOAST_INDEX_TARGET is MaxHeapTupleSize/16; here 8160/4 to match nbtree::itup's index_form_tuple.
-const TOAST_INDEX_TARGET: usize = 8160 / 4;
+// heaptoast.h:68 TOAST_INDEX_TARGET = MaxHeapTupleSize / 16, the same bound nbtree::itup's index_form_tuple compresses at.
+const TOAST_INDEX_TARGET: usize = ::types_storage::bufpage::MaxHeapTupleSize / 16;
 const IMK: usize = INDEX_MAX_KEYS as usize;
 
 fn fmt_lsn(lsn: XLogRecPtr) -> String {

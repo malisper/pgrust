@@ -16,5 +16,5 @@ types_error = { path = "../../_support/types/types_error" }
 types_fmgr = { path = "../../_support/types/fmgr" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 guc = { path = "../../backend/utils/misc/guc" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 types_guc = { path = "../../_support/types/types_guc" }
-adt_bool = { path = "../../backend/utils/adt/bool" }

@@ -34,6 +34,7 @@ foreigncmds = { path = "../../backend/commands/foreigncmds" }
 commands_define = { path = "../../backend/commands/commands_define" }
 copy_cmd = { path = "../../backend/commands/copy" }
 commands_analyze = { path = "../../backend/commands/analyze" }
+vacuum_seams = { path = "../../backend/commands/vacuum_seams" }
 planner = { path = "../../backend/optimizer/plan/planner" }
 vars = { path = "../../backend/optimizer/util/vars" }
 pg_prng = { path = "../../common/pg_prng" }

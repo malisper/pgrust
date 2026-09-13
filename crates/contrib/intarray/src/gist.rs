@@ -346,6 +346,7 @@ pub(crate) fn fc_g_int_picksplit(
     let mut size_r = datum_r.nelems() as f32;
 
     let maxoff = (entryvec.n - 1) as usize;
+    #[derive(Clone, Copy)]
     struct SplitCost {
         pos: usize,
         cost: f32,
@@ -360,7 +361,17 @@ pub(crate) fn fc_g_int_picksplit(
             cost: ((size_alpha - size_l) - (size_beta - size_r)).abs(),
         });
     }
-    costvector.sort_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(core::cmp::Ordering::Equal));
+    // qsort(costvector, maxoff, sizeof(SPLITCOST), comparecost): the equal-cost
+    // order pg_qsort produces decides page membership, so no std sort here.
+    ::pg_qsort::pg_qsort(&mut costvector, |a, b| {
+        if a.cost == b.cost {
+            0
+        } else if a.cost > b.cost {
+            1
+        } else {
+            -1
+        }
+    });
 
     let mut spl_left: Vec<u16> = Vec::with_capacity(maxoff + 1);
     let mut spl_right: Vec<u16> = Vec::with_capacity(maxoff + 1);

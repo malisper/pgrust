@@ -118,13 +118,15 @@ fn table_counts_match_compiled_backend_shape() {
     // bug-inventory 2026-09-13 batch-11 (contrib/passwordcheck/passwordcheck.c:152
     //   _PG_init DefineCustomIntVariable, GUC_UNIT_BYTE): Int +1
     //   passwordcheck.min_password_length (-> 182) = 497.
+    // bug-inventory 2026-09-13 batch-46 (contrib/isn/isn.c:939 _PG_init
+    //   DefineCustomBoolVariable): Bool +1 isn.weak (-> 146) = 498.
     let test_validator = usize::from(cfg!(feature = "oauth-test-validator"));
-    assert_eq!(ConfigureNamesBool.len(), 145 + test_validator);
+    assert_eq!(ConfigureNamesBool.len(), 146 + test_validator);
     assert_eq!(ConfigureNamesInt.len(), 182);
     assert_eq!(ConfigureNamesReal.len(), 31);
     assert_eq!(ConfigureNamesString.len(), 89 + test_validator);
     assert_eq!(ConfigureNamesEnum.len(), 50);
-    assert_eq!(all_settings().count(), 497 + 2 * test_validator);
+    assert_eq!(all_settings().count(), 498 + 2 * test_validator);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
@@ -436,6 +438,27 @@ fn pg_prewarm_autoprewarm_interval_matches_autoprewarm_c() {
 // "Starts the autoprewarm worker." Regression for audit-18.6 w2-038
 // (a186-candidate-fp-contrib-pg_prewarm-autoprewarm-95c06274c0f082d7efcc-1):
 // pgrust knew no such GUC (42704 on SHOW under shared_preload_libraries).
+// contrib/isn/isn.c:939 _PG_init DefineCustomBoolVariable "isn.weak" —
+// PGC_USERSET, default false, no hooks. bug-inventory 2026-09-13 batch-46
+// (fp-contrib-isn-isn#1): pgrust kept it as an unchecked string placeholder,
+// so SET isn.weak = 'garbage' succeeded instead of raising 22023.
+#[test]
+fn isn_weak_matches_isn_c() {
+    let GucSetting::Bool(weak) = find("isn.weak") else {
+        panic!("isn.weak should be a bool GUC");
+    };
+    assert_eq!(weak.context, PGC_USERSET);
+    assert_eq!(weak.group, CUSTOM_OPTIONS);
+    assert_eq!(weak.flags, 0);
+    assert_eq!(weak.boot_val, GucDefaultValue::Bool(false));
+    assert_eq!(weak.short_desc, Some("Accept input with invalid ISN check digits."));
+    assert!(weak.long_desc.is_none());
+    assert!(weak.check_hook.is_none());
+    assert!(weak.assign_hook.is_none());
+    assert!(weak.show_hook.is_none());
+    assert_eq!(weak.variable.c_symbol(), "g_weak");
+}
+
 #[test]
 fn pg_prewarm_autoprewarm_matches_autoprewarm_c() {
     let GucSetting::Bool(apw) = find("pg_prewarm.autoprewarm") else {

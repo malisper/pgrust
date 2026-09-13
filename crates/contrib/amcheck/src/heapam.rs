@@ -254,7 +254,30 @@ fn check_mxid_valid_in_rel(mxid: MultiXactId, ctx: &mut HeapCheckContext) -> PgR
     Ok(check_mxid_in_range(mxid, ctx))
 }
 
-// DIVERGENCE: C reads oldestClogXid under XactTruncationLock; here a relaxed unlocked atomic read (see update_cached_xid_range).
+// The XactTruncationLock-held tail of get_xid_status: the oldestClogXid read
+// through the clog lookup, so a concurrent TruncateCLOG cannot drop the
+// segment in between.
+fn clog_status(
+    xid: TransactionId,
+    fxid: FullTransactionId,
+    ctx: &mut HeapCheckContext,
+) -> PgResult<XidCommitStatus> {
+    let clog_horizon =
+        full_xid_from_xid_and_ctx(varsup::TransamVariables().oldestClogXid.load(Relaxed), ctx);
+    if !clog_horizon.precedes_or_equals(fxid) {
+        return Ok(XID_COMMITTED);
+    }
+    Ok(if xact::TransactionIdIsCurrentTransactionId(xid) {
+        XID_IS_CURRENT_XID
+    } else if procarray::TransactionIdIsInProgress(xid)? {
+        XID_IN_PROGRESS
+    } else if transam::TransactionIdDidCommit(xid)? {
+        XID_COMMITTED
+    } else {
+        XID_ABORTED
+    })
+}
+
 fn get_xid_status(
     xid: TransactionId,
     ctx: &mut HeapCheckContext,
@@ -290,20 +313,12 @@ fn get_xid_status(
         return Ok((XID_BOUNDS_OK, Some(ctx.cached_status)));
     }
 
-    let clog_horizon =
-        full_xid_from_xid_and_ctx(varsup::TransamVariables().oldestClogXid.load(Relaxed), ctx);
-    let mut status = XID_COMMITTED;
-    if clog_horizon.precedes_or_equals(fxid) {
-        if xact::TransactionIdIsCurrentTransactionId(xid) {
-            status = XID_IS_CURRENT_XID;
-        } else if procarray::TransactionIdIsInProgress(xid)? {
-            status = XID_IN_PROGRESS;
-        } else if transam::TransactionIdDidCommit(xid)? {
-            status = XID_COMMITTED;
-        } else {
-            status = XID_ABORTED;
-        }
-    }
+    let lock = lwlock::main_lock(varsup::XACT_TRUNCATION_LOCK);
+    lwlock::LWLockAcquire(lock, lwlock::LW_SHARED, init_small::globals::MyProcNumber())?;
+    let result = clog_status(xid, fxid, ctx);
+    let released = lwlock::LWLockRelease(lock);
+    let status = result?;
+    released?;
     ctx.cached_xid = xid;
     ctx.cached_status = status;
     Ok((XID_BOUNDS_OK, Some(status)))

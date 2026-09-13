@@ -28,7 +28,7 @@ impl RemoteConn {
 
 thread_local! {
     static PCONN: RefCell<Option<RemoteConn>> = const { RefCell::new(None) };
-    static NAMED: RefCell<HashMap<String, Option<RemoteConn>, FxBuildHasher>> =
+    static NAMED: RefCell<HashMap<Vec<u8>, Option<RemoteConn>, FxBuildHasher>> =
         RefCell::new(HashMap::with_hasher(FxBuildHasher));
     static WE_CONNECT: Cell<u32> = const { Cell::new(0) };
     static WE_GET_CONN: Cell<u32> = const { Cell::new(0) };
@@ -65,19 +65,19 @@ pub fn we_get_result() -> PgResult<u32> {
     we_lazy(&WE_GET_RESULT, "DblinkGetResult")
 }
 
-// truncate_identifier to NAMEDATALEN (C keys the hash by the truncated name;
-// create/lookup/delete must agree). `warn` mirrors C's create-time NOTICE.
-fn conn_key(name: &str, warn: bool) -> PgResult<String> {
+// truncate_identifier to NAMEDATALEN (C keys the hash by the truncated name's
+// bytes; create/lookup/delete must agree). `warn` mirrors C's create-time
+// NOTICE. The key stays raw bytes: SQL_ASCII clips per byte and can leave a
+// partial multibyte tail, and distinct tails must stay distinct keys.
+fn conn_key(name: &str, warn: bool) -> PgResult<Vec<u8>> {
     if name.len() < NAMEDATALEN as usize {
-        return Ok(name.to_string());
+        return Ok(name.as_bytes().to_vec());
     }
     let scratch = mcx::MemoryContext::new("dblink conn key");
     let mut buf: mcx::PgVec<'_, u8> = mcx::vec_with_capacity_in(scratch.mcx(), name.len())?;
     mcx::vec_append_bytes(&mut buf, name.as_bytes())?;
     parser_small1::truncate_identifier(&mut buf, warn, mbutils::GetDatabaseEncoding())?;
-    // `buf` already holds the byte-truncated name; slicing the &str `name` at
-    // buf.len() can land mid-UTF-8-char (SQL_ASCII clips per byte). Use buf.
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    Ok(buf.to_vec())
 }
 
 // --- unnamed connection (pconn) ---
@@ -180,7 +180,7 @@ pub fn delete_named(name: &str) -> PgResult<()> {
     })
 }
 
-pub fn all_named_names() -> Vec<String> {
+pub fn all_named_names() -> Vec<Vec<u8>> {
     NAMED.with(|m| m.borrow().keys().cloned().collect())
 }
 
@@ -195,10 +195,14 @@ pub fn conn_not_avail(conname: Option<&str>) -> Box<PgError> {
 
 // --- security ---
 
-// dblink_connstr_has_pw: the connstr carries a non-empty password.
+// dblink_connstr_has_pw: the connstr carries a non-empty password. A connstr
+// PQconninfoParse rejects (including one with an unknown keyword) has none.
 pub fn connstr_has_pw(connstr: &str) -> bool {
     match pgclient::parse_conninfo(connstr) {
-        Ok(opts) => pgclient::opt(&opts, "password").is_some_and(|p| !p.is_empty()),
+        Ok(opts) => {
+            opts.iter().all(|(k, _)| pgclient::conninfo::lookup_option(k).is_some())
+                && pgclient::opt(&opts, "password").is_some_and(|p| !p.is_empty())
+        }
         Err(_) => false,
     }
 }
@@ -301,6 +305,7 @@ pub fn security_check(conn: &PgConn, connstr: &str) -> PgResult<()> {
 // name is not a foreign server (caller then treats the string as a connstr).
 pub fn get_connect_string(mcx: mcx::Mcx<'_>, servername: &str) -> PgResult<Option<String>> {
     let key = conn_key(servername, false)?;
+    let key = String::from_utf8_lossy(&key);
     let Some(server) = foreigncmds::foreign::GetForeignServerByName(mcx, &key, true)? else {
         return Ok(None);
     };
@@ -482,5 +487,27 @@ mod tests {
         assert_eq!(escape_param_str("a'b"), "a\\'b");
         assert_eq!(escape_param_str("a\\b"), "a\\\\b");
         assert_eq!(escape_param_str("both'\\"), "both\\'\\\\");
+    }
+
+    // createNewConnection keys the hash by truncate_identifier's bytes: in
+    // SQL_ASCII the clip lands mid-character and the two tails stay distinct.
+    #[test]
+    fn sql_ascii_truncated_names_keep_distinct_byte_keys() {
+        mbutils::SetDatabaseEncoding(mbutils::pg_char_to_encoding("SQL_ASCII")).unwrap();
+        let ka = conn_key(&format!("{}é", "a".repeat(62)), false).unwrap();
+        let kb = conn_key(&format!("{}Ā", "a".repeat(62)), false).unwrap();
+        assert_eq!(ka.len(), 63);
+        assert_eq!(kb.len(), 63);
+        assert_eq!(ka[62], 0xC3);
+        assert_eq!(kb[62], 0xC4);
+        assert_ne!(ka, kb);
+    }
+
+    // PQconninfoParse fails on an unknown keyword, so the password it carries
+    // does not count (dblink_connstr_check then raises 2F003, not 08001).
+    #[test]
+    fn unknown_option_hides_the_password() {
+        assert!(!connstr_has_pw("password=x nonexistent_dblink_option=y"));
+        assert!(!connstr_has_pw("nonexistent_dblink_option=y"));
     }
 }

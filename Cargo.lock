@@ -1477,6 +1477,7 @@ dependencies = [
  "heaptoast",
  "indexam",
  "init_small",
+ "lwlock",
  "mcx",
  "miscinit",
  "multixact",
@@ -6391,6 +6392,7 @@ dependencies = [
  "types_rel",
  "types_slot",
  "types_tuple",
+ "vacuum_seams",
  "varlena",
  "vars",
 ]
@@ -8238,6 +8240,7 @@ dependencies = [
  "dfmgr",
  "gin_int4_seams",
  "mcx",
+ "pg_qsort",
  "reloptions",
  "stack_depth",
  "types_core",
@@ -8451,10 +8454,10 @@ dependencies = [
 name = "isn"
 version = "0.0.0"
 dependencies = [
- "adt_bool",
  "datum",
  "dfmgr",
  "guc",
+ "guc_tables",
  "mcx",
  "types_core",
  "types_error",

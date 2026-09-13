@@ -36,6 +36,7 @@ xact = { path = "../../backend/access/transam/xact" }
 elog_seams = { path = "../../backend/utils/error/elog_seams" }
 syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+lwlock = { path = "../../backend/storage/lmgr/lwlock" }
 smgr = { path = "../../backend/storage/smgr/smgr" }
 procarray = { path = "../../backend/storage/ipc/procarray" }
 nbtree = { path = "../../backend/access/nbtree/nbtree" }

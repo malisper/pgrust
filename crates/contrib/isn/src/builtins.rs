@@ -11,12 +11,9 @@ use crate::{ean2isn, ean2string, string2ean, Ean13, IsnType, MAXEAN13LEN};
 
 const LIBRARY: &str = "isn";
 
-/// C's `g_weak` global: the `isn.weak` GUC, read from the placeholder store.
+/// C's `g_weak` global: the `isn.weak` GUC's per-session cell.
 fn g_weak() -> bool {
-    match guc::GetConfigOption("isn.weak", true, false) {
-        Ok(Some(s)) => adt_bool::parse_bool(&s).unwrap_or(false),
-        _ => false,
-    }
+    crate::gucs::weak()
 }
 
 fn cstr_out(mcx: Mcx<'_>, buf: &[u8]) -> PgResult<Datum> {
@@ -138,14 +135,23 @@ fn lookup(function: &str) -> Option<PGFunction> {
     })
 }
 
+// isn.c:950 _PG_init: the GUC is defined statically (guc_tables); the prefix
+// reservation runs at library load.
+fn pg_init() -> PgResult<()> {
+    guc::MarkGUCPrefixReserved("isn");
+    Ok(())
+}
+
 /// Install this unit's inward seam: register the `isn` module with the
 /// dynamic-loader's builtin-library registry.
 pub fn init_seams() {
+    guc_tables::vars::isn_weak.install_if_absent(guc_tables::GucVarAccessors {
+        get: crate::gucs::weak,
+        set: crate::gucs::set_weak,
+    });
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: LIBRARY,
         lookup,
-        // isn.c's _PG_init only defines the isn.weak GUC (placeholder store)
-        // and validates the tables under assertions; nothing to run here.
-        pg_init: None,
+        pg_init: Some(pg_init),
     });
 }

@@ -184,3 +184,45 @@ fn not_equal_descends_through_truncated_internal_keys() {
     assert!(!num::consistent::<Int4>((5, 5), 5, BT_NOT_EQUAL, false, c).unwrap());
     assert!(num::consistent::<Int4>((3, 7), 5, BT_NOT_EQUAL, false, c).unwrap());
 }
+
+// bug-inventory 2026-09-13 batch-46 (fp-contrib-btree_gist-b3#1): the
+// var_entries!("numeric", ..) arm matched "gbt_numeric_penalty" first and
+// handed out the byte-prefix var_penalty instead of btree_numeric.c's
+// range-width penalty, changing GiST subtree choices and page layout.
+#[test]
+fn numeric_penalty_dispatches_to_the_numeric_specific_penalty() {
+    let f = lookup("gbt_numeric_penalty").expect("registered") as usize;
+    assert_eq!(f, fc_gbt_numeric_penalty as PGFunction as usize);
+    assert_ne!(f, var_penalty::<NumericV> as PGFunction as usize);
+}
+
+// bug-inventory 2026-09-13 batch-46 (fp-contrib-btree_gist-b1#1): the short-
+// header expansion of each compared key was allocated in tuplesort's context
+// and never freed, so a sorted bytea/bit GiST build grew with the comparison
+// count. C detoasts and pfrees per comparison (btree_bytea.c:177).
+#[test]
+fn var_ssup_cmp_leaves_nothing_in_the_sort_context() {
+    // A GBT_VARKEY holding one 4-byte-header bound, itself packed to a
+    // 1-byte header the way index_form_tuple stores small keys.
+    fn short_key(payload: &[u8]) -> Vec<u8> {
+        let inner_len = VARHDRSZ + payload.len();
+        let mut k = vec![(((1 + inner_len) << 1) | 1) as u8];
+        k.extend_from_slice(&varatt::set_varsize_4b_word(inner_len as u32).to_ne_bytes());
+        k.extend_from_slice(payload);
+        k
+    }
+    let (ka, kb) = (short_key(b"abc"), short_key(b"abd"));
+    let (da, db) = (Datum::from_usize(ka.as_ptr() as usize), Datum::from_usize(kb.as_ptr() as usize));
+    // varbit payload: bit count, then the bits.
+    let (va, vb) = (short_key(&[8, 0, 0, 0, 0x61]), short_key(&[8, 0, 0, 0, 0x62]));
+    let (dva, dvb) = (Datum::from_usize(va.as_ptr() as usize), Datum::from_usize(vb.as_ptr() as usize));
+    let ctx = mcx::MemoryContext::new("gbt ssup test");
+    assert!(ByteaV::ssup_cmp(da, db, 0, ctx.mcx()).unwrap() < 0);
+    assert!(BitV::ssup_cmp(dvb, dva, 0, ctx.mcx()).unwrap() > 0);
+    let before = ctx.stats().used;
+    for _ in 0..256 {
+        ByteaV::ssup_cmp(da, db, 0, ctx.mcx()).unwrap();
+        BitV::ssup_cmp(dva, dvb, 0, ctx.mcx()).unwrap();
+    }
+    assert_eq!(ctx.stats().used, before);
+}

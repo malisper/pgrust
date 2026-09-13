@@ -447,6 +447,9 @@ pub static autoprewarm: GucBoolVar = GucSlot::new("autoprewarm");
 // passwordcheck.c:152 _PG_init DefineCustomIntVariable; the cell lives in
 // crates/contrib/passwordcheck.
 pub static passwordcheck_min_password_length: GucIntVar = GucSlot::new("passwordcheck_min_password_length");
+// isn.c:939 _PG_init DefineCustomBoolVariable over the isn.c g_weak static;
+// the cell lives in crates/contrib/isn.
+pub static isn_weak: GucBoolVar = GucSlot::new("g_weak");
 // pg_trgm custom GUCs (contrib/pg_trgm/trgm_op.c:145 _PG_init, three
 // DefineCustomRealVariable over the trgm_op.c:24-26 double statics),
 // statically defined like auto_explain.*; the cells live in

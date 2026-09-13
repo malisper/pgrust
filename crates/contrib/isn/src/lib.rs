@@ -4,17 +4,19 @@
 //! comparison/btree/hash function is `LANGUAGE internal` over int8 in the SQL
 //! script, so none of those live here.
 //!
-//! DIVERGENCE (GUC): C's `_PG_init` runs `DefineCustomBoolVariable("isn.weak")`
-//! + `MarkGUCPrefixReserved("isn")`. pgrust has no typed custom-GUC store, so
-//! `isn.weak` rides the placeholder string store (the pg_trgm pattern): reads
-//! parse the placeholder or default to false; the prefix is not reserved; SHOW
-//! echoes the SET spelling rather than canonical on/off until `isn_weak(bool)`
-//! stores "on"/"off".
+//! C's `_PG_init` runs `DefineCustomBoolVariable("isn.weak")` +
+//! `MarkGUCPrefixReserved("isn")`: `isn.weak` is statically defined in
+//! guc_tables (the auto_explain pattern) over the per-session cell below, and
+//! the prefix is reserved at library load.
 
 pub mod builtins;
 mod tables;
 
 pub use builtins::init_seams;
+
+pub(crate) mod gucs {
+    guc_tables::session_guc_cluster!(IsnGucs, ISN_GUCS: (weak_cell, bool, weak, set_weak, false),);
+}
 
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
