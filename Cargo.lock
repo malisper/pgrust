@@ -702,6 +702,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit_seams",
+ "pg_qsort",
  "pqformat",
  "stringinfo",
  "syscache_seams",

@@ -309,21 +309,12 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
     let mut typioparams: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut atttypmods: PgVec<'mcx, i32> = PgVec::new_in(mcx);
     let mut attnames: PgVec<'mcx, NameData> = PgVec::new_in(mcx);
-    for &attnum in attnumlist.iter() {
-        let att = tup_desc.attr(attnum as usize - 1);
-        let (func_oid, typioparam) = if opts.binary {
-            lsyscache::typ::getTypeBinaryInputInfo(att.atttypid)?
-        } else {
-            lsyscache::typ::getTypeInputInfo(att.atttypid)?
-        };
-        in_functions.push(fmgr_core::fmgr_info(func_oid)?);
-        typioparams.push(typioparam);
-        atttypmods.push(att.atttypmod);
-    }
     let mut defexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>> =
         PgVec::new_in(mcx);
     let mut defmap: PgVec<'mcx, usize> = PgVec::new_in(mcx);
     let mut volatile_defexprs = false;
+    let mut attr_in_funcs: Vec<Option<(FmgrInfo, Oid)>> =
+        (0..num_phys_attrs).map(|_| None).collect();
     for i in 0..num_phys_attrs {
         let att = tup_desc.attr(i);
         attnames.push(att.attname);
@@ -331,6 +322,12 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
         if att.attisdropped {
             continue;
         }
+        let (func_oid, typioparam) = if opts.binary {
+            lsyscache::typ::getTypeBinaryInputInfo(att.atttypid)?
+        } else {
+            lsyscache::typ::getTypeInputInfo(att.atttypid)?
+        };
+        attr_in_funcs[i] = Some((fmgr_core::fmgr_info(func_oid)?, typioparam));
         let in_list = attnumlist.contains(&(i as i16 + 1));
         if (opts.default_print.is_some() || !in_list) && att.attgenerated == 0 {
             let Some(defexpr) = rewrite_handler::build_column_default(mcx, rel, i + 1)? else {
@@ -349,6 +346,13 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
                 volatile_defexprs = clauses::contain_volatile_functions_not_nextval(defexpr)?;
             }
         }
+    }
+    for &attnum in attnumlist.iter() {
+        let (in_fn, typioparam) =
+            attr_in_funcs[attnum as usize - 1].take().expect("listed column is not dropped");
+        in_functions.push(in_fn);
+        typioparams.push(typioparam);
+        atttypmods.push(tup_desc.attr(attnum as usize - 1).atttypmod);
     }
     pgstat_progress_start_command(PROGRESS_COMMAND_COPY, rel.rd_id);
     let mut progress_type = PROGRESS_COPY_TYPE_PIPE;

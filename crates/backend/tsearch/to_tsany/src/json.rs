@@ -200,14 +200,6 @@ impl<'mcx> HeadlineJsonState<'mcx> {
         // family — a bogus config must win over bogus options).
         let map = cache_bind::config_map(mcx, cfg)?;
         let prsentry = ::ts_cache::lookup_ts_parser_cache(map.prs_id)?;
-        if prsentry.headline_oid == InvalidOid {
-            return Err(Box::new(
-                ::types_error::PgError::error(
-                    "text search parser does not support headline creation".to_string(),
-                )
-                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-            ));
-        }
         let opts = if has_opts {
             Some(::ts_cache::deserialize_deflist(
                 mcx,
@@ -216,6 +208,14 @@ impl<'mcx> HeadlineJsonState<'mcx> {
         } else {
             None
         };
+        if prsentry.headline_oid == InvalidOid {
+            return Err(Box::new(
+                ::types_error::PgError::error(
+                    "text search parser does not support headline creation".to_string(),
+                )
+                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
         Ok(HeadlineJsonState {
             mcx,
             env: CacheEnv::new(mcx, cfg),

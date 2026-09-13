@@ -15,6 +15,7 @@ funcapi = { path = "../../fmgr/funcapi" }
 hashfn = { path = "../../../../common/hashfn" }
 lsyscache = { path = "../../cache/lsyscache" }
 mcx = { path = "../../../../_support/mcx" }
+pg_qsort = { path = "../../../../_support/pg_qsort" }
 pqformat = { path = "../../../libpq/pqformat" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 typcache = { path = "../../cache/typcache" }

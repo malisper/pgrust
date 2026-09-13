@@ -24,13 +24,20 @@ fn domain_state_setup(domainType: Oid, binary: bool) -> PgResult<DomainIOData> {
     // domains.c:91 validates domainType through lookup_type_cache(), whose
     // miss is the user-facing typcache.c:471-473 ereport (domain_in /
     // domain_recv are callable from SQL with an arbitrary OID).
-    let Some(base) = syscache_seams::pg_type_base_shape::call(domainType)? else {
+    let Some(typ) = syscache_seams::lookup_pg_type_typcache_shape::call(domainType)? else {
         return Err(Box::new(
             PgError::error(format!("type with OID {domainType} does not exist"))
                 .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
         ));
     };
-    if base.typtype != TYPTYPE_DOMAIN {
+    if !typ.typisdefined {
+        let name = String::from_utf8_lossy(typ.typname.name_str()).into_owned();
+        return Err(Box::new(
+            PgError::error(format!("type \"{name}\" is only a shell"))
+                .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    if typ.typtype != TYPTYPE_DOMAIN {
         let t = format_type::format_type_be(domainType).unwrap_or_else(|_| domainType.to_string());
         return Err(Box::new(
             PgError::error(format!("type {t} is not a domain"))
@@ -225,7 +232,7 @@ mod tests {
     // "type with OID %u does not exist", ERRCODE_UNDEFINED_OBJECT (42704).
     #[test]
     fn bogus_domain_oid_is_undefined_object() {
-        syscache_seams::pg_type_base_shape::set(|_| Ok(None));
+        syscache_seams::lookup_pg_type_typcache_shape::set(|_| Ok(None));
         let expect_err = |r: PgResult<DomainIOData>| match r {
             Err(e) => e,
             Ok(_) => panic!("bogus domain OID must fail"),

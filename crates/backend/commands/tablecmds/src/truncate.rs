@@ -282,7 +282,9 @@ pub fn ExecuteTruncateGuts<'mcx>(
                 &mut |_index_id| {},
             )?;
         }
-        pgstat::relation::pgstat_count_truncate(rel.rd_id, rel.rd_rel.relisshared);
+        if rel.pgstat_enabled.get() {
+            pgstat::relation::pgstat_count_truncate(rel.rd_id, rel.rd_rel.relisshared);
+        }
     }
     // Now go through the groups and truncate foreign tables
     // (tablecmds.c:2266-2292): truncate_check_rel has already proved every

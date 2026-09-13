@@ -2748,6 +2748,21 @@ pub fn transformIndexConstraintForAlter<'mcx>(
         // C isalter: resolve the WITHOUT OVERLAPS column's type on the
         // existing table; if absent, DefineIndex complains later.
         if constraint.without_overlaps && keyidx == nkeys - 1 {
+            if catalog_heap::SystemAttributeByName(key).is_some() {
+                return Err(cursor_at(
+                    Box::new(
+                        PgError::new(
+                            ERROR,
+                            format!(
+                                "column \"{key}\" in WITHOUT OVERLAPS is not a range or multirange type"
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                    ),
+                    Some(query_string.as_bytes()),
+                    constraint.location,
+                ));
+            }
             let desc = rel.descr();
             for i in 0..desc.natts as usize {
                 let att = desc.attr(i);

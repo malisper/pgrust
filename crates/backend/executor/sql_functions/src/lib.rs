@@ -177,6 +177,23 @@ pub(crate) fn query_command_tag(ct: CmdType) -> types_core::CommandTag {
     }
 }
 
+// CreateCommandTag's T_PlannedStmt arm (utility.c:3132): a SELECT with row
+// marks is named by the first PlanRowMark's strength.
+fn planned_command_tag(stmt: &types_nodes::plannodes::PlannedStmt<'_>) -> types_core::CommandTag {
+    use types_nodes::nodes_enums::LockClauseStrength::*;
+    if stmt.commandType != CmdType::CMD_SELECT {
+        return query_command_tag(stmt.commandType);
+    }
+    let strength = stmt.rowMarks.iter().next().and_then(|n| n.as_plan_row_mark()).map(|r| r.strength);
+    match strength {
+        Some(LCS_FORKEYSHARE) => utility::consts::CMDTAG_SELECT_FOR_KEY_SHARE,
+        Some(LCS_FORSHARE) => utility::consts::CMDTAG_SELECT_FOR_SHARE,
+        Some(LCS_FORNOKEYUPDATE) => utility::consts::CMDTAG_SELECT_FOR_NO_KEY_UPDATE,
+        Some(LCS_FORUPDATE) => utility::consts::CMDTAG_SELECT_FOR_UPDATE,
+        _ => types_portal::CMDTAG_SELECT,
+    }
+}
+
 // sql_compile_error_callback (functions.c:1894).
 #[cold]
 pub(crate) fn startup_error_context(e: Box<PgError>, fname: &str, src: &str) -> Box<PgError> {
@@ -919,7 +936,7 @@ fn init_execution_state<'mcx>(
         if facts.readonly_func && !utility::CommandIsReadOnly(stmt) {
             let tag = match stmt.utilityStmt {
                 Some(u) => utility_seams::create_command_tag::call(u),
-                None => query_command_tag(stmt.commandType),
+                None => planned_command_tag(stmt),
             };
             let name = cmdtag::GetCommandTagName(tag);
             return Err(efn(
@@ -1325,21 +1342,19 @@ fn fc_fmgr_sql_validator(
             };
             if let Some(body) = prosqlbody.as_ref() {
                 let queries = cache::sqlbody_queries(mcx, body)?;
-                let n = queries.len();
-                let mut last_list: Option<PgVec<'_, Query<'_>>> = None;
-                for (qi, q) in queries.into_iter().enumerate() {
+                let mut lists: Vec<PgVec<'_, Query<'_>>> = Vec::with_capacity(queries.len());
+                for q in queries.into_iter() {
                     if q.commandType != CmdType::CMD_UTILITY {
                         rewrite_handler_seams::acquire_rewrite_locks::call(mcx, &q, true, false)?;
                     }
-                    let list = cache::pg_rewrite_query(mcx, q)?;
+                    lists.push(cache::pg_rewrite_query(mcx, q)?);
+                }
+                for list in lists.iter() {
                     for lq in list.iter() {
                         cache::check_sql_fn_statement(lq)?;
                     }
-                    if qi == n - 1 {
-                        last_list = Some(list);
-                    }
                 }
-                match last_list {
+                match lists.pop() {
                     Some(mut last) => {
                         retval::check_sql_stmt_retval(
                             mcx,
@@ -1364,9 +1379,8 @@ fn fc_fmgr_sql_validator(
             for n in argnames.iter() {
                 name_refs.push(n.as_str());
             }
-            let n = raw_list.len();
-            let mut last_list: Option<PgVec<'_, Query<'_>>> = None;
-            for (i, raw) in raw_list.iter().enumerate() {
+            let mut lists: Vec<PgVec<'_, Query<'_>>> = Vec::with_capacity(raw_list.len());
+            for raw in raw_list.iter() {
                 cache::usage_reset();
                 let query = analyze_seams::parse_analyze_sql_fn::call(
                     mcx,
@@ -1379,15 +1393,14 @@ fn fc_fmgr_sql_validator(
                     QueryEnvHandle::NULL,
                 )?;
                 cache::usage_show("PARSE ANALYSIS STATISTICS")?;
-                let list = cache::pg_rewrite_query(mcx, query)?;
+                lists.push(cache::pg_rewrite_query(mcx, query)?);
+            }
+            for list in lists.iter() {
                 for lq in list.iter() {
                     cache::check_sql_fn_statement(lq)?;
                 }
-                if i == n - 1 {
-                    last_list = Some(list);
-                }
             }
-            match last_list {
+            match lists.pop() {
                 Some(mut last) => {
                     retval::check_sql_stmt_retval(
                         mcx,

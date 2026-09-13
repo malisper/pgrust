@@ -69,6 +69,9 @@ pub fn pg_size_bytes(arg: &str) -> PgResult<i64> {
         // strtol tail: optional sign + digits; no digits means the 'E' text
         // is unit input.
         let mut cp = e + 1;
+        while cp < s.len() && c_isspace(s[cp]) {
+            cp += 1;
+        }
         if cp < s.len() && (s[cp] == b'-' || s[cp] == b'+') {
             cp += 1;
         }

@@ -241,13 +241,15 @@ pub fn RefreshMatViewByOid<'mcx>(
         debug_assert_eq!(MATVIEW_MAINTENANCE_DEPTH.with(Cell::get), old_depth);
     } else {
         refresh_by_heap_swap(mcx, matview_oid, oid_new_heap, relpersistence)?;
-        pgstat::relation::pgstat_count_truncate(matview_oid, matview_rel.rd_rel.relisshared);
-        if !skip_data {
-            pgstat::relation::pgstat_count_heap_insert(
-                matview_oid,
-                matview_rel.rd_rel.relisshared,
-                processed as i64,
-            );
+        if matview_rel.pgstat_enabled.get() {
+            pgstat::relation::pgstat_count_truncate(matview_oid, matview_rel.rd_rel.relisshared);
+            if !skip_data {
+                pgstat::relation::pgstat_count_heap_insert(
+                    matview_oid,
+                    matview_rel.rd_rel.relisshared,
+                    processed as i64,
+                );
+            }
         }
     }
 

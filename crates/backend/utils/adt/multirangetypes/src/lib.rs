@@ -5,7 +5,6 @@ mod corpus_tests;
 #[cfg(test)]
 mod tests;
 
-use core::cell::RefCell;
 use std::rc::Rc;
 
 use ::adt_rangetypes::{
@@ -233,25 +232,7 @@ fn multirange_canonicalize<'m, 'r>(
 where
     'm: 'r,
 {
-    let rng_cell = RefCell::new(rng);
-    let mut sort_err: Option<Box<PgError>> = None;
-    ranges.sort_by(|a, b| {
-        if sort_err.is_some() {
-            return core::cmp::Ordering::Equal;
-        }
-        let mut rngm = rng_cell.borrow_mut();
-        match range_compare(mcx, &mut rngm, a, b) {
-            Ok(c) => c.cmp(&0),
-            Err(e) => {
-                sort_err = Some(e);
-                core::cmp::Ordering::Equal
-            }
-        }
-    });
-    if let Some(e) = sort_err {
-        return Err(e);
-    }
-    let rng = rng_cell.into_inner();
+    ::pg_qsort::pg_qsort_arg(&mut ranges[..], |a, b| range_compare(mcx, rng, a, b))?;
 
     let mut out = 0usize;
     let mut last: Option<&'r [u8]> = None;

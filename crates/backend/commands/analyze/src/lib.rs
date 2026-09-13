@@ -1720,9 +1720,6 @@ fn expr_stats_row<'b>(
                 stats.statypbyval[k],
                 stats.statypalign[k],
             )?);
-        } else if stats.stavalues_set[k] {
-            row.stavalues[k] =
-                Some(datum::array_build::construct_empty_array_image(mcx, stats.statypid[k])?);
         }
     }
     Ok(Some(row))
@@ -3238,11 +3235,6 @@ fn update_attstats(relid: Oid, inh: bool, vacattrstats: &[VacAttrStats<'_>]) -> 
                     stats.statypbyval[k],
                     stats.statypalign[k],
                 )?;
-                values[i] = Datum::from_usize(img.as_ptr() as usize);
-                images.push(img);
-            } else if stats.stavalues_set[k] {
-                let img =
-                    datum::array_build::construct_empty_array_image(mcx, stats.statypid[k])?;
                 values[i] = Datum::from_usize(img.as_ptr() as usize);
                 images.push(img);
             } else {

@@ -3901,7 +3901,14 @@ impl<'a> Estate<'a> {
         self.revalidate_rectypeid(recno)?;
         let rectypeid = self.rec_typeid(recno);
         let base = Self::rec_base_typeid(rectypeid)?;
-        let var_td = typcache::lookup_rowtype_tupdesc_copy(self.datum_ctx.mcx(), base, -1)?;
+        let var_td = match &self.datums[recno as usize] {
+            DatumVal::Rec(Some(RecValue { src_desc: Some(td), .. })) => td.clone(),
+            _ => std::rc::Rc::new(typcache::lookup_rowtype_tupdesc_copy(
+                self.datum_ctx.mcx(),
+                base,
+                -1,
+            )?),
+        };
         let dst = RecDesc::from_tupdesc(&var_td);
         let sys = if rectypeid == src_tupdesc.tdtypeid || compatible_tupdescs(&src_tupdesc, &var_td) {
             sys
@@ -3975,7 +3982,7 @@ impl<'a> Estate<'a> {
                 desc: dst,
                 values: newvalues,
                 nulls: newnulls,
-                src_desc: Some(std::rc::Rc::new(var_td)),
+                src_desc: Some(var_td),
                 empty: false,
                 fvalue_valid: sys.is_some(),
                 sys,
@@ -5101,8 +5108,9 @@ impl<'a> Estate<'a> {
                     if matches!(&self.datums[retvarno as usize], DatumVal::Rec(None)) {
                         self.instantiate_empty_rec(retvarno)?;
                     }
-                    let (srcdesc, values, nulls) = match &self.datums[retvarno as usize] {
+                    let (srcdesc, values, nulls) = match &mut self.datums[retvarno as usize] {
                         DatumVal::Rec(Some(rv)) => {
+                            rv.empty = false;
                             (rv.desc.clone(), rv.values.clone(), rv.nulls.clone())
                         }
                         _ => unreachable!("instantiated above"),
