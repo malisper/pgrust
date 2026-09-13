@@ -44,6 +44,7 @@ pub(crate) fn fc_normal_rand(
     let flinfo = flinfo.expect("normal_rand: NULL flinfo");
 
     if !flinfo.has_fn_extra() {
+        let call = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
         let num_tuples = fcinfo.arg_i32(0);
         if num_tuples < 0 {
             return Err(negative_rows().into());
@@ -54,7 +55,6 @@ pub(crate) fn fc_normal_rand(
             carry_val: 0.0,
             use_carry: false,
         };
-        let call = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
         call.max_calls = num_tuples as u64;
         call.user_fctx = Some(Box::new(fctx));
     }

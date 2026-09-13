@@ -27,3 +27,7 @@ fmgr_seams = { path = "../../backend/utils/fmgr/fmgr_seams" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 logical = { path = "../../backend/replication/logical/logical" }
 reorderbuffer = { path = "../../backend/replication/logical/reorderbuffer" }
+
+[dev-dependencies]
+pgtz = { path = "../../backend/timezone/pgtz" }
+adt_datetime = { path = "../../backend/utils/adt/adt_datetime" }

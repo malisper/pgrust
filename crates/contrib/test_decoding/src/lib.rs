@@ -217,10 +217,10 @@ fn pg_output_begin(
     OutputPluginWrite(opc, last_write)
 }
 
+// C timestamptz_to_str (timestamp.c:1878) forces USE_ISO_DATES; the session
+// DateStyle must not reach the decoded COMMIT/PREPARE lines.
 fn timestamptz_str(ts: types_core::TimestampTz) -> PgResult<String> {
-    let mut buf: adt_timestamp::TsBuf = [0; core::mem::size_of::<adt_timestamp::TsBuf>()];
-    let len = adt_timestamp::timestamptz_out(ts, &mut buf)?;
-    Ok(String::from_utf8_lossy(&buf[..len]).into_owned())
+    Ok(adt_timestamp::timestamptz_to_str(ts))
 }
 
 fn pg_decode_commit_txn(
@@ -967,6 +967,21 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_timestamp_ignores_session_date_style() {
+        // SAFETY: single-threaded test init, before any getenv.
+        unsafe { std::env::set_var("PGRUST_TZDIR", "/usr/share/zoneinfo") };
+        pgtz::init_seams();
+        adt_timestamp::init_seams();
+        adt_datetime::tz::pg_timezone_initialize().unwrap();
+        adt_datetime::tz::set_session_timezone(adt_datetime::tz::pg_tzset(b"GMT").unwrap());
+        adt_datetime::set_date_style(adt_datetime::USE_SQL_DATES);
+        adt_datetime::set_date_order(adt_datetime::DATEORDER_DMY);
+        let ts = adt_timestamp::timestamptz_in("2026-09-13 13:56:58.105229+00", -1, None).unwrap();
+        assert_eq!(timestamptz_str(ts).unwrap(), "2026-09-13 13:56:58.105229+00");
+        adt_datetime::set_date_style(adt_datetime::USE_ISO_DATES);
+    }
 
     #[test]
     fn print_literal_keeps_non_utf8_bytes() {

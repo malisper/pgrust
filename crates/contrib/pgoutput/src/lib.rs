@@ -315,6 +315,39 @@ fn def_get_streaming_mode(defname: &str, arg: Option<&str>) -> PgResult<u8> {
     unreachable!()
 }
 
+// C strtoul(s, &endptr, 10) with the `*endptr == '\0'` test
+// (pgoutput.c:325): leading C-locale whitespace and a sign are consumed, an
+// empty string is 0, a negated value wraps, ERANGE is None.
+fn strtoul_full(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
+        i += 1;
+    }
+    let mut negative = false;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        negative = b[i] == b'-';
+        i += 1;
+    }
+    let start = i;
+    let mut value: u64 = 0;
+    let mut overflowed = false;
+    while i < b.len() && b[i].is_ascii_digit() {
+        let (mul, o1) = value.overflowing_mul(10);
+        let (add, o2) = mul.overflowing_add(u64::from(b[i] - b'0'));
+        overflowed = overflowed || o1 || o2;
+        value = add;
+        i += 1;
+    }
+    if i == start {
+        return b.is_empty().then_some(0);
+    }
+    if i != b.len() || overflowed {
+        return None;
+    }
+    Some(if negative { value.wrapping_neg() } else { value })
+}
+
 // parse_output_parameters (pgoutput.c:289).
 fn parse_output_parameters(
     options: &[(String, Option<String>)],
@@ -342,9 +375,9 @@ fn parse_output_parameters(
                 }
                 protocol_version_given = true;
                 let raw = value_str.unwrap_or("");
-                let parsed: u64 = match raw.parse() {
-                    Ok(v) => v,
-                    Err(_) => {
+                let parsed: u64 = match strtoul_full(raw) {
+                    Some(v) => v,
+                    None => {
                         ereport(ERROR)
                             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
                             .errmsg("invalid proto_version")
@@ -2280,6 +2313,39 @@ mod tests {
             )
             .unwrap();
             assert_eq!(data.binary, want, "binary={v:?}");
+        }
+    }
+
+    // strtoul (pgoutput.c:325): leading whitespace and a sign parse, the
+    // empty string is protocol 0, a negated value is out of range, trailing
+    // garbage and ERANGE are "invalid proto_version".
+    #[test]
+    fn proto_version_follows_strtoul() {
+        for (raw, want) in [(" 1", 1), ("\t+2", 2), ("", 0), ("-0", 0), ("0004", 4)] {
+            let mut data = fresh_data();
+            parse_output_parameters(
+                &opts(&[("proto_version", Some(raw)), ("publication_names", Some("pub"))]),
+                &mut data,
+            )
+            .unwrap();
+            assert_eq!(data.protocol_version, want, "proto_version={raw:?}");
+        }
+        for (raw, msg) in [
+            ("1 ", "invalid proto_version"),
+            (" ", "invalid proto_version"),
+            ("- 1", "invalid proto_version"),
+            ("99999999999999999999999", "invalid proto_version"),
+            ("-1", "proto_version \"-1\" out of range"),
+            ("5000000000", "proto_version \"5000000000\" out of range"),
+        ] {
+            let mut data = fresh_data();
+            let err = parse_output_parameters(
+                &opts(&[("proto_version", Some(raw)), ("publication_names", Some("pub"))]),
+                &mut data,
+            )
+            .unwrap_err();
+            assert_eq!(err.message(), msg, "proto_version={raw:?}");
+            assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE, "proto_version={raw:?}");
         }
     }
 

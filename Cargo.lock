@@ -19460,6 +19460,7 @@ name = "test_decoding"
 version = "0.0.0"
 dependencies = [
  "adt_bool",
+ "adt_datetime",
  "adt_timestamp",
  "datum",
  "detoast",
@@ -19470,6 +19471,7 @@ dependencies = [
  "logical",
  "lsyscache",
  "mcx",
+ "pgtz",
  "reorderbuffer",
  "ruleutils",
  "types_core",
