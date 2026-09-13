@@ -754,7 +754,7 @@ fn pg_xml_is_name_char(c: i32) -> bool {
     let Ok(c) = u32::try_from(c) else {
         return false;
     };
-    (c < 0x100 && chvalid::xml_is_base_char_ch(c))
+    (c >= 0x100 || chvalid::xml_is_base_char_ch(c))
         || chvalid::xml_is_ideographic_q(c)
         || (c < 0x100 && chvalid::xml_is_digit_ch(c))
         || c == '.' as u32

@@ -571,3 +571,25 @@ fn uuidv7_out_of_range_shift_rejected() {
     let now = wall_clock_us();
     assert!(ts > now + 999 * 365 * 86_400 * USECS_PER_SEC, "{ts} vs {now}");
 }
+
+#[test]
+fn uuid_out_results_do_not_alias_across_fmgrinfos() {
+    use ::datum::Datum;
+    use ::types_fmgr::{FmgrInfo, LocalFcinfo};
+    let a = uuid_in(b"00000000-0000-0000-0000-000000000001", None).unwrap();
+    let b = uuid_in(b"00000000-0000-0000-0000-000000000002", None).unwrap();
+    let mut f1 = FmgrInfo::new(crate::builtins::fc_uuid_out, 2953, 1, true, false);
+    let mut f2 = FmgrInfo::new(crate::builtins::fc_uuid_out, 2953, 1, true, false);
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    fcinfo.set_arg(0, Datum::from_usize(core::ptr::from_ref(&a) as usize));
+    let d1 = f1.invoke(&mut fcinfo).unwrap();
+    fcinfo.set_arg(0, Datum::from_usize(core::ptr::from_ref(&b) as usize));
+    let d2 = f2.invoke(&mut fcinfo).unwrap();
+    let cs = |d: Datum| {
+        unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }
+            .to_bytes()
+            .to_vec()
+    };
+    assert_eq!(cs(d1), b"00000000-0000-0000-0000-000000000001");
+    assert_eq!(cs(d2), b"00000000-0000-0000-0000-000000000002");
+}

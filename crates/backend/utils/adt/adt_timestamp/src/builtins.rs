@@ -26,14 +26,6 @@ use adt_datetime::{Interval, MAXDATELEN};
 
 use crate::PartValue;
 
-// C pallocs the cstring per row; the backend thread owns retained scratch
-// (the nameout/adt_date precedent). The Datum aliases it until the next out
-// call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; MAXDATELEN + 1]> =
-        const { core::cell::UnsafeCell::new([0; MAXDATELEN + 1]) };
-}
-
 // PGRUST_ADT_IN_FASTUTF8 (load-speed prototype, DEFAULT OFF): from_utf8_lossy
 // walks the bytes with the chunked lossy iterator even when the input is
 // entirely valid (the always case for COPY input, which is already
@@ -76,26 +68,18 @@ pub fn fc_timestamptz_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_i64(crate::timestamptz_in(&s, typmod, esc)?))
 }
 
-pub fn fc_timestamp_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_timestamp_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let ts = fcinfo.arg_i64(0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::timestamp_out(ts, buf)?;
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; MAXDATELEN + 1];
+    let len = crate::timestamp_out(ts, &mut buf)?;
+    Ok(::types_fmgr::cstring_scratch(flinfo, "timestamp_out", &buf[..len]))
 }
 
-pub fn fc_timestamptz_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_timestamptz_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let ts = fcinfo.arg_i64(0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::timestamptz_out(ts, buf)?;
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; MAXDATELEN + 1];
+    let len = crate::timestamptz_out(ts, &mut buf)?;
+    Ok(::types_fmgr::cstring_scratch(flinfo, "timestamptz_out", &buf[..len]))
 }
 
 pub fn fc_timestamp_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -470,19 +454,13 @@ pub fn fc_intervaltypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
 }
 
 pub fn fc_intervaltypmodout(
-    _flinfo: Option<&mut FmgrInfo>,
+    flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let typmod = fcinfo.arg_i32(0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let mut tmp = [0u8; 64];
-        let len = crate::interval::intervaltypmodout(typmod, &mut tmp)?;
-        buf[..len].copy_from_slice(&tmp[..len]);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; 64];
+    let len = crate::interval::intervaltypmodout(typmod, &mut buf)?;
+    Ok(::types_fmgr::cstring_scratch(flinfo, "intervaltypmodout", &buf[..len]))
 }
 
 fn anytimestamp_typmodin(fcinfo: &Fcinfo, istz: bool) -> PgResult<Datum> {
@@ -535,30 +513,30 @@ pub fn typmod_paren_suffix_out(typmod: i32, suffix: &[u8], buf: &mut [u8]) -> us
     len + suffix.len()
 }
 
-fn anytimestamp_typmodout(fcinfo: &mut Fcinfo, istz: bool) -> PgResult<Datum> {
+fn anytimestamp_typmodout(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    istz: bool,
+) -> PgResult<Datum> {
     let typmod = fcinfo.arg_i32(0);
     let tz: &[u8] = if istz { b" with time zone" } else { b" without time zone" };
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = typmod_paren_suffix_out(typmod, tz, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; MAXDATELEN + 1];
+    let len = typmod_paren_suffix_out(typmod, tz, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "timestamptypmodout", &buf[..len]))
 }
 
 pub fn fc_timestamptypmodout(
-    _flinfo: Option<&mut FmgrInfo>,
+    flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    anytimestamp_typmodout(fcinfo, false)
+    anytimestamp_typmodout(flinfo, fcinfo, false)
 }
 
 pub fn fc_timestamptztypmodout(
-    _flinfo: Option<&mut FmgrInfo>,
+    flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    anytimestamp_typmodout(fcinfo, true)
+    anytimestamp_typmodout(flinfo, fcinfo, true)
 }
 
 pub fn fc_timestamptz_pl_interval_at_zone(
@@ -925,7 +903,7 @@ fn step_size_err(msg: &'static str) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
-struct GenSeriesTimestamp {
+pub(crate) struct GenSeriesTimestamp {
     current: i64,
     finish: i64,
     step: Interval,
@@ -935,13 +913,19 @@ struct GenSeriesTimestamp {
 }
 
 impl GenSeriesTimestamp {
-    fn new(
+    pub(crate) fn new(
         current: i64,
         finish: i64,
         step: Interval,
         attimezone: Option<&'static adt_datetime::tz::PgTz>,
         tz_aware: bool,
     ) -> PgResult<Self> {
+        let attimezone = match attimezone {
+            None if tz_aware => Some(adt_datetime::tz::session_timezone().unwrap_or_else(|| {
+                panic!("session timezone not initialized (pg_timezone_initialize) — generate_series")
+            })),
+            z => z,
+        };
         let step_sign = crate::interval::interval_sign(&step);
         if step_sign == 0 {
             return Err(step_size_err("step size cannot equal zero"));
@@ -952,7 +936,7 @@ impl GenSeriesTimestamp {
         Ok(GenSeriesTimestamp { current, finish, step, step_sign, attimezone, tz_aware })
     }
 
-    fn next(&mut self) -> PgResult<Option<i64>> {
+    pub(crate) fn next(&mut self) -> PgResult<Option<i64>> {
         let result = self.current;
         let more = if self.step_sign > 0 {
             crate::timestamp_cmp_internal(result, self.finish) <= 0

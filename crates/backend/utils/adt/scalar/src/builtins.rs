@@ -169,21 +169,12 @@ pub fn fc_xid8in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     Ok(Datum::from_u64(v))
 }
 
-std::thread_local! {
-    static XID8_OUT_SCRATCH: core::cell::UnsafeCell<[u8; 21]> =
-        const { core::cell::UnsafeCell::new([0; 21]) };
-}
-
-pub fn fc_xid8out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_xid8out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
     let v = a.value.as_u64();
-    XID8_OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = ::numutils::pg_ulltoa_n(v, &mut buf[..20]);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; 20];
+    let len = ::numutils::pg_ulltoa_n(v, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "xid8out", &buf[..len]))
 }
 
 pub fn fc_xid8recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -277,7 +268,7 @@ fn arg_tid(fcinfo: &Fcinfo, i: usize) -> Tid {
     }
 }
 
-fn tid_image(tid: Tid) -> [u8; 6] {
+pub(crate) fn tid_image(tid: Tid) -> [u8; 6] {
     let hi = ((tid.block >> 16) as u16).to_ne_bytes();
     let lo = (tid.block as u16).to_ne_bytes();
     let off = tid.offset.to_ne_bytes();
@@ -308,20 +299,11 @@ pub fn fc_tidin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     }
 }
 
-std::thread_local! {
-    static TID_OUT_SCRATCH: core::cell::UnsafeCell<[u8; 32]> =
-        const { core::cell::UnsafeCell::new([0; 32]) };
-}
-
-pub fn fc_tidout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_tidout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let tid = arg_tid(fcinfo, 0);
-    TID_OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::tidout(tid, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; 32];
+    let len = crate::tidout(tid, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "tidout", &buf[..len]))
 }
 
 pub fn fc_tidrecv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

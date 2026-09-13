@@ -1012,3 +1012,76 @@ fn interval_avg_serialize_outside_aggregate_is_error() {
     assert_eq!(err.message(), "aggregate function called in non-aggregate context");
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
 }
+
+#[test]
+fn out_functions_do_not_alias_across_fmgrinfos() {
+    use ::datum::Datum;
+    use ::types_fmgr::{FmgrInfo, LocalFcinfo, PGFunction};
+    gmt_session();
+    set_date_style(USE_ISO_DATES);
+    let cs = |d: Datum| {
+        unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }
+            .to_bytes()
+            .to_vec()
+    };
+    for (f, oid, a, b, ea, eb) in [
+        (
+            crate::builtins::fc_timestamp_out as PGFunction,
+            1313u32,
+            Datum::from_i64(ts_in("2000-01-01")),
+            Datum::from_i64(ts_in("2001-02-03")),
+            &b"2000-01-01 00:00:00"[..],
+            &b"2001-02-03 00:00:00"[..],
+        ),
+        (
+            crate::builtins::fc_timestamptz_out,
+            1151,
+            Datum::from_i64(tstz_in("2000-01-01 00:00+00")),
+            Datum::from_i64(tstz_in("2001-02-03 00:00+00")),
+            b"2000-01-01 00:00:00+00",
+            b"2001-02-03 00:00:00+00",
+        ),
+        (
+            crate::builtins::fc_timestamptypmodout,
+            2906,
+            Datum::from_i32(3),
+            Datum::from_i32(4),
+            b"(3) without time zone",
+            b"(4) without time zone",
+        ),
+        (
+            crate::builtins::fc_intervaltypmodout,
+            2904,
+            Datum::from_i32(2147418115),
+            Datum::from_i32(2147418116),
+            b"(3)",
+            b"(4)",
+        ),
+    ] {
+        let mut f1 = FmgrInfo::new(f, oid, 1, true, false);
+        let mut f2 = FmgrInfo::new(f, oid, 1, true, false);
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        fcinfo.set_arg(0, a);
+        let d1 = f1.invoke(&mut fcinfo).unwrap();
+        fcinfo.set_arg(0, b);
+        let d2 = f2.invoke(&mut fcinfo).unwrap();
+        assert_eq!(cs(d1), ea);
+        assert_eq!(cs(d2), eb);
+    }
+}
+
+// timestamp.c generate_series_timestamptz_internal: the three-argument form
+// snapshots session_timezone into the series state at the first call.
+#[test]
+fn generate_series_timestamptz_keeps_the_first_call_session_timezone() {
+    zone_session(b"UTC");
+    let start = tstz_in("2024-03-09 12:00+00");
+    let finish = tstz_in("2024-03-12 12:00+00");
+    let mut s = crate::builtins::GenSeriesTimestamp::new(start, finish, iv_in("1 day"), None, true)
+        .unwrap();
+    assert_eq!(s.next().unwrap(), Some(start));
+    zone_session(b"America/New_York");
+    assert_eq!(s.next().unwrap(), Some(tstz_in("2024-03-10 12:00+00")));
+    assert_eq!(s.next().unwrap(), Some(tstz_in("2024-03-11 12:00+00")));
+    zone_session(b"GMT");
+}

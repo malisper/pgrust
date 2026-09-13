@@ -1225,6 +1225,7 @@ dependencies = [
 name = "adt_xml"
 version = "0.1.0"
 dependencies = [
+ "adt_float",
  "arrayfuncs",
  "datum",
  "elog",

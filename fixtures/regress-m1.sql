@@ -302,3 +302,32 @@ CREATE TABLE b02_expr_source(a int, b int CHECK (b > 0));
 CREATE TABLE b02_expr_target(a int);
 SELECT pg_get_expr(conbin, 'b02_expr_target'::regclass) FROM pg_constraint WHERE conrelid = 'b02_expr_source'::regclass AND contype = 'c';
 DROP TABLE b02_expr_source, b02_expr_target;
+
+-- ===== batch-03: out-function results are per-FmgrInfo (tid, xid8, uuid, timestamp family) =====
+CREATE TEMP TABLE b03_outfn(t1 tid, t2 tid, x1 xid8, x2 xid8, u1 uuid, u2 uuid, s1 timestamp, s2 timestamp, z1 timestamptz, z2 timestamptz);
+INSERT INTO b03_outfn VALUES ('(1,2)', '(3,4)', '33', '44', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', '2000-01-01', '2001-02-03', '2000-01-01 00:00+00', '2001-02-03 00:00+00');
+SELECT tidout(t1), tidout(t2), xid8out(x1), xid8out(x2), uuid_out(u1), uuid_out(u2) FROM b03_outfn;
+SELECT timestamp_out(s1), timestamp_out(s2), timestamptz_out(z1), timestamptz_out(z2) FROM b03_outfn;
+SELECT timestamptypmodout(3), timestamptypmodout(4), timestamptztypmodout(1), timestamptztypmodout(2), intervaltypmodout(2147418115), intervaltypmodout(2147418116);
+DROP TABLE b03_outfn;
+
+-- ===== bitcmp is memcmp's raw difference =====
+SELECT bitcmp(B'11111111', B'00000000'), bitcmp(B'00000000', B'11111111'), bitcmp(B'0101', B'0100'), varbitcmp(B'11111111', B'00000000'), bitcmp(B'010', B'0100'), B'0101' > B'0100';
+
+-- ===== a codepoint >= 0xF8 after '<?xml' names a processing instruction =====
+SELECT XMLPARSE(CONTENT '<?xmlα?>');
+SELECT XMLPARSE(CONTENT '<?xmlα ?>');
+
+-- ===== xpath numbers print through float8out (exponent form, extra_float_digits) =====
+SELECT (xpath('100000000000000000000', '<r/>'::xml))[1]::text, (xpath('1000000000000000', '<r/>'::xml))[1]::text, (xpath('1 div 3', '<r/>'::xml))[1]::text, (xpath('1 div 0', '<r/>'::xml))[1]::text, (xpath('-1 div 0', '<r/>'::xml))[1]::text;
+SET extra_float_digits = 0;
+SELECT (xpath('1 div 3', '<r/>'::xml))[1]::text, (xpath('10000000000000000', '<r/>'::xml))[1]::text;
+RESET extra_float_digits;
+
+-- ===== XMLTABLE keeps its own libxml error context across a nested XML operation =====
+SELECT * FROM XMLTABLE('/r/a' PASSING ('<r><a/><a/></r>'::xml) COLUMNS b boolean PATH 'missing' DEFAULT xml_is_well_formed_document('<' || random()::text), c text PATH 'name()');
+
+-- ===== jsonb_object_agg finalfn is non-destructive on a shared transition state =====
+CREATE AGGREGATE b03_joaus(text, anyelement) (sfunc = jsonb_object_agg_unique_strict_transfn, stype = internal, finalfunc = jsonb_object_agg_finalfn, parallel = safe);
+SELECT jsonb_object_agg_unique_strict(k, v), b03_joaus(k, v) FROM (VALUES ('a', NULL::int), ('a2', NULL::int), ('b', 1), ('c', 2)) t(k, v);
+DROP AGGREGATE b03_joaus(text, anyelement);

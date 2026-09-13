@@ -26,23 +26,11 @@ pub fn fc_uuid_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     byref_result(fcinfo.result_mcx(), &uuid)
 }
 
-// C pallocs the cstring per row; the backend thread owns retained scratch
-// (the macaddr_out precedent). The Datum aliases it until the next out call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; UUID_OUT_LEN + 1]> =
-        const { core::cell::UnsafeCell::new([0; UUID_OUT_LEN + 1]) };
-}
-
-pub fn fc_uuid_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_uuid_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let uuid = arg_uuid(fcinfo, 0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let body: &mut [u8; UUID_OUT_LEN] = (&mut buf[..UUID_OUT_LEN]).try_into().unwrap();
-        let len = crate::uuid_out_into(&uuid, body);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; UUID_OUT_LEN];
+    let len = crate::uuid_out_into(&uuid, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "uuid_out", &buf[..len]))
 }
 
 macro_rules! fc_uuid2 {

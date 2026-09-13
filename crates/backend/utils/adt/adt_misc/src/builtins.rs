@@ -690,7 +690,7 @@ pub fn fc_pg_backup_start(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     let backupid = unsafe { fcinfo.arg_varlena_packed(0)? };
     let raw = backupid.data();
     let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-    let backupidstr = String::from_utf8_lossy(&raw[..end]).into_owned();
+    let backupidstr = raw[..end].to_vec();
     let fast = fcinfo.arg_bool(1);
 
     if transam_xlog::get_backup_status() == transam_xlog::SessionBackupState::Running {

@@ -313,3 +313,20 @@ fn invalid_digit_message_carries_whole_character() {
         Some(&b"\"\xc3\" is not a valid hexadecimal digit"[..])
     );
 }
+
+// bitcmp is memcmp's raw difference on the first differing byte (varbit.c
+// bit_cmp), then the bit-length order.
+#[test]
+fn bit_cmp_payload_returns_memcmp_difference() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let p = |s: &str| img(mcx, s);
+    let (a, b, c, d) = (p("b11111111"), p("b00000000"), p("b0101"), p("b0100"));
+    assert_eq!(bit_cmp_payload(&a[4..], &b[4..]), 255);
+    assert_eq!(bit_cmp_payload(&b[4..], &a[4..]), -255);
+    assert_eq!(bit_cmp_payload(&c[4..], &d[4..]), 16);
+    assert_eq!(bit_cmp_payload(&c[4..], &c[4..]), 0);
+    let (e, f) = (p("b010"), p("b0100"));
+    assert_eq!(bit_cmp_payload(&e[4..], &f[4..]), -1);
+    assert_eq!(bit_cmp_payload(&f[4..], &e[4..]), 1);
+}

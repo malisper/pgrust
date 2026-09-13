@@ -395,10 +395,11 @@ pub fn bit_cmp_payload(a: &[u8], b: &[u8]) -> i32 {
     let (abits, abytes) = (i32::from_ne_bytes(a[..4].try_into().unwrap()), &a[4..]);
     let (bbits, bbytes) = (i32::from_ne_bytes(b[..4].try_into().unwrap()), &b[4..]);
     let n = abytes.len().min(bbytes.len());
-    match abytes[..n].cmp(&bbytes[..n]) {
-        core::cmp::Ordering::Less => -1,
-        core::cmp::Ordering::Greater => 1,
-        core::cmp::Ordering::Equal => {
+    // memcmp's raw value is user-visible (bitcmp): the first differing bytes'
+    // difference, as glibc and libSystem return it.
+    match abytes[..n].iter().zip(&bbytes[..n]).find(|(x, y)| x != y) {
+        Some((x, y)) => *x as i32 - *y as i32,
+        None => {
             if abits != bbits {
                 if abits < bbits { -1 } else { 1 }
             } else {

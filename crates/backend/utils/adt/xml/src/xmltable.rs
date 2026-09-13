@@ -9,9 +9,7 @@ use ::types_error::{
     ERRCODE_INVALID_ARGUMENT_FOR_XQUERY, ERRCODE_INVALID_XML_DOCUMENT, ERRCODE_OUT_OF_MEMORY,
 };
 
-use crate::errhandler::{
-    pg_xml_init, xml_error_handler, xml_ereport, xml_err_occurred, PG_XML_STRICTNESS_ALL,
-};
+use crate::errhandler::{pg_xml_init, xml_ereport, xml_err_occurred, PG_XML_STRICTNESS_ALL};
 use crate::libxml::{
     self, cstr, xml2, xmlDoc, xmlNodeSetHdr, xmlParserCtxt, xmlXPathCompExpr, xmlXPathContext,
     xmlXPathContextHdr, xmlXPathObject, xmlXPathObjectHdr, XPATH_BOOLEAN, XPATH_NODESET,
@@ -177,7 +175,7 @@ impl XmlTableContext {
         let x = xml2();
         // SAFETY: row-filter comp and xpathcxt are live; obj moves into self.
         unsafe {
-            (x.xmlSetStructuredErrorFunc)(core::ptr::null_mut(), Some(xml_error_handler));
+            pg_xml_init(PG_XML_STRICTNESS_ALL);
 
             if self.xpathobj.is_null() {
                 self.xpathobj = (x.xmlXPathCompiledEval)(self.xpathcomp, self.xpathcxt);
@@ -216,7 +214,7 @@ impl XmlTableContext {
         // SAFETY: fetch_row() == true precedes (executor contract), so
         // xpathobj/nodesetval/row_count index a live node.
         unsafe {
-            (x.xmlSetStructuredErrorFunc)(core::ptr::null_mut(), Some(xml_error_handler));
+            pg_xml_init(PG_XML_STRICTNESS_ALL);
 
             debug_assert!(!self.xpathobj.is_null());
             debug_assert!(!self.xpathscomp[colnum as usize].is_null());
@@ -249,7 +247,7 @@ impl XmlTableContext {
         let x = xml2();
         // SAFETY: all pointers are owned by self and freed exactly once here.
         unsafe {
-            (x.xmlSetStructuredErrorFunc)(core::ptr::null_mut(), Some(xml_error_handler));
+            pg_xml_init(PG_XML_STRICTNESS_ALL);
             for comp in &self.xpathscomp {
                 if !comp.is_null() {
                     (x.xmlXPathFreeCompExpr)(*comp);

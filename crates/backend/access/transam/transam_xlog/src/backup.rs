@@ -94,7 +94,7 @@ pub fn get_backup_status() -> SessionBackupState {
 /// backup label (pg_backup_start SQL function and the BASE_BACKUP replication
 /// command) passes through, so rejecting here neutralizes the injection for all
 /// entry points and both output files.
-fn check_backup_label(backupidstr: &str) -> PgResult<()> {
+fn check_backup_label(backupidstr: &[u8]) -> PgResult<()> {
     if backupidstr.len() > MAXPGPATH {
         return ereport(ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
@@ -102,7 +102,7 @@ fn check_backup_label(backupidstr: &str) -> PgResult<()> {
             .finish(loc("do_pg_backup_start"));
     }
 
-    if backupidstr.bytes().any(|b| b == b'\n' || b == b'\r') {
+    if backupidstr.iter().any(|&b| b == b'\n' || b == b'\r') {
         return ereport(ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("backup label contains invalid characters")
@@ -117,7 +117,7 @@ fn check_backup_label(backupidstr: &str) -> PgResult<()> {
 /// enumerates auxiliary tablespaces into `tablespaces` (when Some, matching C's
 /// non-NULL `List **`), and appends the tablespace_map lines to `tblspcmapfile`.
 pub fn do_pg_backup_start(
-    backupidstr: &str,
+    backupidstr: &[u8],
     fast: bool,
     tablespaces: Option<&mut Vec<TablespaceInfo>>,
     state: &mut BackupState,
@@ -137,7 +137,7 @@ pub fn do_pg_backup_start(
 
     check_backup_label(backupidstr)?;
 
-    state.set_name(backupidstr.as_bytes());
+    state.set_name(backupidstr);
 
     // Mark backup active. Full-page writes during the backup are forced
     // implicitly: XLogInsertRecord observes Insert.runningBackups > 0. All
@@ -687,25 +687,26 @@ mod tests {
 
     #[test]
     fn check_backup_label_accepts_ordinary_labels() {
-        check_backup_label("nightly backup 2026-08-22").unwrap();
-        check_backup_label("").unwrap();
+        check_backup_label(b"nightly backup 2026-08-22").unwrap();
+        check_backup_label(b"").unwrap();
         // Non-ASCII/invalid-UTF8-adjacent bytes are fine; only line delimiters
         // and over-length are rejected (label stays server-encoding opaque).
-        check_backup_label("café backup — ticket #42").unwrap();
+        check_backup_label("café backup — ticket #42".as_bytes()).unwrap();
+        check_backup_label(b"a\xffb").unwrap();
     }
 
     #[test]
     fn check_backup_label_rejects_newline_injection() {
         // A newline would forge a whole backup_label metadata line at restore.
-        check_backup_label("a\nINCREMENTAL FROM LSN: 0/1").err().unwrap();
+        check_backup_label(b"a\nINCREMENTAL FROM LSN: 0/1").err().unwrap();
         // Carriage return is rejected too (CRLF injection).
-        check_backup_label("a\rBACKUP FROM: standby").err().unwrap();
-        check_backup_label("trailing newline\n").err().unwrap();
+        check_backup_label(b"a\rBACKUP FROM: standby").err().unwrap();
+        check_backup_label(b"trailing newline\n").err().unwrap();
     }
 
     #[test]
     fn check_backup_label_rejects_over_length() {
         let long = "x".repeat(MAXPGPATH + 1);
-        check_backup_label(&long).err().unwrap();
+        check_backup_label(long.as_bytes()).err().unwrap();
     }
 }

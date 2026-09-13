@@ -38,6 +38,28 @@ fn parse_xml_decl_absent_and_pi() {
     // <?xmlfoo ...?> is a PI, not a declaration.
     let (rc, len, ..) = decl(b"<?xmlfoo bar?><a/>");
     assert_eq!((rc, len), (0, 0));
+    // PG_XMLISNAMECHAR accepts every codepoint >= 0xF8 (xmlIsBaseChar_ch's
+    // last alternative), so a Greek letter also names a PI.
+    let (rc, len, ..) = decl("<?xml\u{3b1}?><a/>".as_bytes());
+    assert_eq!((rc, len), (0, 0));
+}
+
+#[test]
+fn xpath_numbers_print_like_float8out() {
+    let eval = |expr: &[u8]| {
+        let mut out = Vec::new();
+        assert_eq!(crate::xpath::xpath_internal(expr, b"<r/>", None, Some(&mut out)).unwrap(), 1);
+        String::from_utf8(out.remove(0)).unwrap()
+    };
+    adt_float::set_extra_float_digits(1);
+    assert_eq!(eval(b"100000000000000000000"), "1e+20");
+    assert_eq!(eval(b"1000000000000000"), "1e+15");
+    assert_eq!(eval(b"1 div 3"), "0.3333333333333333");
+    assert_eq!(eval(b"1 div 0"), "Infinity");
+    adt_float::set_extra_float_digits(0);
+    assert_eq!(eval(b"1 div 3"), "0.333333333333333");
+    assert_eq!(eval(b"10000000000000000"), "1e+16");
+    adt_float::set_extra_float_digits(1);
 }
 
 #[test]

@@ -779,7 +779,7 @@ fn perform_base_backup<'mcx>(
     let mut tablespace_map: Vec<u8> = Vec::new();
     sink_support::basebackup_progress_wait_checkpoint();
     transam_xlog::do_pg_backup_start(
-        &opt.label,
+        opt.label.as_bytes(),
         opt.fastcheckpoint,
         Some(&mut state.tablespaces),
         &mut backup_state,

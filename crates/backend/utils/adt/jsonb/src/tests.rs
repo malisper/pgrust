@@ -1263,3 +1263,30 @@ fn set_path_subscript_matches_c_strtoint() {
         );
     }
 }
+
+// jsonb_object_agg_finalfn re-runs on a shared transition state: skipping
+// leading null-valued pairs must not rewrite the aliased pair buffer
+// (jsonb_util.c uniqueifyJsonbObject advances the pointer).
+#[test]
+fn refinalize_object_agg_skip_nulls_leading_null() {
+    setup();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    use crate::build::convert_to_jsonb;
+    use crate::iter::WjbToken;
+    use crate::mutate::JsonbPush;
+
+    let mut push = JsonbPush::new(mcx).unwrap();
+    push.push_object_start(true, true).unwrap();
+    push.push(WjbToken::Key, JsonbItem::String(b"a")).unwrap();
+    push.push(WjbToken::Value, JsonbItem::Null).unwrap();
+    push.push(WjbToken::Key, JsonbItem::String(b"b")).unwrap();
+    push.push(WjbToken::Value, JsonbItem::Bool(true)).unwrap();
+
+    for _ in 0..2 {
+        let mut c = push.clone_shallow().unwrap();
+        c.push_token(WjbToken::EndObject).unwrap();
+        let img = convert_to_jsonb(mcx, &c.finish()).unwrap();
+        assert_eq!(String::from_utf8(image_out_text(mcx, &img)).unwrap(), r#"{"b": true}"#);
+    }
+}

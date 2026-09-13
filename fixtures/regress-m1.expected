@@ -910,3 +910,83 @@ CREATE TABLE b02_expr_target(a int);
 SELECT pg_get_expr(conbin, 'b02_expr_target'::regclass) FROM pg_constraint WHERE conrelid = 'b02_expr_source'::regclass AND contype = 'c';
 ERROR:  XX000: invalid attnum 2 for relation "b02_expr_target"
 DROP TABLE b02_expr_source, b02_expr_target;
+-- ===== batch-03: out-function results are per-FmgrInfo (tid, xid8, uuid, timestamp family) =====
+CREATE TEMP TABLE b03_outfn(t1 tid, t2 tid, x1 xid8, x2 xid8, u1 uuid, u2 uuid, s1 timestamp, s2 timestamp, z1 timestamptz, z2 timestamptz);
+INSERT INTO b03_outfn VALUES ('(1,2)', '(3,4)', '33', '44', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', '2000-01-01', '2001-02-03', '2000-01-01 00:00+00', '2001-02-03 00:00+00');
+SELECT tidout(t1), tidout(t2), xid8out(x1), xid8out(x2), uuid_out(u1), uuid_out(u2) FROM b03_outfn;
+ tidout | tidout | xid8out | xid8out |               uuid_out               |               uuid_out               
+--------+--------+---------+---------+--------------------------------------+--------------------------------------
+ (1,2)  | (3,4)  | 33      | 44      | 00000000-0000-0000-0000-000000000001 | 00000000-0000-0000-0000-000000000002
+(1 row)
+
+SELECT timestamp_out(s1), timestamp_out(s2), timestamptz_out(z1), timestamptz_out(z2) FROM b03_outfn;
+      timestamp_out       |      timestamp_out       |       timestamptz_out        |       timestamptz_out        
+--------------------------+--------------------------+------------------------------+------------------------------
+ Sat Jan 01 00:00:00 2000 | Sat Feb 03 00:00:00 2001 | Fri Dec 31 16:00:00 1999 PST | Fri Feb 02 16:00:00 2001 PST
+(1 row)
+
+SELECT timestamptypmodout(3), timestamptypmodout(4), timestamptztypmodout(1), timestamptztypmodout(2), intervaltypmodout(2147418115), intervaltypmodout(2147418116);
+  timestamptypmodout   |  timestamptypmodout   | timestamptztypmodout | timestamptztypmodout | intervaltypmodout | intervaltypmodout 
+-----------------------+-----------------------+----------------------+----------------------+-------------------+-------------------
+ (3) without time zone | (4) without time zone | (1) with time zone   | (2) with time zone   | (3)               | (4)
+(1 row)
+
+DROP TABLE b03_outfn;
+-- ===== bitcmp is memcmp's raw difference =====
+SELECT bitcmp(B'11111111', B'00000000'), bitcmp(B'00000000', B'11111111'), bitcmp(B'0101', B'0100'), varbitcmp(B'11111111', B'00000000'), bitcmp(B'010', B'0100'), B'0101' > B'0100';
+ bitcmp | bitcmp | bitcmp | varbitcmp | bitcmp | ?column? 
+--------+--------+--------+-----------+--------+----------
+    255 |   -255 |     16 |       255 |     -1 | t
+(1 row)
+
+-- ===== a codepoint >= 0xF8 after '<?xml' names a processing instruction =====
+SELECT XMLPARSE(CONTENT '<?xmlα?>');
+WARNING:  01000: line 1: xmlParsePITarget: invalid name prefix 'xml'
+<?xmlα?>
+       ^
+ xmlparse 
+----------
+ <?xmlα?>
+(1 row)
+
+SELECT XMLPARSE(CONTENT '<?xmlα ?>');
+WARNING:  01000: line 1: xmlParsePITarget: invalid name prefix 'xml'
+<?xmlα ?>
+       ^
+ xmlparse  
+-----------
+ <?xmlα ?>
+(1 row)
+
+-- ===== xpath numbers print through float8out (exponent form, extra_float_digits) =====
+SELECT (xpath('100000000000000000000', '<r/>'::xml))[1]::text, (xpath('1000000000000000', '<r/>'::xml))[1]::text, (xpath('1 div 3', '<r/>'::xml))[1]::text, (xpath('1 div 0', '<r/>'::xml))[1]::text, (xpath('-1 div 0', '<r/>'::xml))[1]::text;
+ xpath | xpath |       xpath        |  xpath   |   xpath   
+-------+-------+--------------------+----------+-----------
+ 1e+20 | 1e+15 | 0.3333333333333333 | Infinity | -Infinity
+(1 row)
+
+SET extra_float_digits = 0;
+SELECT (xpath('1 div 3', '<r/>'::xml))[1]::text, (xpath('10000000000000000', '<r/>'::xml))[1]::text;
+       xpath       | xpath 
+-------------------+-------
+ 0.333333333333333 | 1e+16
+(1 row)
+
+RESET extra_float_digits;
+-- ===== XMLTABLE keeps its own libxml error context across a nested XML operation =====
+SELECT * FROM XMLTABLE('/r/a' PASSING ('<r><a/><a/></r>'::xml) COLUMNS b boolean PATH 'missing' DEFAULT xml_is_well_formed_document('<' || random()::text), c text PATH 'name()');
+ b | c 
+---+---
+ f | a
+ f | a
+(2 rows)
+
+-- ===== jsonb_object_agg finalfn is non-destructive on a shared transition state =====
+CREATE AGGREGATE b03_joaus(text, anyelement) (sfunc = jsonb_object_agg_unique_strict_transfn, stype = internal, finalfunc = jsonb_object_agg_finalfn, parallel = safe);
+SELECT jsonb_object_agg_unique_strict(k, v), b03_joaus(k, v) FROM (VALUES ('a', NULL::int), ('a2', NULL::int), ('b', 1), ('c', 2)) t(k, v);
+ jsonb_object_agg_unique_strict |    b03_joaus     
+--------------------------------+------------------
+ {"b": 1, "c": 2}               | {"b": 1, "c": 2}
+(1 row)
+
+DROP AGGREGATE b03_joaus(text, anyelement);

@@ -88,6 +88,15 @@ impl<'mcx, T: Copy> ArenaVec<'mcx, T> {
         self.len == 0
     }
 
+    // C `pairs++; nPairs--`: the backing store is shared with shallow clones.
+    fn advance(&mut self, n: usize) {
+        debug_assert!(n <= self.len as usize);
+        // SAFETY: n <= len, so the new ptr stays inside the allocation.
+        self.ptr = unsafe { self.ptr.add(n) };
+        self.len -= n as u32;
+        self.cap -= n as u32;
+    }
+
     pub fn truncate(&mut self, n: usize) {
         debug_assert!(n <= self.len as usize);
         self.len = n as u32;
@@ -358,11 +367,7 @@ fn uniqueify_object(
                 }
             }
         }
-        if start > 0 {
-            for k in start..=res {
-                s[k - start] = s[k];
-            }
-        }
+        pairs.advance(start);
         pairs.truncate(res + 1 - start);
     }
     Ok(())

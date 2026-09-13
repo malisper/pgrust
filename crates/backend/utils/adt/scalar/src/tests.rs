@@ -353,3 +353,35 @@ fn out_functions_do_not_alias_across_fmgrinfos() {
         assert_eq!(cs(d2), b.to_string().as_bytes());
     }
 }
+
+#[test]
+fn tidout_and_xid8out_do_not_alias_across_fmgrinfos() {
+    use ::datum::Datum;
+    use types_fmgr::{FmgrInfo, LocalFcinfo};
+    let cs = |d: Datum| {
+        unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }
+            .to_bytes()
+            .to_vec()
+    };
+
+    let mut f1 = FmgrInfo::new(crate::builtins::fc_xid8out, 5081, 1, true, false);
+    let mut f2 = FmgrInfo::new(crate::builtins::fc_xid8out, 5081, 1, true, false);
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    fcinfo.set_arg(0, Datum::from_u64(33));
+    let d1 = f1.invoke(&mut fcinfo).unwrap();
+    fcinfo.set_arg(0, Datum::from_u64(44));
+    let d2 = f2.invoke(&mut fcinfo).unwrap();
+    assert_eq!(cs(d1), b"33");
+    assert_eq!(cs(d2), b"44");
+
+    let a = crate::builtins::tid_image(Tid { block: 1, offset: 2 });
+    let b = crate::builtins::tid_image(Tid { block: 3, offset: 4 });
+    let mut f1 = FmgrInfo::new(crate::builtins::fc_tidout, 49, 1, true, false);
+    let mut f2 = FmgrInfo::new(crate::builtins::fc_tidout, 49, 1, true, false);
+    fcinfo.set_arg(0, Datum::from_usize(a.as_ptr() as usize));
+    let d1 = f1.invoke(&mut fcinfo).unwrap();
+    fcinfo.set_arg(0, Datum::from_usize(b.as_ptr() as usize));
+    let d2 = f2.invoke(&mut fcinfo).unwrap();
+    assert_eq!(cs(d1), b"(1,2)");
+    assert_eq!(cs(d2), b"(3,4)");
+}

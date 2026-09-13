@@ -69,14 +69,10 @@ pub(crate) unsafe fn node_to_xmltype(cur: *mut xmlNode) -> PgResult<Vec<u8>> {
     }
 }
 
-fn float8out(v: f64) -> String {
-    if v.is_nan() {
-        "NaN".to_string()
-    } else if v.is_infinite() {
-        if v < 0.0 { "-Infinity".to_string() } else { "Infinity".to_string() }
-    } else {
-        format!("{v}")
-    }
+fn float8out(v: f64) -> Vec<u8> {
+    let mut buf = [0u8; adt_float::MAXDOUBLEWIDTH];
+    let len = adt_float::float8out(v, &mut buf);
+    buf[..len].to_vec()
 }
 
 /// C `xml_xpathobjtoxmlarray` (xml.c:4243): result count plus, when wanted,
@@ -113,7 +109,7 @@ unsafe fn xpathobj_to_xmlarray(
             XPATH_NUMBER => {
                 if let Some(out) = collect {
                     // map_sql_value_to_xml_value(FLOAT8OID) == float8out.
-                    out.push(float8out(hdr.floatval).into_bytes());
+                    out.push(float8out(hdr.floatval));
                 }
                 Ok(1)
             }
