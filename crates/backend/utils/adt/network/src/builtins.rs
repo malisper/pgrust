@@ -61,30 +61,24 @@ pub fn fc_cidr_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     network_in_dat(fcinfo, true)
 }
 
-// C pallocs the cstring per row; the backend thread owns retained scratch
-// (the int.c out-function precedent).
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; INET_OUT_BUFLEN + 1]> =
-        const { core::cell::UnsafeCell::new([0; INET_OUT_BUFLEN + 1]) };
-}
-
-fn out_dat(fcinfo: &Fcinfo, is_cidr: bool) -> PgResult<Datum> {
+fn out_dat(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &Fcinfo,
+    is_cidr: bool,
+    name: &'static str,
+) -> PgResult<Datum> {
     let ip = arg_inet(fcinfo, 0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::network_out_into(ip, is_cidr, &mut buf[..INET_OUT_BUFLEN])?;
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; INET_OUT_BUFLEN];
+    let len = crate::network_out_into(ip, is_cidr, &mut buf)?;
+    Ok(::types_fmgr::cstring_scratch(flinfo, name, &buf[..len]))
 }
 
-pub fn fc_inet_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    out_dat(fcinfo, false)
+pub fn fc_inet_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    out_dat(flinfo, fcinfo, false, "inet_out")
 }
 
-pub fn fc_cidr_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    out_dat(fcinfo, true)
+pub fn fc_cidr_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    out_dat(flinfo, fcinfo, true, "cidr_out")
 }
 
 fn recv_dat(fcinfo: &mut Fcinfo, is_cidr: bool) -> PgResult<Datum> {

@@ -174,11 +174,11 @@ fn CreateExtensionInternal(
 
     let address = InsertExtensionTuple(
         mcx,
-        &control.name,
+        control.name.as_bytes(),
         extowner,
         schema_oid,
         control.relocatable,
-        &version_name,
+        version_name.as_bytes(),
         None,
         None,
         &required_extensions,
@@ -372,11 +372,11 @@ pub(crate) fn conflicting_def_elem(defel: &DefElem<'_>) -> Box<types_error::PgEr
 #[allow(clippy::too_many_arguments)]
 pub fn InsertExtensionTuple(
     mcx: Mcx<'_>,
-    ext_name: &str,
+    ext_name: &[u8],
     ext_owner: Oid,
     schema_oid: Oid,
     relocatable: bool,
-    ext_version: &str,
+    ext_version: &[u8],
     ext_config: Option<Datum>,
     ext_condition: Option<Datum>,
     required_extensions: &[Oid],
@@ -391,8 +391,8 @@ pub fn InsertExtensionTuple(
     )?;
 
     let mut name = NameData::default();
-    name.namestrcpy(ext_name);
-    let version_text = varlena::cstring_to_text(mcx, ext_version.as_bytes())?;
+    name.namestrcpy_bytes(ext_name);
+    let version_text = varlena::cstring_to_text(mcx, ext_version)?;
 
     let mut values = [Datum::null(); Natts_pg_extension];
     let mut nulls = [false; Natts_pg_extension];

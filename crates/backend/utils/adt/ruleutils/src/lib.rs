@@ -462,12 +462,8 @@ pub(crate) fn generate_operator_name(
 // unqualified missing_ok branch (namespace.c:3870) is that same search.
 fn collation_is_visible(collid: Oid, collname: &str, collnamespace: Oid) -> PgResult<bool> {
     const PG_CATALOG_NAMESPACE: Oid = 11;
-    if collnamespace != PG_CATALOG_NAMESPACE {
-        let mut path = [InvalidOid; 64];
-        let n = catalog_namespace::fetch_search_path_array(&mut path)?;
-        if !path[..n].contains(&collnamespace) {
-            return Ok(false);
-        }
+    if collnamespace != PG_CATALOG_NAMESPACE && !search_path_oids()?.contains(&collnamespace) {
+        return Ok(false);
     }
     Ok(catalog_namespace::get_collation_oid(&[collname], true)? == collid)
 }
@@ -724,12 +720,23 @@ fn pg_opclass_row(opclass: Oid) -> PgResult<Option<(String, Oid, Oid)>> {
     Ok(Some(out))
 }
 
+// fetch_search_path_array reports the full count even past its buffer; C's
+// visibility walks the whole activeSearchPath list.
+fn search_path_oids() -> PgResult<Vec<Oid>> {
+    let mut path = vec![InvalidOid; 64];
+    let n = catalog_namespace::fetch_search_path_array(&mut path)?;
+    if n > path.len() {
+        path.resize(n, InvalidOid);
+        catalog_namespace::fetch_search_path_array(&mut path)?;
+    }
+    path.truncate(n);
+    Ok(path)
+}
+
 // OpclassIsVisible (namespace.c): first same-name/same-AM opclass in the
 // search path wins.
 fn opclass_is_visible(opclass: Oid, opcname: &str, opcmethod: Oid) -> PgResult<bool> {
-    let mut path = [InvalidOid; 64];
-    let n = catalog_namespace::fetch_search_path_array(&mut path)?;
-    for &nsp in &path[..n] {
+    for &nsp in &search_path_oids()? {
         let found = cache_syscache::GetSysCacheOid(
             cache_syscache::CLAAMNAMENSP,
             1,

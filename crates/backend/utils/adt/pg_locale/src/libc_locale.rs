@@ -250,6 +250,39 @@ pub fn pg_toupper(ch: u8) -> u8 {
     }
 }
 
+// The default collation's ctype is the database LC_CTYPE, which C installs
+// as the process locale; this backend is a thread, so the same fold runs
+// through the default locale's locale_t (NONE = "C": high-bit bytes unchanged).
+fn pg_tolower_db(ch: u8, lt: LibcLocale) -> u8 {
+    if ch.is_ascii_uppercase() {
+        ch + b'a' - b'A'
+    } else if ch >= 0x80
+        && lt != LibcLocale::NONE
+        // SAFETY: pure ctype call on a live locale_t.
+        && unsafe { isupper_l(ch as c_int, lt.get()) } != 0
+    {
+        // SAFETY: pure ctype call on a live locale_t.
+        unsafe { tolower_l(ch as c_int, lt.get()) as u8 }
+    } else {
+        ch
+    }
+}
+
+fn pg_toupper_db(ch: u8, lt: LibcLocale) -> u8 {
+    if ch.is_ascii_lowercase() {
+        ch - (b'a' - b'A')
+    } else if ch >= 0x80
+        && lt != LibcLocale::NONE
+        // SAFETY: pure ctype call on a live locale_t.
+        && unsafe { islower_l(ch as c_int, lt.get()) } != 0
+    {
+        // SAFETY: pure ctype call on a live locale_t.
+        unsafe { toupper_l(ch as c_int, lt.get()) as u8 }
+    } else {
+        ch
+    }
+}
+
 pub(crate) fn tolower_l_byte(c: u8, lt: LibcLocale) -> u8 {
     // SAFETY: pure ctype call; c promoted as unsigned char per C.
     unsafe { tolower_l(c as c_int, lt.get()) as u8 }
@@ -353,7 +386,7 @@ pub(crate) fn strlower_libc_sb(dest: &mut [u8], src: &[u8], locale: &PgLocale) -
                 break;
             }
             *p = if locale.is_default {
-                pg_tolower(*p)
+                pg_tolower_db(*p, locale.lt)
             } else {
                 tolower_l_byte(*p, locale.lt)
             };
@@ -370,7 +403,7 @@ pub(crate) fn strupper_libc_sb(dest: &mut [u8], src: &[u8], locale: &PgLocale) -
                 break;
             }
             *p = if locale.is_default {
-                pg_toupper(*p)
+                pg_toupper_db(*p, locale.lt)
             } else {
                 // SAFETY: pure ctype call.
                 unsafe { toupper_l(*p as c_int, locale.lt.get()) as u8 }
@@ -390,9 +423,9 @@ pub(crate) fn strtitle_libc_sb(dest: &mut [u8], src: &[u8], locale: &PgLocale) -
             }
             let c = if locale.is_default {
                 if wasalnum {
-                    pg_tolower(*p)
+                    pg_tolower_db(*p, locale.lt)
                 } else {
-                    pg_toupper(*p)
+                    pg_toupper_db(*p, locale.lt)
                 }
             } else if wasalnum {
                 tolower_l_byte(*p, locale.lt)

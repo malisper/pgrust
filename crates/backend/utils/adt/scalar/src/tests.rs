@@ -327,3 +327,29 @@ fn oidlarger_oidsmaller_match_c() {
     assert_eq!(oidsmaller(20, 10), 10);
     assert_eq!(oidsmaller(7, 7), 7);
 }
+
+#[test]
+fn out_functions_do_not_alias_across_fmgrinfos() {
+    use ::datum::Datum;
+    use types_fmgr::{FmgrInfo, LocalFcinfo};
+    for (f, oid, a, b) in [
+        (crate::builtins::fc_oidout as types_fmgr::PGFunction, 1799u32, 11u32, 22u32),
+        (crate::builtins::fc_xidout, 51, 5, 6),
+        (crate::builtins::fc_cidout, 31, 7, 8),
+    ] {
+        let mut f1 = FmgrInfo::new(f, oid, 1, true, false);
+        let mut f2 = FmgrInfo::new(f, oid, 1, true, false);
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        fcinfo.set_arg(0, Datum::from_u32(a));
+        let d1 = f1.invoke(&mut fcinfo).unwrap();
+        fcinfo.set_arg(0, Datum::from_u32(b));
+        let d2 = f2.invoke(&mut fcinfo).unwrap();
+        let cs = |d: Datum| {
+            unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }
+                .to_bytes()
+                .to_vec()
+        };
+        assert_eq!(cs(d1), a.to_string().as_bytes());
+        assert_eq!(cs(d2), b.to_string().as_bytes());
+    }
+}

@@ -25,21 +25,17 @@ pub fn pg_get_viewdef_worker(
     crate::check_pg_rewrite_select(
         "SELECT * FROM pg_catalog.pg_rewrite WHERE ev_class = $1 AND rulename = $2",
     )?;
-    let Some(rules) = relcache::rules::RelationGetRules(mcx, viewoid)? else {
+    let Some(rule) = crate::ruledef::fetch_view_return_rule(viewoid)? else {
         return Ok(None);
     };
-    let Some(rule) = rules.rules.iter().find(|r| r.event == CmdType::CMD_SELECT as i32) else {
-        return Ok(None);
-    };
-    if !rule.is_instead || rule.has_qual() {
+    if rule.ev_type != b'1' || !rule.is_instead || rule.ev_qual != "<>" {
         return Ok(None);
     }
-
-    // C's pg_get_viewdef_worker stringToNode's a fresh tree from pg_rewrite
-    // (not rd_rules), and get_query_def's AcquireRewriteLocks scribbles on
-    // it (dropped-column fix-up of JOIN RTEs): deparse a private copy.
-    let actions = rule.copy_actions(mcx)?;
-    let actions = actions.as_list().expect("ev_action is a List");
+    let actions = readfuncs::stringToNodeNullable(mcx, &rule.ev_action)?
+        .and_then(|node| node.as_list());
+    let Some(actions) = actions else {
+        return Ok(None);
+    };
     if actions.len() != 1 {
         return Ok(None);
     }

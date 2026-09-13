@@ -33,6 +33,11 @@ fn null_arg(funcname: &'static str) -> PgResult<()> {
     elog(ERROR, format!("null argument to {funcname} is not allowed")).map(|_| ())
 }
 
+fn arg_bytes<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
+    // SAFETY: catalog arg `i` is text, non-null per caller.
+    Ok(unsafe { fcinfo.arg_varlena_packed(i)? }.data())
+}
+
 fn arg_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
     // SAFETY: catalog arg `i` is text (or name-shaped text), non-null per caller.
     let bytes = unsafe { fcinfo.arg_varlena_packed(i)? }.data();
@@ -317,10 +322,10 @@ pub fn fc_binary_upgrade_create_empty_extension(
     }
 
     let mcx = fcinfo.result_mcx();
-    let ext_name = arg_str(fcinfo, 0)?;
+    let ext_name = arg_bytes(fcinfo, 0)?;
     let schema_name = arg_str(fcinfo, 1)?;
     let relocatable = fcinfo.arg_bool(2);
-    let ext_version = arg_str(fcinfo, 3)?;
+    let ext_version = arg_bytes(fcinfo, 3)?;
 
     let ext_config = if fcinfo.argisnull(4) { None } else { Some(fcinfo.arg(4)) };
     let ext_condition = if fcinfo.argisnull(5) { None } else { Some(fcinfo.arg(5)) };
@@ -328,8 +333,9 @@ pub fn fc_binary_upgrade_create_empty_extension(
     let mut required_extensions: mcx::PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
     if !fcinfo.argisnull(6) {
         // SAFETY: catalog arg 6 is `_text`, non-null per the check above.
-        let image = unsafe { fcinfo.arg_varlena_packed(6)? };
-        let (elems, _nulls) = arrayfuncs::deconstruct_array_builtin(mcx, image.data(), TEXTOID, false)?;
+        let raw = unsafe { fcinfo.arg_varlena_raw(6) };
+        let image = detoast::detoast_attr(mcx, raw)?;
+        let (elems, _nulls) = arrayfuncs::deconstruct_array_builtin(mcx, &image, TEXTOID, false)?;
         required_extensions = mcx::vec_with_capacity_in(mcx, elems.len())?;
         for &d in elems.iter() {
             let name = datum_str(mcx, d)?;

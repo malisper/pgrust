@@ -8,7 +8,7 @@ use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::{PgResult, SoftErrorContext};
 use ::types_fmgr::{
-    cstring_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
     PGFunction,
 };
 
@@ -49,9 +49,9 @@ fc_reg_in! {
     fc_regrolein: regrolein;
 }
 
-// Retained TLS scratch, reset at call entry: printtup's text lane stays on
-// its unarmed fast path (the cash/int out-fn convention); the datum aliases
-// the context until the next reg*out call on this thread.
+// The reg*out workers build their string in a scratch context that is reset
+// at call entry; the result is then copied into the FmgrInfo's retained
+// scratch so sibling expression nodes do not alias one buffer.
 fn with_out_scratch<R>(f: impl FnOnce(::mcx::Mcx<'_>) -> R) -> R {
     std::thread_local! {
         static OUT_CTX: core::cell::UnsafeCell<Option<::mcx::MemoryContext>> =
@@ -68,10 +68,13 @@ fn with_out_scratch<R>(f: impl FnOnce(::mcx::Mcx<'_>) -> R) -> R {
 
 macro_rules! fc_reg_out {
     ($($fc:ident: $core:ident;)*) => {$(
-        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+        pub fn $fc(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let oid = fcinfo.arg(0).as_oid();
-            let _ = fcinfo;
-            with_out_scratch(|mcx| Ok(cstring_result(crate::$core(mcx, oid)?)))
+            with_out_scratch(|mcx| {
+                let s = crate::$core(mcx, oid)?;
+                let bytes = &s[..s.len() - 1];
+                Ok(::types_fmgr::cstring_scratch(flinfo, stringify!($core), bytes))
+            })
         }
     )*};
 }

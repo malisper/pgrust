@@ -46,8 +46,11 @@ impl NameData {
     }
 
     pub fn namestrcpy(&mut self, src: &str) {
+        self.namestrcpy_bytes(src.as_bytes());
+    }
+
+    pub fn namestrcpy_bytes(&mut self, bytes: &[u8]) {
         self.data.fill(0);
-        let bytes = src.as_bytes();
         let len = bytes.len().min(NAMEDATALEN as usize - 1);
         self.data[..len].copy_from_slice(&bytes[..len]);
     }

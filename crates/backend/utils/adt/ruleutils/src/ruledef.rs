@@ -21,6 +21,7 @@ use crate::{
 
 const REWRITE_RELATION_ID: Oid = 2618;
 const REWRITE_OID_INDEX_ID: Oid = 2692;
+const REWRITE_REL_RULENAME_INDEX_ID: Oid = 2693;
 
 const ANUM_PG_REWRITE_OID: i32 = 1;
 const ANUM_PG_REWRITE_RULENAME: i32 = 2;
@@ -71,24 +72,49 @@ pub(crate) fn text_attr(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: 
         .expect("pg_rewrite text attr is UTF-8"))
 }
 
-fn fetch_rule(ruleoid: Oid) -> PgResult<Option<PgRewriteRow>> {
-    let cx = MemoryContext::new("pg_get_ruledef scan");
-    let scan_mcx = cx.mcx();
-    let rel = table::table_open(scan_mcx, REWRITE_RELATION_ID, AccessShareLock)?;
+fn oid_key(attno: i32, oid: Oid) -> PgResult<ScanKeyData> {
     let mut key = ScanKeyData::empty();
-    key.sk_attno = ANUM_PG_REWRITE_OID as AttrNumber;
+    key.sk_attno = attno as AttrNumber;
     key.sk_strategy = BTEqualStrategyNumber;
     key.sk_collation = types_core::catalog::C_COLLATION_OID;
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)?;
-    key.sk_argument = Datum::from_oid(ruleoid);
-    let keys = [key];
+    key.sk_argument = Datum::from_oid(oid);
+    Ok(key)
+}
+
+fn fetch_rule(ruleoid: Oid) -> PgResult<Option<PgRewriteRow>> {
+    let keys = [oid_key(ANUM_PG_REWRITE_OID, ruleoid)?];
+    fetch_rule_scan(REWRITE_OID_INDEX_ID, &keys)
+}
+
+// pg_get_viewdef_worker's SPI query: ev_class = $1 AND rulename = '_RETURN'.
+pub(crate) fn fetch_view_return_rule(viewoid: Oid) -> PgResult<Option<PgRewriteRow>> {
+    let mut rulename = NameData::default();
+    rulename.namestrcpy("_RETURN");
+    let mut name_key = ScanKeyData::empty();
+    name_key.sk_attno = ANUM_PG_REWRITE_RULENAME as AttrNumber;
+    name_key.sk_strategy = BTEqualStrategyNumber;
+    name_key.sk_collation = types_core::catalog::C_COLLATION_OID;
+    name_key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_NAMEEQ)?;
+    name_key.sk_argument = Datum::from_usize(rulename.data.as_ptr() as usize);
+    let keys = [oid_key(ANUM_PG_REWRITE_EV_CLASS, viewoid)?, name_key];
+    fetch_rule_scan(REWRITE_REL_RULENAME_INDEX_ID, &keys)
+}
+
+// C reads pg_rewrite through read-only SPI, i.e. under the active query
+// snapshot rather than the catalog snapshot.
+fn fetch_rule_scan(index_id: Oid, keys: &[ScanKeyData]) -> PgResult<Option<PgRewriteRow>> {
+    let cx = MemoryContext::new("pg_get_ruledef scan");
+    let scan_mcx = cx.mcx();
+    let rel = table::table_open(scan_mcx, REWRITE_RELATION_ID, AccessShareLock)?;
+    let snapshot = snapmgr::ActiveSnapshotSet().then(snapmgr::GetActiveSnapshot);
     let mut scan = genam::systable_beginscan(
         scan_mcx,
         &rel,
-        REWRITE_OID_INDEX_ID,
+        index_id,
         relcache::criticalRelcachesBuilt(),
-        None,
-        &keys,
+        snapshot,
+        keys,
     )?;
     let mut row: Option<PgRewriteRow> = None;
     if let Some(tup) = genam::systable_getnext(scan_mcx, &mut scan)? {

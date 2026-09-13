@@ -26,6 +26,7 @@ format_type = { path = "../format_type" }
 varlena = { path = "../varlena" }
 mbutils = { path = "../../mb/mbutils" }
 pqformat = { path = "../../../libpq/pqformat" }
+numutils = { path = "../numutils" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }

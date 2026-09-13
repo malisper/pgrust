@@ -1969,7 +1969,7 @@ fn datum_output_text<'mcx>(mcx: Mcx<'mcx>, typid: Oid, d: Datum) -> PgResult<Str
     let out = finfo.invoke(&mut fcinfo)?;
     // SAFETY: type output functions return a NUL-terminated cstring datum.
     let cs = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
-    Ok(core::str::from_utf8(cs.to_bytes()).expect("server encoding").to_string())
+    Ok(String::from_utf8_lossy(cs.to_bytes()).into_owned())
 }
 
 // get_ri_constraint_root (ri_triggers.c): walk conparentid to the topmost
@@ -2061,8 +2061,8 @@ fn ri_KeysEqual(
                 (0, 0)
             } else {
                 match (
-                    datum_avail_in_tuple(oldtup, oldvalue),
-                    datum_avail_in_tuple(newtup, newvalue),
+                    datum_avail(oldtup, oldvalue, attnums[i], att.attlen),
+                    datum_avail(newtup, newvalue, attnums[i], att.attlen),
                 ) {
                     (Some(o), Some(n)) => (o, n),
                     _ => datum_image_corrupt(),
@@ -2349,6 +2349,20 @@ fn varlena_image_eq(a: &[u8], b: &[u8]) -> PgResult<bool> {
 /// declared length never exceeds this. Returns `None` when the datum does not
 /// point within the image (never for `heap_getattr` output over these tuples),
 /// which callers treat as corruption rather than reading an unbounded extent.
+// A column past the stored tuple's natts is heap_getattr's descriptor-owned
+// missing-value default, sized by its own header rather than the tuple image.
+fn datum_avail(tuple: &HeapTupleData<'_>, d: Datum, attnum: i16, attlen: i16) -> Option<usize> {
+    if attnum as u16 > tuple.t_data().natts() {
+        return Some(if attlen > 0 {
+            attlen as usize
+        } else {
+            // SAFETY: descriptor-owned varlena image readable through its header.
+            unsafe { types_tuple::varatt::varsize_any(d.as_usize() as *const u8) }
+        });
+    }
+    datum_avail_in_tuple(tuple, d)
+}
+
 fn datum_avail_in_tuple(tuple: &HeapTupleData<'_>, d: Datum) -> Option<usize> {
     let base = tuple.header_ptr() as usize;
     let end = base.checked_add(tuple.t_len as usize)?;

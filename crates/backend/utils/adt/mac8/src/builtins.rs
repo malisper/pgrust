@@ -17,22 +17,11 @@ fn arg_mac8(fcinfo: &Fcinfo, i: usize) -> MacAddr8 {
     MacAddr8::from_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
 }
 
-// C pallocs the cstring per row; the backend thread owns retained scratch
-// (the nameout precedent). The Datum aliases it until the next out call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; MACADDR8_OUT_LEN]> =
-        const { core::cell::UnsafeCell::new([0; MACADDR8_OUT_LEN]) };
-}
-
-pub fn fc_macaddr8_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_macaddr8_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let addr = arg_mac8(fcinfo, 0);
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::macaddr8_out_into(&addr, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; MACADDR8_OUT_LEN];
+    let len = crate::macaddr8_out_into(&addr, &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "macaddr8_out", &buf[..len]))
 }
 
 macro_rules! fc_mac8_2 {

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use mcx::{Mcx, MemoryContext};
 use types_core::{InvalidOid, Oid};
-use types_error::SoftErrorContext;
+use types_error::{SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
 use types_tuple::NameData;
 
 use super::*;
@@ -300,6 +300,15 @@ fn numeric_and_dash_paths() {
         assert_eq!(regclassin(mcx, "4294967295", None).unwrap(), Some(4294967295));
         assert_eq!(regtypein(mcx, "23", None).unwrap(), Some(23));
         assert_eq!(regprocin(mcx, "1299", None).unwrap(), Some(1299));
+        // oidin's strtoul(base 0): a leading zero is octal.
+        assert_eq!(regclassin(mcx, "010", None).unwrap(), Some(8));
+        assert_eq!(regtypein(mcx, "010", None).unwrap(), Some(8));
+        let err = regclassin(mcx, "08", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(err.message(), "invalid input syntax for type oid: \"08\"");
+        let mut soft = SoftErrorContext::new(false);
+        assert_eq!(regclassin(mcx, "08", Some(&mut soft)).unwrap(), Some(0));
+        assert!(soft.error_occurred());
 
         let err = regclassin(mcx, "4294967296", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);

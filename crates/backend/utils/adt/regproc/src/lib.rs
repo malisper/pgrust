@@ -23,7 +23,7 @@ use types_core::{InvalidOid, Oid, OidIsValid, RELPERSISTENCE_PERMANENT};
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_AMBIGUOUS_FUNCTION,
     ERRCODE_INVALID_NAME, ERRCODE_INVALID_TEXT_REPRESENTATION,
-    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
     ERRCODE_UNDEFINED_PARAMETER,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA,
     ERRCODE_UNDEFINED_TABLE,
@@ -55,13 +55,6 @@ fn my_temp_namespace_or_invalid() -> Oid {
 
 fn invalid_name_syntax() -> PgError {
     PgError::error("invalid name syntax").with_sqlstate(ERRCODE_INVALID_NAME)
-}
-
-#[cold]
-#[inline(never)]
-fn oid_out_of_range(s: &str) -> PgError {
-    PgError::error(format!("value \"{s}\" is out of range for type oid"))
-        .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
 }
 
 #[cold]
@@ -179,15 +172,8 @@ fn parse_numeric_oid(s: &str, esc: Esc) -> PgResult<Option<Option<Oid>>> {
     if !all_digits {
         return Ok(None);
     }
-    // oidin's uint32in_subr on all-digit input: only the overflow arm is reachable.
-    let mut v: u64 = 0;
-    for &c in b {
-        v = v * 10 + (c - b'0') as u64;
-        if v > u32::MAX as u64 {
-            return ereturn(esc, Some(None), oid_out_of_range(s));
-        }
-    }
-    Ok(Some(Some(v as Oid)))
+    let (v, _) = ::numutils::uint32in_subr(s, false, "oid", esc)?;
+    Ok(Some(Some(v)))
 }
 
 /// C parseDashOrOid: outer None = not handled (name lookup proceeds);

@@ -24,6 +24,7 @@ relation = { path = "../../../access/common/relation" }
 extension = { path = "../../../commands/extension" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }
 arrayfuncs = { path = "../arrayfuncs" }
+detoast = { path = "../../../access/common/detoast" }
 pg_type = { path = "../../../catalog/pg_type" }
 pg_enum = { path = "../../../catalog/pg_enum" }
 commands_tablespace = { path = "../../../commands/tablespace" }

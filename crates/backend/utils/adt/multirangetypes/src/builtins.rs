@@ -182,6 +182,12 @@ pub fn fc_multirange_constructor2(
     let flinfo = flinfo.expect("multirange constructor: NULL flinfo");
     let mltrngtypid = ::funcapi::get_fn_expr_rettype(flinfo);
     let mcx = fcinfo.result_mcx();
+    if fcinfo.nargs() == 0 {
+        let mi = cached_multirange_info(flinfo, mltrngtypid)?;
+        let mut ranges: PgVec<'_, &[u8]> = ::mcx::vec_with_capacity_in(mcx, 0)?;
+        let img = make_multirange(mcx, mltrngtypid, &mut mi.rng, &mut ranges)?;
+        return mr_result(fcinfo, &img);
+    }
     if fcinfo.argisnull(0) {
         return Err(null_member());
     }

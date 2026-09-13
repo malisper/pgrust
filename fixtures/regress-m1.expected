@@ -782,3 +782,131 @@ SELECT count(*) > 0 FROM pg_timezone_abbrevs_abbrevs();
  t
 (1 row)
 
+-- ===== adt out-functions: each call's cstring is its own (bugs/batch-02) =====
+CREATE TEMP TABLE b02_outfn(m1 macaddr8, m2 macaddr8, i1 inet, i2 inet, c1 cidr, c2 cidr, o1 oid, o2 oid, x1 xid, x2 xid, d1 cid, d2 cid);
+INSERT INTO b02_outfn VALUES ('00:11:22:33:44:55:66:77', '88:99:aa:bb:cc:dd:ee:ff', '1.2.3.4', '5.6.7.8', '10.0.0.0/8', '11.0.0.0/8', 11, 22, '5', '6', '7', '8');
+SELECT macaddr8_out(m1), macaddr8_out(m2), inet_out(i1), inet_out(i2), cidr_out(c1), cidr_out(c2) FROM b02_outfn;
+      macaddr8_out       |      macaddr8_out       | inet_out | inet_out |  cidr_out  |  cidr_out  
+-------------------------+-------------------------+----------+----------+------------+------------
+ 00:11:22:33:44:55:66:77 | 88:99:aa:bb:cc:dd:ee:ff | 1.2.3.4  | 5.6.7.8  | 10.0.0.0/8 | 11.0.0.0/8
+(1 row)
+
+SELECT oidout(o1), oidout(o2), xidout(x1), xidout(x2), cidout(d1), cidout(d2), format('%s/%s', oidout(o1), oidout(o2)) FROM b02_outfn;
+ oidout | oidout | xidout | xidout | cidout | cidout | format 
+--------+--------+--------+--------+--------+--------+--------
+ 11     | 22     | 5      | 6      | 7      | 8      | 11/22
+(1 row)
+
+SELECT format('%s/%s', regclassout((4000000000 + g)::oid), regclassout((4100000000 + g)::oid)), regtypeout(23), regtypeout(25), regprocout(1), regprocout(2) FROM generate_series(1, 2) AS g;
+        format         | regtypeout | regtypeout | regprocout | regprocout 
+-----------------------+------------+------------+------------+------------
+ 4000000001/4100000001 | integer    | text       | 1          | 2
+ 4000000002/4100000002 | integer    | text       | 1          | 2
+(2 rows)
+
+DROP TABLE b02_outfn;
+-- ===== multirange_constructor2 with zero arguments =====
+CREATE FUNCTION b02_mr_zero() RETURNS int4multirange AS 'multirange_constructor2' LANGUAGE internal;
+SELECT b02_mr_zero(), isempty(b02_mr_zero());
+ b02_mr_zero | isempty 
+-------------+---------
+ {}          | t
+(1 row)
+
+DROP FUNCTION b02_mr_zero();
+-- ===== regex whole match is leftmost-longest without alternation =====
+SELECT substring('aaab' FROM 'a*(?:ab)?'), substring('aaab' FROM '^a*(?:ab)?$'), regexp_replace('aaab', 'a*(?:ab)?', 'X'), substring('xaaab' FROM 'a*(?:ab)?'), 'xaaab' ~ '^a*(?:ab)?$';
+ substring | substring | regexp_replace | substring | ?column? 
+-----------+-----------+----------------+-----------+----------
+ aaab      | aaab      | X              |           | f
+(1 row)
+
+SELECT regexp_matches('aaab', '(a*)(?:ab)?'), substring('http://www.x.com/y' FROM '^https?://(?:www\.)?([^/]+)/.*$'), substring('abcabc' FROM '[a-c]*(?:cab)?');
+ regexp_matches | substring | substring 
+----------------+-----------+-----------
+ {aa}           | x.com     | abcabc
+(1 row)
+
+-- ===== reg* numeric input is oidin (strtoul base 0) =====
+SELECT '010'::regclass::oid, '010'::regtype::oid, '010'::regproc::oid, to_regclass('08') IS NULL, to_regtype('08') IS NULL;
+ oid | oid | oid | ?column? | ?column? 
+-----+-----+-----+----------+----------
+   8 |   8 |   8 | t        | t
+(1 row)
+
+SELECT '08'::regclass;
+ERROR:  22P02: invalid input syntax for type oid: "08"
+LINE 1: SELECT '08'::regclass;
+               ^
+SELECT '4294967296'::regclass;
+ERROR:  22003: value "4294967296" is out of range for type oid
+LINE 1: SELECT '4294967296'::regclass;
+               ^
+-- ===== RI key comparison over a descriptor-owned missing-column default =====
+CREATE TABLE b02_p(id int);
+INSERT INTO b02_p VALUES (1);
+ALTER TABLE b02_p ADD COLUMN k text DEFAULT 'x';
+ALTER TABLE b02_p ADD UNIQUE (k);
+CREATE TABLE b02_f(k text REFERENCES b02_p(k));
+INSERT INTO b02_f VALUES ('x');
+UPDATE b02_p SET id = 2;
+SELECT * FROM b02_p;
+ id | k 
+----+---
+  2 | x
+(1 row)
+
+DROP TABLE b02_f, b02_p;
+-- ===== pg_get_triggerdef detoasts a compressed tgargs =====
+CREATE TABLE b02_t(a int);
+CREATE FUNCTION b02_tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+DO $$ BEGIN EXECUTE format('CREATE TRIGGER b02_trg BEFORE INSERT ON b02_t FOR EACH ROW EXECUTE FUNCTION b02_tf(%L)', repeat('x', 10000)); END $$;
+SELECT length(pg_get_triggerdef(oid)), left(pg_get_triggerdef(oid), 80) FROM pg_trigger WHERE tgname = 'b02_trg';
+ length |                                       left                                       
+--------+----------------------------------------------------------------------------------
+  10093 | CREATE TRIGGER b02_trg BEFORE INSERT ON public.b02_t FOR EACH ROW EXECUTE FUNCTI
+(1 row)
+
+DROP TABLE b02_t;
+DROP FUNCTION b02_tf();
+-- ===== opclass / collation visibility over more than 64 schemas =====
+CREATE TABLE b02_pat(v text);
+CREATE INDEX b02_pat_idx ON b02_pat(v text_pattern_ops);
+DO $$ BEGIN FOR g IN 1..70 LOOP EXECUTE 'CREATE SCHEMA b02_s' || g; END LOOP; END $$;
+CREATE COLLATION b02_s1.b02_c FROM pg_catalog."C";
+CREATE VIEW b02_v AS SELECT 'x'::text COLLATE b02_s1.b02_c AS x;
+SELECT set_config('search_path', string_agg('b02_s' || g, ',') || ',public', false) IS NOT NULL FROM generate_series(1, 70) g;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT pg_get_indexdef('b02_pat_idx'::regclass);
+                               pg_get_indexdef                               
+-----------------------------------------------------------------------------
+ CREATE INDEX b02_pat_idx ON public.b02_pat USING btree (v text_pattern_ops)
+(1 row)
+
+SELECT pg_get_viewdef('b02_v'::regclass);
+             pg_get_viewdef              
+-----------------------------------------
+  SELECT ('x'::text COLLATE b02_c) AS x;
+(1 row)
+
+RESET search_path;
+SELECT pg_get_viewdef('b02_v'::regclass);
+                 pg_get_viewdef                 
+------------------------------------------------
+  SELECT ('x'::text COLLATE b02_s1.b02_c) AS x;
+(1 row)
+
+DROP VIEW b02_v;
+DROP TABLE b02_pat;
+DO $$ BEGIN FOR g IN 1..70 LOOP EXECUTE 'DROP SCHEMA b02_s' || g || ' CASCADE'; END LOOP; END $$;
+NOTICE:  00000: drop cascades to collation b02_s1.b02_c
+-- ===== get_variable: an attnum past the relation's columns is a catchable error =====
+CREATE TABLE b02_expr_source(a int, b int CHECK (b > 0));
+CREATE TABLE b02_expr_target(a int);
+SELECT pg_get_expr(conbin, 'b02_expr_target'::regclass) FROM pg_constraint WHERE conrelid = 'b02_expr_source'::regclass AND contype = 'c';
+ERROR:  XX000: invalid attnum 2 for relation "b02_expr_target"
+DROP TABLE b02_expr_source, b02_expr_target;

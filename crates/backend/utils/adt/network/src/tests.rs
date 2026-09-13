@@ -503,3 +503,33 @@ fn clean_ipv6_addr_matches_c() {
     crate::builtins::clean_ipv6_addr(libc::AF_INET, &mut s);
     assert_eq!(s, "192.0.2.5%bogus");
 }
+
+#[test]
+fn out_functions_do_not_alias_across_fmgrinfos() {
+    use ::types_fmgr::{FmgrInfo, LocalFcinfo};
+    let ctx = ::mcx::MemoryContext::new("t");
+    let inet_in = |s: &[u8]| {
+        let mut cs = s.to_vec();
+        cs.push(0);
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        fcinfo.set_arg(0, ::datum::Datum::from_usize(cs.as_ptr() as usize));
+        // SAFETY: ctx outlives the call.
+        unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+        crate::builtins::fc_inet_in(None, &mut fcinfo).unwrap()
+    };
+    let (a, b) = (inet_in(b"1.2.3.4"), inet_in(b"5.6.7.8"));
+    let mut f1 = FmgrInfo::new(crate::builtins::fc_inet_out, 911, 1, true, false);
+    let mut f2 = FmgrInfo::new(crate::builtins::fc_inet_out, 911, 1, true, false);
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    fcinfo.set_arg(0, a);
+    let d1 = f1.invoke(&mut fcinfo).unwrap();
+    fcinfo.set_arg(0, b);
+    let d2 = f2.invoke(&mut fcinfo).unwrap();
+    let cs = |d: ::datum::Datum| {
+        unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }
+            .to_bytes()
+            .to_vec()
+    };
+    assert_eq!(cs(d1), b"1.2.3.4");
+    assert_eq!(cs(d2), b"5.6.7.8");
+}

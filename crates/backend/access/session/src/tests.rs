@@ -1279,7 +1279,11 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      one projection; replaced by per-FmgrInfo scratch
     //      (types_fmgr::cstring_scratch, the textout idiom). No session
     //      state was involved; no SESSION_ENVELOPE_MANIFEST rows change.
-    assert_eq!(count_tree(crates), 595, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 591, bug campaign batch-02 (2026-09-13), utils/adt out functions:
+    //   -4 OUT_SCRATCH thread_local! blocks (adt/mac8, network, scalar x2:
+    //      xid/cid and oid) — the same aliasing defect and the same
+    //      per-FmgrInfo replacement as batch-01. Non-session TLS.
+    assert_eq!(count_tree(crates), 591, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

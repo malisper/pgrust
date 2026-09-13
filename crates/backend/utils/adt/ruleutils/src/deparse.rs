@@ -1416,7 +1416,11 @@ pub(crate) fn get_variable<'mcx>(
         None
     } else if attnum > 0 {
         if attnum as usize > colinfo.colnames.len() {
-            panic!("invalid attnum {attnum} for deparse column set");
+            let aliasname = rte.eref.and_then(|e| e.aliasname).unwrap_or("");
+            return Err(PgError::error(format!(
+                "invalid attnum {attnum} for relation \"{aliasname}\""
+            ))
+            .into());
         }
         Some(
             colinfo.colnames[attnum as usize - 1]

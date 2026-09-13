@@ -240,3 +240,65 @@ SELECT pg_catalog.pg_timezone_abbrevs_zone(), set_config('TimeZone', 'UTC', fals
 RESET timezone;
 SELECT * FROM pg_timezone_abbrevs_abbrevs() LIMIT 1;
 SELECT count(*) > 0 FROM pg_timezone_abbrevs_abbrevs();
+
+-- ===== adt out-functions: each call's cstring is its own (bugs/batch-02) =====
+CREATE TEMP TABLE b02_outfn(m1 macaddr8, m2 macaddr8, i1 inet, i2 inet, c1 cidr, c2 cidr, o1 oid, o2 oid, x1 xid, x2 xid, d1 cid, d2 cid);
+INSERT INTO b02_outfn VALUES ('00:11:22:33:44:55:66:77', '88:99:aa:bb:cc:dd:ee:ff', '1.2.3.4', '5.6.7.8', '10.0.0.0/8', '11.0.0.0/8', 11, 22, '5', '6', '7', '8');
+SELECT macaddr8_out(m1), macaddr8_out(m2), inet_out(i1), inet_out(i2), cidr_out(c1), cidr_out(c2) FROM b02_outfn;
+SELECT oidout(o1), oidout(o2), xidout(x1), xidout(x2), cidout(d1), cidout(d2), format('%s/%s', oidout(o1), oidout(o2)) FROM b02_outfn;
+SELECT format('%s/%s', regclassout((4000000000 + g)::oid), regclassout((4100000000 + g)::oid)), regtypeout(23), regtypeout(25), regprocout(1), regprocout(2) FROM generate_series(1, 2) AS g;
+DROP TABLE b02_outfn;
+
+-- ===== multirange_constructor2 with zero arguments =====
+CREATE FUNCTION b02_mr_zero() RETURNS int4multirange AS 'multirange_constructor2' LANGUAGE internal;
+SELECT b02_mr_zero(), isempty(b02_mr_zero());
+DROP FUNCTION b02_mr_zero();
+
+-- ===== regex whole match is leftmost-longest without alternation =====
+SELECT substring('aaab' FROM 'a*(?:ab)?'), substring('aaab' FROM '^a*(?:ab)?$'), regexp_replace('aaab', 'a*(?:ab)?', 'X'), substring('xaaab' FROM 'a*(?:ab)?'), 'xaaab' ~ '^a*(?:ab)?$';
+SELECT regexp_matches('aaab', '(a*)(?:ab)?'), substring('http://www.x.com/y' FROM '^https?://(?:www\.)?([^/]+)/.*$'), substring('abcabc' FROM '[a-c]*(?:cab)?');
+
+-- ===== reg* numeric input is oidin (strtoul base 0) =====
+SELECT '010'::regclass::oid, '010'::regtype::oid, '010'::regproc::oid, to_regclass('08') IS NULL, to_regtype('08') IS NULL;
+SELECT '08'::regclass;
+SELECT '4294967296'::regclass;
+
+-- ===== RI key comparison over a descriptor-owned missing-column default =====
+CREATE TABLE b02_p(id int);
+INSERT INTO b02_p VALUES (1);
+ALTER TABLE b02_p ADD COLUMN k text DEFAULT 'x';
+ALTER TABLE b02_p ADD UNIQUE (k);
+CREATE TABLE b02_f(k text REFERENCES b02_p(k));
+INSERT INTO b02_f VALUES ('x');
+UPDATE b02_p SET id = 2;
+SELECT * FROM b02_p;
+DROP TABLE b02_f, b02_p;
+
+-- ===== pg_get_triggerdef detoasts a compressed tgargs =====
+CREATE TABLE b02_t(a int);
+CREATE FUNCTION b02_tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+DO $$ BEGIN EXECUTE format('CREATE TRIGGER b02_trg BEFORE INSERT ON b02_t FOR EACH ROW EXECUTE FUNCTION b02_tf(%L)', repeat('x', 10000)); END $$;
+SELECT length(pg_get_triggerdef(oid)), left(pg_get_triggerdef(oid), 80) FROM pg_trigger WHERE tgname = 'b02_trg';
+DROP TABLE b02_t;
+DROP FUNCTION b02_tf();
+
+-- ===== opclass / collation visibility over more than 64 schemas =====
+CREATE TABLE b02_pat(v text);
+CREATE INDEX b02_pat_idx ON b02_pat(v text_pattern_ops);
+DO $$ BEGIN FOR g IN 1..70 LOOP EXECUTE 'CREATE SCHEMA b02_s' || g; END LOOP; END $$;
+CREATE COLLATION b02_s1.b02_c FROM pg_catalog."C";
+CREATE VIEW b02_v AS SELECT 'x'::text COLLATE b02_s1.b02_c AS x;
+SELECT set_config('search_path', string_agg('b02_s' || g, ',') || ',public', false) IS NOT NULL FROM generate_series(1, 70) g;
+SELECT pg_get_indexdef('b02_pat_idx'::regclass);
+SELECT pg_get_viewdef('b02_v'::regclass);
+RESET search_path;
+SELECT pg_get_viewdef('b02_v'::regclass);
+DROP VIEW b02_v;
+DROP TABLE b02_pat;
+DO $$ BEGIN FOR g IN 1..70 LOOP EXECUTE 'DROP SCHEMA b02_s' || g || ' CASCADE'; END LOOP; END $$;
+
+-- ===== get_variable: an attnum past the relation's columns is a catchable error =====
+CREATE TABLE b02_expr_source(a int, b int CHECK (b > 0));
+CREATE TABLE b02_expr_target(a int);
+SELECT pg_get_expr(conbin, 'b02_expr_target'::regclass) FROM pg_constraint WHERE conrelid = 'b02_expr_source'::regclass AND contype = 'c';
+DROP TABLE b02_expr_source, b02_expr_target;

@@ -35,22 +35,11 @@ fc_oid2_oid! {
     fc_oidsmaller: oidsmaller;
 }
 
-// Result Datum aliases the scratch: consume before the next out call.
-std::thread_local! {
-    static OUT_SCRATCH: core::cell::UnsafeCell<[u8; 16]> =
-        const { core::cell::UnsafeCell::new([0; 16]) };
-}
-
-pub fn fc_xidout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_xidout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
-    let v = a.value.as_u32();
-    OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = crate::xidout(v, buf);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; 16];
+    let len = crate::xidout(a.value.as_u32(), &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "xidout", &buf[..len]))
 }
 
 macro_rules! fc_xid2 {
@@ -87,22 +76,11 @@ pub fn fc_oidin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     Ok(Datum::from_oid(v))
 }
 
-// C pallocs 12 bytes per row; the int.c retained-TLS out convention instead.
-std::thread_local! {
-    static OID_OUT_SCRATCH: core::cell::UnsafeCell<[u8; 12]> =
-        const { core::cell::UnsafeCell::new([0; 12]) };
-}
-
-pub fn fc_oidout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_oidout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
-    let v = a.value.as_oid();
-    OID_OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = ::numutils::pg_ultoa_n(v, &mut buf[..11]);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; 11];
+    let len = ::numutils::pg_ultoa_n(a.value.as_oid(), &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "oidout", &buf[..len]))
 }
 
 pub fn fc_oidrecv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -139,16 +117,11 @@ pub fn fc_cidin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     Ok(Datum::from_u32(v))
 }
 
-pub fn fc_cidout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_cidout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let [a] = fcinfo.args_n::<1>();
-    let v = a.value.as_u32();
-    OID_OUT_SCRATCH.with(|c| {
-        // SAFETY: single-threaded backend; the sole live access is this call.
-        let buf = unsafe { &mut *c.get() };
-        let len = ::numutils::pg_ultoa_n(v, &mut buf[..11]);
-        buf[len] = 0;
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = [0u8; 11];
+    let len = ::numutils::pg_ultoa_n(a.value.as_u32(), &mut buf);
+    Ok(::types_fmgr::cstring_scratch(flinfo, "cidout", &buf[..len]))
 }
 
 pub fn fc_cideq(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

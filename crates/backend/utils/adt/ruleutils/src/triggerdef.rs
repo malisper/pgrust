@@ -75,10 +75,14 @@ fn opt(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> Option<Da
     }
 }
 
-fn bytea_strings(d: Datum, n: usize) -> Vec<String> {
-    // SAFETY: non-null tgargs bytea datum addresses in-tuple bytes.
-    let v = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
-    let bytes = v.data();
+fn bytea_strings(d: Datum, n: usize) -> PgResult<Vec<String>> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null tgargs datum addresses in-tuple bytes; the length is
+    // read from its own header before slicing.
+    let raw = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let scratch = MemoryContext::new("pg_get_triggerdef tgargs");
+    let image = detoast::detoast_attr(scratch.mcx(), raw)?;
+    let bytes = &image[datum::varlena::VARHDRSZ..];
     let mut out = Vec::with_capacity(n);
     let mut p = 0usize;
     for _ in 0..n {
@@ -88,7 +92,7 @@ fn bytea_strings(d: Datum, n: usize) -> Vec<String> {
         );
         p = end + 1;
     }
-    out
+    Ok(out)
 }
 
 fn fetch_trigger(trigid: Oid) -> PgResult<Option<PgTriggerRow>> {
@@ -126,7 +130,7 @@ fn fetch_trigger(trigid: Oid) -> PgResult<Option<PgTriggerRow>> {
             tgnargs,
             tgattr: i16_array_at(req(td, tup, ANUM_PG_TRIGGER_TGATTR)),
             tgargs: match opt(td, tup, ANUM_PG_TRIGGER_TGARGS) {
-                Some(d) if tgnargs > 0 => bytea_strings(d, tgnargs as usize),
+                Some(d) if tgnargs > 0 => bytea_strings(d, tgnargs as usize)?,
                 _ => Vec::new(),
             },
             tgqual: match opt(td, tup, ANUM_PG_TRIGGER_TGQUAL) {

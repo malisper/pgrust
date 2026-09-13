@@ -630,3 +630,40 @@ fn lconv_strings_keep_non_utf8_bytes_under_sql_ascii() {
     let got = crate::lconv::db_encoding_convert(ctx.mcx(), PG_LATIN1, b"\xa3").unwrap();
     assert_eq!(got, b"\xa3");
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn default_collation_sb_case_uses_database_ctype() {
+    let lt = ["en_US.ISO8859-1", "en_US.ISO-8859-1", "en_US.iso88591"]
+        .iter()
+        .find_map(|n| libc_locale::make_libc_collator(n, n).ok());
+    let Some(lt) = lt else {
+        eprintln!("no en_US ISO8859-1 locale installed; skipping");
+        return;
+    };
+    let loc = |is_default: bool, lt: libc_locale::LibcLocale| PgLocale {
+        provider: COLLPROVIDER_LIBC,
+        deterministic: true,
+        collate_is_c: false,
+        ctype_is_c: false,
+        is_default,
+        builtin_locale: None,
+        builtin_casemap_full: false,
+        lt,
+        icu: crate::icu::IcuLocale::NONE,
+    };
+    let lower = |l: &PgLocale| {
+        let mut dst = [0u8; 4];
+        libc_locale::strlower_libc_sb(&mut dst, b"\xC4Ab", l);
+        dst[..3].to_vec()
+    };
+    let upper = |l: &PgLocale| {
+        let mut dst = [0u8; 4];
+        libc_locale::strupper_libc_sb(&mut dst, b"\xE4Ab", l);
+        dst[..3].to_vec()
+    };
+    assert_eq!(lower(&loc(true, lt)), b"\xE4ab");
+    assert_eq!(lower(&loc(false, lt)), b"\xE4ab");
+    assert_eq!(upper(&loc(true, lt)), b"\xC4AB");
+    assert_eq!(lower(&loc(true, libc_locale::LibcLocale::NONE)), b"\xC4ab");
+}

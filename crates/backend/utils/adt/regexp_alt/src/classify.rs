@@ -56,11 +56,12 @@ pub enum Compat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Classification {
     pub tier: Compat,
-    // POSIX longest-match mode is only NEEDED to disambiguate alternation
-    // (`a|ab`); with `|` absent every choice point is a greedy quantifier
-    // and Perl first-match backtracking order IS the leftmost-longest
-    // disambiguation, so the faster first-match engine configuration is
-    // provably identical (and keeps RE2's one-pass capture paths).
+    // POSIX longest-match mode disambiguates alternation (`a|ab`) and any
+    // greedy quantifier whose first-match preference can leave bytes a later
+    // optional atom would add (`a*(?:ab)?` on "aaab"). Only a pattern pinned
+    // at both ends (`^...$`) has a unique span, where first-match order is
+    // the leftmost-longest choice and the faster engine configuration (and
+    // RE2's one-pass capture paths) stays provably identical.
     pub needs_longest: bool,
 }
 
@@ -358,7 +359,17 @@ fn scan_are(pat: &[u8]) -> Classification {
     } else {
         Compat::WholeMatch
     };
-    Classification { tier, needs_longest: has_alternation }
+    let pinned = pat.first() == Some(&b'^') && ends_with_anchor(pat);
+    Classification { tier, needs_longest: has_alternation || (nquant > 0 && !pinned) }
+}
+
+// A trailing `$` not escaped by an odd backslash run.
+fn ends_with_anchor(pat: &[u8]) -> bool {
+    if pat.last() != Some(&b'$') {
+        return false;
+    }
+    let slashes = pat[..pat.len() - 1].iter().rev().take_while(|&&b| b == b'\\').count();
+    slashes % 2 == 0
 }
 
 #[cfg(test)]
@@ -506,11 +517,19 @@ mod tests {
     }
 
     #[test]
-    fn longest_mode_only_for_alternation() {
+    fn longest_mode_for_alternation_and_unpinned_quantifiers() {
         setup_utf8();
         let c = |p: &str| classify(p.as_bytes(), REG_ADVANCED);
         assert!(!c(r"^https?://(?:www\.)?([^/]+)/.*$").needs_longest);
-        assert!(!c("a*b+c{2,3}").needs_longest);
+        assert!(!c("^a*b+c{2,3}$").needs_longest);
+        assert!(!c("abc").needs_longest);
+        assert!(!c("^abc").needs_longest);
+        assert!(c("a*b+c{2,3}").needs_longest);
+        assert!(c("a*(?:ab)?").needs_longest);
+        assert!(c("^a*(?:ab)?").needs_longest);
+        assert!(c("a*(?:ab)?$").needs_longest);
+        assert!(c(r"^a*\$").needs_longest);
+        assert!(!c(r"^a*\\$").needs_longest);
         assert!(c("a|ab").needs_longest);
         assert!(c("(?:a|b)c").needs_longest);
         assert!(!classify(b"a|b", REG_QUOTE).needs_longest);
