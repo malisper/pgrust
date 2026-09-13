@@ -19,9 +19,12 @@ use types_guc::{
     PGC_USERSET, PGC_S_SESSION,
 };
 use types_nodes::node_tree::Node;
-use types_nodes::parsenodes::{VariableSetKind, VariableSetStmt};
+use types_nodes::parsenodes::{VariableSetKind, VariableSetStmt, ACL_SET};
 use types_nodes::rawnodes::ValUnion;
 use types_tuple::TupleDescData;
+
+#[allow(non_upper_case_globals)]
+pub(crate) const ParameterAclRelationId: Oid = 6243;
 
 pub use guc::registry::show_guc_option as ShowGUCOption;
 
@@ -115,8 +118,13 @@ pub fn ExecSetVariableStmt(stmt: &VariableSetStmt<'_>, is_top_level: bool) -> Pg
         }
     }
 
-    // C: InvokeObjectPostAlterHookArgStr(ParameterAclRelationId, ...) — the
-    // object_access_hook surface is absent by design in this port.
+    objectaccess::InvokeObjectPostAlterHookStrArg(
+        ParameterAclRelationId,
+        name,
+        ACL_SET as i32,
+        stmt.kind as Oid,
+        false,
+    )?;
     Ok(())
 }
 

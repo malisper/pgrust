@@ -288,3 +288,17 @@ fn read_failure_message_is_bare_strerror() {
         Some("could not read time zone file \"\": Is a directory")
     );
 }
+
+#[test]
+fn edited_file_is_reparsed_on_each_load() {
+    let dir = scratch_dir("reparse");
+    std::fs::write(format!("{dir}/Edit"), "ZZZ 3600\n").unwrap();
+    let first = load_tzoffsets_from(&dir, "Edit").unwrap();
+    assert_eq!(find(first, "zzz").value, 3600);
+    assert!(std::ptr::eq(first, load_tzoffsets_from(&dir, "Edit").unwrap()));
+    std::fs::write(format!("{dir}/Edit"), "ZZZ 7200\n").unwrap();
+    let second = load_tzoffsets_from(&dir, "Edit").unwrap();
+    assert_eq!(find(second, "zzz").value, 7200);
+    std::fs::remove_file(format!("{dir}/Edit")).unwrap();
+    assert!(load_tzoffsets_from(&dir, "Edit").is_none());
+}

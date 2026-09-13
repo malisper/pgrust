@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 
 use elog::ereport;
+use types_core::Oid;
 use guc::name::guc_name_compare;
 use guc_file::{ConfigVariable, ParseConfigFp, CONF_FILE_START_DEPTH};
 use types_error::{
@@ -216,8 +217,13 @@ pub fn AlterSystemSetConfigFile(stmt: &AlterSystemStmt<'_>) -> PgResult<()> {
         replace_auto_config_value(&mut head, name, value.as_deref());
     }
 
-    // C: InvokeObjectPostAlterHookArgStr — the object_access_hook surface is
-    // absent by design in this port.
+    objectaccess::InvokeObjectPostAlterHookStrArg(
+        crate::ParameterAclRelationId,
+        name,
+        ACL_ALTER_SYSTEM as i32,
+        setstmt.kind as Oid,
+        false,
+    )?;
 
     // Crash safety: write + fsync a temp file, then atomically rename it into
     // place. A leftover temp file from a previous crash is truncated/reused.

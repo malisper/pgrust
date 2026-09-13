@@ -364,20 +364,34 @@ fn load_tzoffsets_from(dir: &str, filename: &str) -> Option<&'static ZoneAbbrevT
             is_dst: e.is_dst,
         });
     }
-    Some(ConvertTimeZoneAbbrevs(&views))
+    let entries: Vec<_> = array
+        .iter()
+        .map(|e| (e.abbrev.to_vec(), e.zone.map(<[u8]>::to_vec), e.offset, e.is_dst))
+        .collect();
+    let key = format!("{dir}/{filename}");
+    let mut tables = TABLES.lock().unwrap();
+    if let Some(cached) = tables.get(&key) {
+        if cached.entries == entries {
+            return Some(cached.table);
+        }
+    }
+    let table = ConvertTimeZoneAbbrevs(&views);
+    tables.insert(key, CachedTable { entries, table });
+    Some(table)
 }
 
-// C guc_mallocs a table per SET and frees it with the superseded extra;
-// the port hands out &'static tables, so they are interned per file name
-// (the timezonesets directory is finite) instead of leaked per SET.
-static TABLES: Mutex<BTreeMap<String, &'static ZoneAbbrevTable>> = Mutex::new(BTreeMap::new());
+struct CachedTable {
+    entries: Vec<(Vec<u8>, Option<Vec<u8>>, i32, bool)>,
+    table: &'static ZoneAbbrevTable,
+}
+
+// C guc_mallocs a table per SET and frees it with the superseded extra; the
+// port hands out &'static tables, so a parse whose entries match the interned
+// table for that file reuses it (the file is still read on every call, as in
+// C: edits and removals are seen by the next SET).
+static TABLES: Mutex<BTreeMap<String, CachedTable>> = Mutex::new(BTreeMap::new());
 
 /// On failure returns None with the details in the GUC check-error slots.
 pub fn load_tzoffsets(filename: &str) -> Option<&'static ZoneAbbrevTable> {
-    if let Some(tbl) = TABLES.lock().unwrap().get(filename) {
-        return Some(*tbl);
-    }
-    let dir = tzsets_dir();
-    let tbl = load_tzoffsets_from(dir, filename)?;
-    Some(*TABLES.lock().unwrap().entry(filename.to_string()).or_insert(tbl))
+    load_tzoffsets_from(tzsets_dir(), filename)
 }

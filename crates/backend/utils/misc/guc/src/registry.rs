@@ -1575,11 +1575,34 @@ fn current_value_differs(record: &GucVariable, newval: &config_var_val) -> bool 
     }
 }
 
-// C fires the assign hook, then writes *conf->variable (guc.c:3759). Here the
-// value is written inline and the hook is deferred past the store borrow: a
-// hook may recursively re-enter set_config_option (assign_session_authorization
-// -> SetOuterUserId -> SetConfigOption("is_superuser")), which would re-borrow
-// the RefCell store.
+// C fires the assign hook, then writes *conf->variable (guc.c:3759). The hook
+// is deferred past the store borrow (a hook may recursively re-enter
+// set_config_option: assign_session_authorization -> SetOuterUserId ->
+// SetConfigOption("is_superuser"), which would re-borrow the RefCell store), so
+// the backing write is deferred with it to keep C's order: a hook still sees
+// the old value in its variable.
+fn defer_assign<T: Copy + 'static>(
+    variable: &'static guc_tables::GucSlot<guc_tables::GucVarAccessors<T>>,
+    hook: Option<fn(T, Option<&GucHookExtra>)>,
+    v: T,
+    extra: Option<SharedExtra>,
+) -> Option<DeferredAssignHook> {
+    match hook {
+        Some(f) => Some(Box::new(move || {
+            f(v, extra.as_deref());
+            if variable.installed() {
+                variable.write(v);
+            }
+        }) as DeferredAssignHook),
+        None => {
+            if variable.installed() {
+                variable.write(v);
+            }
+            None
+        }
+    }
+}
+
 fn apply_value(
     record: &mut GucVariable,
     newval: config_var_val,
@@ -1590,53 +1613,40 @@ fn apply_value(
     let deferred: Option<DeferredAssignHook> = match (&mut *record, newval) {
         (GucVariable::Bool(c), config_var_val::Boolval(v)) => {
             c.value = Some(v);
-            if c.variable.installed() {
-                c.variable.write(v);
-            }
-            installed_hook(c.assign_hook).map(|f| {
-                let extra = extra.clone();
-                Box::new(move || f(v, extra.as_deref())) as DeferredAssignHook
-            })
+            defer_assign(c.variable, installed_hook(c.assign_hook), v, extra.clone())
         }
         (GucVariable::Int(c), config_var_val::Intval(v)) => {
             c.value = Some(v);
-            if c.variable.installed() {
-                c.variable.write(v);
-            }
-            installed_hook(c.assign_hook).map(|f| {
-                let extra = extra.clone();
-                Box::new(move || f(v, extra.as_deref())) as DeferredAssignHook
-            })
+            defer_assign(c.variable, installed_hook(c.assign_hook), v, extra.clone())
         }
         (GucVariable::Real(c), config_var_val::Realval(v)) => {
             c.value = Some(v);
-            if c.variable.installed() {
-                c.variable.write(v);
-            }
-            installed_hook(c.assign_hook).map(|f| {
-                let extra = extra.clone();
-                Box::new(move || f(v, extra.as_deref())) as DeferredAssignHook
-            })
+            defer_assign(c.variable, installed_hook(c.assign_hook), v, extra.clone())
         }
         (GucVariable::String(c), config_var_val::Stringval(s)) => {
             c.value = Some(s.clone());
-            if c.variable.installed() {
-                c.variable.write(s.clone());
+            let variable = c.variable;
+            match installed_hook(c.assign_hook) {
+                Some(f) => {
+                    let extra = extra.clone();
+                    Some(Box::new(move || {
+                        f(s.as_deref(), extra.as_deref());
+                        if variable.installed() {
+                            variable.write(s);
+                        }
+                    }) as DeferredAssignHook)
+                }
+                None => {
+                    if variable.installed() {
+                        variable.write(s);
+                    }
+                    None
+                }
             }
-            installed_hook(c.assign_hook).map(|f| {
-                let extra = extra.clone();
-                Box::new(move || f(s.as_deref(), extra.as_deref())) as DeferredAssignHook
-            })
         }
         (GucVariable::Enum(c), config_var_val::Enumval(v)) => {
             c.value = Some(v);
-            if c.variable.installed() {
-                c.variable.write(v);
-            }
-            installed_hook(c.assign_hook).map(|f| {
-                let extra = extra.clone();
-                Box::new(move || f(v, extra.as_deref())) as DeferredAssignHook
-            })
+            defer_assign(c.variable, installed_hook(c.assign_hook), v, extra.clone())
         }
         _ => None,
     };

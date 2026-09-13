@@ -24,6 +24,10 @@ guc = { path = "../guc" }
 guc_file = { path = "../guc_file" }
 guc_seams = { path = "../guc_seams" }
 guc_tables = { path = "../guc_tables" }
+objectaccess = { path = "../../../catalog/objectaccess" }
+funcapi_srf = { path = "../../fmgr/funcapi_srf" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+typcache_seams = { path = "../../cache/typcache_seams" }
 mcx = { path = "../../../../_support/mcx" }
 miscinit = { path = "../../init/miscinit" }
 snapmgr_seams = { path = "../../time/snapmgr_seams" }

@@ -99,7 +99,7 @@ fn AtEOSubXact_PgStat_DroppedStats(
         return;
     }
     pgstat_get_xact_stack_level_mut(st, nestDepth - 1);
-    while let Some(pending_drop) = xact_state.pending_drops.pop() {
+    for pending_drop in xact_state.pending_drops.drain(..) {
         if !isCommit && pending_drop.is_create {
             drop_entry_local(st, &pending_drop.item);
         } else if isCommit {

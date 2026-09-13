@@ -6,10 +6,12 @@ use guc::registry::GucVariable;
 use guc::units::{fmt_g, get_config_unit_name};
 use guc_tables::{config_group_names, config_type_names, GucContext_Names, GucSource_Names};
 use mcx::Mcx;
-use types_core::TEXTOID;
+use tupdesc::{CreateTemplateTupleDesc, TupleDescInitEntry};
+use types_tuple::TupleDescData;
+use types_core::{Oid, BOOLOID, INT4OID, RECORDOID, TEXTARRAYOID, TEXTOID};
 use types_error::PgResult;
 use types_fmgr::{
-    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+    byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 use types_guc::{GUC_NO_SHOW_ALL, PGC_S_FILE};
 
@@ -35,119 +37,182 @@ fn opt_text_datum(
     Ok(())
 }
 
+const SETTINGS_ATTS: [(&str, Oid); NUM_PG_SETTINGS_ATTS] = [
+    ("name", TEXTOID),
+    ("setting", TEXTOID),
+    ("unit", TEXTOID),
+    ("category", TEXTOID),
+    ("short_desc", TEXTOID),
+    ("extra_desc", TEXTOID),
+    ("context", TEXTOID),
+    ("vartype", TEXTOID),
+    ("source", TEXTOID),
+    ("min_val", TEXTOID),
+    ("max_val", TEXTOID),
+    ("enumvals", TEXTARRAYOID),
+    ("boot_val", TEXTOID),
+    ("reset_val", TEXTOID),
+    ("sourcefile", TEXTOID),
+    ("sourceline", INT4OID),
+    ("pending_restart", BOOLOID),
+];
+
+struct ShowAllSettings {
+    names: Vec<String>,
+}
+
+fn setting_tuple(mcx: Mcx<'_>, desc: &TupleDescData<'_>, conf: &GucVariable) -> PgResult<Vec<u8>> {
+    let gen = conf.gen();
+    let mut values = [Datum::null(); NUM_PG_SETTINGS_ATTS];
+    let mut nulls = [false; NUM_PG_SETTINGS_ATTS];
+
+    values[0] = text_datum(mcx, gen.name)?;
+    values[1] = text_datum(mcx, &ShowGUCOption(conf, false))?;
+    opt_text_datum(mcx, get_config_unit_name(gen.flags), &mut values, &mut nulls, 2)?;
+    values[3] = text_datum(mcx, config_group_names[gen.group as usize])?;
+    opt_text_datum(mcx, gen.short_desc, &mut values, &mut nulls, 4)?;
+    opt_text_datum(mcx, gen.long_desc, &mut values, &mut nulls, 5)?;
+    values[6] = text_datum(mcx, GucContext_Names[gen.context as usize])?;
+    values[7] = text_datum(mcx, config_type_names[gen.vartype as usize])?;
+    values[8] = text_datum(mcx, GucSource_Names[gen.source as usize])?;
+
+    let mut enum_arr = None;
+    match conf {
+        GucVariable::Bool(c) => {
+            nulls[9] = true;
+            nulls[10] = true;
+            nulls[11] = true;
+            values[12] = text_datum(mcx, if c.boot_val { "on" } else { "off" })?;
+            values[13] = text_datum(mcx, if c.reset_val { "on" } else { "off" })?;
+        }
+        GucVariable::Int(c) => {
+            values[9] = text_datum(mcx, &c.min.to_string())?;
+            values[10] = text_datum(mcx, &c.max.to_string())?;
+            nulls[11] = true;
+            values[12] = text_datum(mcx, &c.boot_val.to_string())?;
+            values[13] = text_datum(mcx, &c.reset_val.to_string())?;
+        }
+        GucVariable::Real(c) => {
+            values[9] = text_datum(mcx, &fmt_g(c.min))?;
+            values[10] = text_datum(mcx, &fmt_g(c.max))?;
+            nulls[11] = true;
+            values[12] = text_datum(mcx, &fmt_g(c.boot_val))?;
+            values[13] = text_datum(mcx, &fmt_g(c.reset_val))?;
+        }
+        GucVariable::String(c) => {
+            nulls[9] = true;
+            nulls[10] = true;
+            nulls[11] = true;
+            opt_text_datum(mcx, c.boot_val.as_deref(), &mut values, &mut nulls, 12)?;
+            opt_text_datum(mcx, c.reset_val.as_deref(), &mut values, &mut nulls, 13)?;
+        }
+        GucVariable::Enum(c) => {
+            nulls[9] = true;
+            nulls[10] = true;
+            let mut names: Vec<&str> =
+                c.entries().iter().filter(|e| !e.hidden).map(|e| e.name).collect();
+            // C's config_enum_get_options("{\"", "\"}", "\",\"") yields
+            // {""} (one empty element) when every entry is hidden.
+            if names.is_empty() {
+                names.push("");
+            }
+            let mut elems = Vec::with_capacity(names.len());
+            for n in &names {
+                elems.push(text_datum(mcx, n)?);
+            }
+            let arr = construct_array(mcx, &elems, TEXTOID, -1, false, b'i')?;
+            values[11] = Datum::from_usize(arr.as_ptr() as usize);
+            enum_arr = Some(arr);
+            values[12] = text_datum(
+                mcx,
+                config_enum_lookup_by_value(c, c.boot_val)
+                    .expect("could not find enum option for boot_val"),
+            )?;
+            values[13] = text_datum(
+                mcx,
+                config_enum_lookup_by_value(c, c.reset_val)
+                    .expect("could not find enum option for reset_val"),
+            )?;
+        }
+    }
+
+    if gen.source == PGC_S_FILE
+        && adt_acl::has_privs_of_role(miscinit::GetUserId(), ROLE_PG_READ_ALL_SETTINGS)?
+    {
+        opt_text_datum(mcx, gen.sourcefile.as_deref(), &mut values, &mut nulls, 14)?;
+        values[15] = Datum::from_i32(gen.sourceline);
+    } else {
+        nulls[14] = true;
+        nulls[15] = true;
+    }
+
+    values[16] = Datum::from_bool(gen.status & GUC_PENDING_RESTART != 0);
+
+    let tuple = heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+    let image = tuple.image().to_vec();
+    drop(enum_arr);
+    Ok(image)
+}
+
+// C: show_all_settings — value-per-call: the variable list is fixed at the
+// first call, each row is extracted when it is returned.
 pub fn fc_show_all_settings(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("show_all_settings: resolved FmgrInfo required");
+    if !flinfo.has_fn_extra() {
+        let mut names: Vec<String> = guc::store::with_store(|reg| {
+            reg.iter().map(|v| v.gen().name.to_string()).collect()
+        })
+        .expect("GUC store not initialized");
+        names.sort_by(|a, b| guc::guc_name_compare(a, b));
+        let fctx = funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.max_calls = names.len() as u64;
+        fctx.user_fctx = Some(Box::new(ShowAllSettings { names }));
+    }
+
     // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
-    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
-    debug_assert_eq!(srf.tupdesc.natts as usize, NUM_PG_SETTINGS_ATTS);
+    let mut desc = CreateTemplateTupleDesc(mcx, NUM_PG_SETTINGS_ATTS as i32)?;
+    for (i, (name, typid)) in SETTINGS_ATTS.iter().enumerate() {
+        TupleDescInitEntry(&mut desc, i as i16 + 1, Some(name), *typid, -1, 0)?;
+    }
+    desc.tdtypeid = RECORDOID;
+    typcache_seams::assign_record_type_typmod::call(&mut desc)?;
 
-    guc::store::with_store(|reg| -> PgResult<()> {
-        // C's get_guc_variables array is kept sorted by guc_name_compare.
-        let mut sorted: Vec<&GucVariable> = reg.iter().collect();
-        sorted.sort_by(|a, b| guc::guc_name_compare(a.gen().name, b.gen().name));
-        for conf in sorted {
-            let gen = conf.gen();
-            if gen.flags & GUC_NO_SHOW_ALL != 0 || !ConfigOptionIsVisible(conf)? {
-                continue;
+    loop {
+        let fctx = funcapi_srf::per_MultiFuncCall(flinfo);
+        let name = fctx
+            .user_fctx
+            .as_ref()
+            .expect("show_all_settings: names set at first call")
+            .downcast_ref::<ShowAllSettings>()
+            .expect("show_all_settings: user_fctx is ShowAllSettings")
+            .names
+            .get(fctx.call_cntr as usize)
+            .cloned();
+        let Some(name) = name else {
+            return Ok(funcapi_srf::srf_return_done(flinfo, fcinfo));
+        };
+        let image = guc::store::with_store(|reg| -> PgResult<Option<Vec<u8>>> {
+            let Some(conf) = reg.find_option(&name) else {
+                return Ok(None);
+            };
+            if conf.gen().flags & GUC_NO_SHOW_ALL != 0 || !ConfigOptionIsVisible(conf)? {
+                return Ok(None);
             }
-
-            let mut values = [Datum::null(); NUM_PG_SETTINGS_ATTS];
-            let mut nulls = [false; NUM_PG_SETTINGS_ATTS];
-
-            values[0] = text_datum(mcx, gen.name)?;
-            values[1] = text_datum(mcx, &ShowGUCOption(conf, false))?;
-            opt_text_datum(mcx, get_config_unit_name(gen.flags), &mut values, &mut nulls, 2)?;
-            values[3] = text_datum(mcx, config_group_names[gen.group as usize])?;
-            opt_text_datum(mcx, gen.short_desc, &mut values, &mut nulls, 4)?;
-            opt_text_datum(mcx, gen.long_desc, &mut values, &mut nulls, 5)?;
-            values[6] = text_datum(mcx, GucContext_Names[gen.context as usize])?;
-            values[7] = text_datum(mcx, config_type_names[gen.vartype as usize])?;
-            values[8] = text_datum(mcx, GucSource_Names[gen.source as usize])?;
-
-            let mut enum_arr = None;
-            match conf {
-                GucVariable::Bool(c) => {
-                    nulls[9] = true;
-                    nulls[10] = true;
-                    nulls[11] = true;
-                    values[12] = text_datum(mcx, if c.boot_val { "on" } else { "off" })?;
-                    values[13] = text_datum(mcx, if c.reset_val { "on" } else { "off" })?;
-                }
-                GucVariable::Int(c) => {
-                    values[9] = text_datum(mcx, &c.min.to_string())?;
-                    values[10] = text_datum(mcx, &c.max.to_string())?;
-                    nulls[11] = true;
-                    values[12] = text_datum(mcx, &c.boot_val.to_string())?;
-                    values[13] = text_datum(mcx, &c.reset_val.to_string())?;
-                }
-                GucVariable::Real(c) => {
-                    values[9] = text_datum(mcx, &fmt_g(c.min))?;
-                    values[10] = text_datum(mcx, &fmt_g(c.max))?;
-                    nulls[11] = true;
-                    values[12] = text_datum(mcx, &fmt_g(c.boot_val))?;
-                    values[13] = text_datum(mcx, &fmt_g(c.reset_val))?;
-                }
-                GucVariable::String(c) => {
-                    nulls[9] = true;
-                    nulls[10] = true;
-                    nulls[11] = true;
-                    opt_text_datum(mcx, c.boot_val.as_deref(), &mut values, &mut nulls, 12)?;
-                    opt_text_datum(mcx, c.reset_val.as_deref(), &mut values, &mut nulls, 13)?;
-                }
-                GucVariable::Enum(c) => {
-                    nulls[9] = true;
-                    nulls[10] = true;
-                    let mut names: Vec<&str> =
-                        c.entries().iter().filter(|e| !e.hidden).map(|e| e.name).collect();
-                    // C's config_enum_get_options("{\"", "\"}", "\",\"") yields
-                    // {""} (one empty element) when every entry is hidden.
-                    if names.is_empty() {
-                        names.push("");
-                    }
-                    let mut elems = Vec::with_capacity(names.len());
-                    for n in &names {
-                        elems.push(text_datum(mcx, n)?);
-                    }
-                    let arr = construct_array(mcx, &elems, TEXTOID, -1, false, b'i')?;
-                    values[11] = Datum::from_usize(arr.as_ptr() as usize);
-                    enum_arr = Some(arr);
-                    values[12] = text_datum(
-                        mcx,
-                        config_enum_lookup_by_value(c, c.boot_val)
-                            .expect("could not find enum option for boot_val"),
-                    )?;
-                    values[13] = text_datum(
-                        mcx,
-                        config_enum_lookup_by_value(c, c.reset_val)
-                            .expect("could not find enum option for reset_val"),
-                    )?;
-                }
+            Ok(Some(setting_tuple(mcx, &desc, conf)?))
+        })
+        .expect("GUC store not initialized")?;
+        match image {
+            Some(image) => {
+                let d = byref_result(mcx, &image)?;
+                return Ok(funcapi_srf::srf_return_next(flinfo, fcinfo, d));
             }
-
-            if gen.source == PGC_S_FILE
-                && adt_acl::has_privs_of_role(miscinit::GetUserId(), ROLE_PG_READ_ALL_SETTINGS)?
-            {
-                opt_text_datum(mcx, gen.sourcefile.as_deref(), &mut values, &mut nulls, 14)?;
-                values[15] = Datum::from_i32(gen.sourceline);
-            } else {
-                nulls[14] = true;
-                nulls[15] = true;
-            }
-
-            values[16] = Datum::from_bool(gen.status & GUC_PENDING_RESTART != 0);
-
-            srf.putvalues(&values, &nulls)?;
-            drop(enum_arr);
+            None => funcapi_srf::per_MultiFuncCall(flinfo).call_cntr += 1,
         }
-        Ok(())
-    })
-    .expect("GUC store not initialized")?;
-
-    Ok(srf.finish(fcinfo))
+    }
 }
 
 // C: show_all_file_settings — re-scans the config files (apply_settings

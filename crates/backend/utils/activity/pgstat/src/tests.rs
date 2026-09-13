@@ -373,6 +373,23 @@ fn subxact_commit_passes_drops_to_parent() {
 }
 
 #[test]
+fn subxact_commit_preserves_drop_order() {
+    let _lock = setup();
+    NEST_LEVEL.with(|c| c.set(2));
+    relation::pgstat_drop_relation(2010, false);
+    relation::pgstat_drop_relation(2011, false);
+    relation::pgstat_drop_relation(2012, false);
+    xact::AtEOSubXact_PgStat(true, 2);
+    NEST_LEVEL.with(|c| c.set(1));
+
+    let ctx = MemoryContext::new("test");
+    let commit_items = xact::pgstat_get_transactional_drops(ctx.mcx(), true).unwrap();
+    let order: Vec<u64> = commit_items.iter().map(|i| i.objid).collect();
+    assert_eq!(order, vec![2010, 2011, 2012]);
+    xact::AtEOXact_PgStat(true, false);
+}
+
+#[test]
 fn subxact_abort_drops_created_entries_pending() {
     let _lock = setup();
     NEST_LEVEL.with(|c| c.set(2));
