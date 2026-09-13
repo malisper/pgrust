@@ -225,7 +225,7 @@ fn array_ops_fmgr_elem_compare_dispatches_btree_cmp_proc() {
     // stand-in): compare() routes through fmgr with the stored cmp proc.
     let col = GinColState::array_ops(GinCompareFn::Fmgr(842), true, 8);
     let cmp = |x: i64, y: i64| {
-        crate::opclass::compare(&col, Datum::from_i64(x), Datum::from_i64(y))
+        crate::opclass::compare(&col, Datum::from_i64(x), Datum::from_i64(y)).unwrap()
     };
     assert_eq!(cmp(1, 2), -1);
     assert_eq!(cmp(2, 1), 1);

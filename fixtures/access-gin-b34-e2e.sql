@@ -1,0 +1,74 @@
+-- bugs/batch-34-backend-access-gin: C-vs-pgrust parity for the fixes in
+-- access/gin. Expected file captured from C 18.6
+-- (scripts/regress-diff.sh --capture).
+\set VERBOSITY verbose
+
+-- A custom GIN comparator that raises an ERROR: C propagates it through
+-- FunctionCall2Coll (build sort, insert-time extraction, pending-list and
+-- entry-tree scans, bulk dump); it never becomes a crash.
+CREATE FUNCTION b34_int4cmp(int4, int4) RETURNS int4 LANGUAGE sql IMMUTABLE
+  AS 'SELECT CASE WHEN current_setting(''b34.cmp_fail'', true) = ''on'' THEN 1 / (length(current_setting(''b34.cmp_fail'', true)) - 2) ELSE btint4cmp($1, $2) END';
+CREATE OPERATOR CLASS b34_int4arr_ops FOR TYPE int4[] USING gin AS
+  OPERATOR 1 &&(anyarray,anyarray), OPERATOR 2 @>(anyarray,anyarray),
+  OPERATOR 3 <@(anyarray,anyarray), OPERATOR 4 =(anyarray,anyarray),
+  FUNCTION 1 b34_int4cmp(int4,int4),
+  FUNCTION 2 ginarrayextract(anyarray,internal,internal),
+  FUNCTION 3 ginqueryarrayextract(anyarray,internal,smallint,internal,internal,internal,internal),
+  FUNCTION 4 ginarrayconsistent(internal,smallint,anyarray,integer,internal,internal,internal,internal),
+  FUNCTION 6 ginarraytriconsistent(internal,smallint,anyarray,integer,internal,internal,internal),
+  STORAGE int4;
+CREATE TABLE b34_arr(a int4[]);
+INSERT INTO b34_arr VALUES (ARRAY[1,2]), (ARRAY[2,3]), (ARRAY[5]);
+SET b34.cmp_fail = on;
+CREATE INDEX b34_arr_i ON b34_arr USING gin (a b34_int4arr_ops) WITH (fastupdate=off);
+SET b34.cmp_fail = off;
+CREATE INDEX b34_arr_i ON b34_arr USING gin (a b34_int4arr_ops) WITH (fastupdate=off);
+SET b34.cmp_fail = on;
+INSERT INTO b34_arr VALUES (ARRAY[7,8]);
+SET b34.cmp_fail = off;
+INSERT INTO b34_arr VALUES (ARRAY[7,8]);
+SET enable_seqscan = off;
+SET b34.cmp_fail = on;
+SELECT * FROM b34_arr WHERE a @> ARRAY[7] ORDER BY 1;
+SET b34.cmp_fail = off;
+SELECT * FROM b34_arr WHERE a @> ARRAY[7] ORDER BY 1;
+ALTER INDEX b34_arr_i SET (fastupdate = on);
+INSERT INTO b34_arr VALUES (ARRAY[9,10]);
+SET b34.cmp_fail = on;
+SELECT * FROM b34_arr WHERE a @> ARRAY[9] ORDER BY 1;
+SET b34.cmp_fail = off;
+SELECT * FROM b34_arr WHERE a @> ARRAY[9] ORDER BY 1;
+RESET enable_seqscan;
+CREATE EXTENSION IF NOT EXISTS amcheck;
+SET b34.cmp_fail = on;
+SELECT gin_index_check('b34_arr_i');
+SET b34.cmp_fail = off;
+SELECT gin_index_check('b34_arr_i');
+DROP TABLE b34_arr;
+DROP OPERATOR CLASS b34_int4arr_ops USING gin;
+DROP FUNCTION b34_int4cmp(int4, int4);
+
+-- extractQuery's partial-match flags are honored only when the column has a
+-- comparePartial support function (ginFillScanKey); without proc 5 a prefix
+-- tsquery runs as an exact-entry scan.
+CREATE OPERATOR CLASS b34_ts_nopfx_ops FOR TYPE tsvector USING gin AS
+  OPERATOR 1 @@(tsvector,tsquery),
+  FUNCTION 1 gin_cmp_tslexeme(text,text),
+  FUNCTION 2 gin_extract_tsvector(tsvector,internal,internal),
+  FUNCTION 3 gin_extract_tsquery(tsvector,internal,smallint,internal,internal,internal,internal),
+  FUNCTION 4 gin_tsquery_consistent(internal,smallint,tsvector,integer,internal,internal,internal,internal),
+  FUNCTION 6 gin_tsquery_triconsistent(internal,smallint,tsvector,integer,internal,internal,internal),
+  STORAGE text;
+CREATE TABLE b34_ts(v tsvector);
+INSERT INTO b34_ts VALUES ('foo'::tsvector), ('bar'::tsvector), ('foobar'::tsvector), ('foo bar'::tsvector);
+CREATE INDEX b34_ts_i ON b34_ts USING gin (v b34_ts_nopfx_ops) WITH (fastupdate=off);
+SET enable_seqscan = off;
+SELECT * FROM b34_ts WHERE v @@ 'foo:*'::tsquery ORDER BY 1;
+SELECT * FROM b34_ts WHERE v @@ 'foo'::tsquery ORDER BY 1;
+SELECT * FROM b34_ts WHERE v @@ 'fo:* & bar'::tsquery ORDER BY 1;
+ALTER INDEX b34_ts_i SET (fastupdate = on);
+INSERT INTO b34_ts VALUES ('food'::tsvector);
+SELECT * FROM b34_ts WHERE v @@ 'foo:*'::tsquery ORDER BY 1;
+RESET enable_seqscan;
+DROP TABLE b34_ts;
+DROP OPERATOR CLASS b34_ts_nopfx_ops USING gin;

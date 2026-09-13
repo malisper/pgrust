@@ -320,7 +320,7 @@ impl<'s> BuildAccumulator<'s> {
         }
         let entries = &self.entries;
         let state = self.state;
-        self.dump_order.sort_by(|&a, &b| {
+        crate::util::try_sort_by(&mut self.dump_order, |&a, &b| {
             let ea = &entries[a as usize];
             let eb = &entries[b as usize];
             let c = ginCompareAttEntries(
@@ -331,9 +331,9 @@ impl<'s> BuildAccumulator<'s> {
                 eb.attnum,
                 eb.key,
                 eb.category,
-            );
-            c.cmp(&0).then_with(|| a.cmp(&b))
-        });
+            )?;
+            Ok(c.cmp(&0).then_with(|| a.cmp(&b)))
+        })?;
         let mut kept = 0;
         for pos in 0..self.dump_order.len() {
             let idx = self.dump_order[pos] as usize;
@@ -343,7 +343,7 @@ impl<'s> BuildAccumulator<'s> {
                 let b = &self.entries[idx];
                 if ginCompareAttEntries(
                     &state, a.attnum, a.key, a.category, b.attnum, b.key, b.category,
-                ) == 0 {
+                )? == 0 {
                     // The index tie-break retains C's first-inserted key image.
                     let (before, after) = self.entries.split_at_mut(idx);
                     let dst = &mut before[previous];

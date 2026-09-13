@@ -1,6 +1,7 @@
 //! ginutil.c: GinState init, page/buffer initialization, entry compare and
 //! extraction, metapage stats.
 
+use core::cmp::Ordering;
 use ::bufmgr_seams as bm;
 use ::datum::Datum;
 use ::gin_vocab::*;
@@ -520,12 +521,12 @@ pub fn ginCompareEntries(
     category_a: GinNullCategory,
     b: Datum,
     category_b: GinNullCategory,
-) -> i32 {
+) -> PgResult<i32> {
     if category_a != category_b {
-        return if category_a < category_b { -1 } else { 1 };
+        return Ok(if category_a < category_b { -1 } else { 1 });
     }
     if category_a != GIN_CAT_NORM_KEY {
-        return 0;
+        return Ok(0);
     }
     opclass::compare(state.col(attnum), a, b)
 }
@@ -539,11 +540,51 @@ pub fn ginCompareAttEntries(
     attnum_b: OffsetNumber,
     b: Datum,
     category_b: GinNullCategory,
-) -> i32 {
+) -> PgResult<i32> {
     if attnum_a != attnum_b {
-        return if attnum_a < attnum_b { -1 } else { 1 };
+        return Ok(if attnum_a < attnum_b { -1 } else { 1 });
     }
     ginCompareEntries(state, attnum_a, a, category_a, b, category_b)
+}
+
+// qsort_arg with a comparator that can raise (an opclass compareFn is any
+// fmgr function): the first error aborts the sort and is returned; the
+// comparator is never called again once it has failed. Stable bottom-up merge.
+pub(crate) fn try_sort_by<T: Copy>(
+    items: &mut [T],
+    mut cmp: impl FnMut(&T, &T) -> PgResult<Ordering>,
+) -> PgResult<()> {
+    let n = items.len();
+    if n < 2 {
+        return Ok(());
+    }
+    let mut buf: Vec<T> = items.to_vec();
+    let mut width = 1;
+    while width < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = (lo + width).min(n);
+            let hi = (lo + 2 * width).min(n);
+            let (mut i, mut j, mut k) = (lo, mid, lo);
+            while i < mid && j < hi {
+                if cmp(&items[j], &items[i])? == Ordering::Less {
+                    buf[k] = items[j];
+                    j += 1;
+                } else {
+                    buf[k] = items[i];
+                    i += 1;
+                }
+                k += 1;
+            }
+            buf[k..k + (mid - i)].copy_from_slice(&items[i..mid]);
+            k += mid - i;
+            buf[k..k + (hi - j)].copy_from_slice(&items[j..hi]);
+            lo = hi;
+        }
+        items.copy_from_slice(&buf);
+        width *= 2;
+    }
+    Ok(())
 }
 
 /// ginExtractEntries: keys sorted + de-duplicated, with null categories.
@@ -595,17 +636,17 @@ pub fn ginExtractEntries<'mcx>(
             keydata.push((entries[i], categories[i]));
         }
         let mut have_dups = false;
-        keydata.sort_by(|a, b| {
-            let r = ginCompareEntries(state, attnum, a.0, a.1, b.0, b.1);
+        try_sort_by(&mut keydata, |a, b| {
+            let r = ginCompareEntries(state, attnum, a.0, a.1, b.0, b.1)?;
             if r == 0 {
                 have_dups = true;
             }
-            r.cmp(&0)
-        });
+            Ok(r.cmp(&0))
+        })?;
         if have_dups {
             let mut j = 0usize;
             for i in 1..keydata.len() {
-                if ginCompareEntries(state, attnum, keydata[j].0, keydata[j].1, keydata[i].0, keydata[i].1)
+                if ginCompareEntries(state, attnum, keydata[j].0, keydata[j].1, keydata[i].0, keydata[i].1)?
                     != 0
                 {
                     j += 1;

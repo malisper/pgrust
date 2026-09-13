@@ -68,7 +68,7 @@ fn fill_scan_entry(
                     prev.queryCategory,
                     query_key,
                     query_category,
-                ) == 0
+                )? == 0
             {
                 return Ok(i as u32);
             }
@@ -183,6 +183,7 @@ fn fill_scan_key<'scan>(
     let key_idx = work.keys.len();
     work.keys.push(key);
 
+    let can_partial_match = state.col(attnum).can_partial_match;
     for i in 0..n {
         let id = fill_scan_entry(
             state,
@@ -193,7 +194,7 @@ fn fill_scan_key<'scan>(
             query_values[i],
             btree_orig,
             query_categories[i],
-            partial_match.get(i).copied().unwrap_or(false),
+            can_partial_match && partial_match.get(i).copied().unwrap_or(false),
         )?;
         work.keys[key_idx].scanEntry.push(id);
     }

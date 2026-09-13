@@ -187,8 +187,8 @@ fn cmp_text_keys(a: Datum, b: Datum, f: impl Fn(&[u8], &[u8]) -> i32) -> i32 {
 }
 
 /// compareFn: total order on two non-null key datums.
-pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
-    match col.compare {
+pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> PgResult<i32> {
+    Ok(match col.compare {
         GinCompareFn::Int2 => {
             let (x, y) = (a.as_u64() as i16, b.as_u64() as i16);
             if x < y {
@@ -241,9 +241,8 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
         // compareFn in GinState; GinColState is Copy so we re-resolve the
         // proc oid per compare — cost-only, initGinState already resolved it
         // and raised any lookup error catchably). The callee's own argument
-        // fetch detoasts compressed keys, as C's PG_GETARG does. A
-        // comparator-raised error panics, like the sibling arms'
-        // infallible-compare pattern.
+        // fetch detoasts compressed keys, as C's PG_GETARG does; a
+        // comparator-raised ERROR propagates as C's FunctionCall2Coll does.
         GinCompareFn::Fmgr(cmp_proc) => {
             let mut finfo = ::fmgr_seams::fmgr_info::call(cmp_proc)
                 .expect("GIN compare support function resolved at initGinState");
@@ -254,11 +253,10 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
                 cx.mcx(),
                 a,
                 b,
-            )
-            .expect("GIN compare support function failed")
+            )?
             .as_i32()
         }
-    }
+    })
 }
 
 /// comparePartialFn. `orig` is btree_gin's original query datum (the entry's

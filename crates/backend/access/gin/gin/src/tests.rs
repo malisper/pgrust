@@ -161,11 +161,11 @@ fn compare_entries_category_order() {
     let state = one_col_state(GinColState::jsonb_ops(100));
     use crate::util::ginCompareEntries;
     let d = ::datum::Datum::null();
-    assert!(ginCompareEntries(&state, 1, d, GIN_CAT_EMPTY_QUERY, d, GIN_CAT_NORM_KEY) < 0);
-    assert!(ginCompareEntries(&state, 1, d, GIN_CAT_NULL_KEY, d, GIN_CAT_NORM_KEY) > 0);
-    assert!(ginCompareEntries(&state, 1, d, GIN_CAT_NULL_ITEM, d, GIN_CAT_EMPTY_ITEM) > 0);
+    assert!(ginCompareEntries(&state, 1, d, GIN_CAT_EMPTY_QUERY, d, GIN_CAT_NORM_KEY).unwrap() < 0);
+    assert!(ginCompareEntries(&state, 1, d, GIN_CAT_NULL_KEY, d, GIN_CAT_NORM_KEY).unwrap() > 0);
+    assert!(ginCompareEntries(&state, 1, d, GIN_CAT_NULL_ITEM, d, GIN_CAT_EMPTY_ITEM).unwrap() > 0);
     assert_eq!(
-        ginCompareEntries(&state, 1, d, GIN_CAT_NULL_ITEM, d, GIN_CAT_NULL_ITEM),
+        ginCompareEntries(&state, 1, d, GIN_CAT_NULL_ITEM, d, GIN_CAT_NULL_ITEM).unwrap(),
         0
     );
 }
@@ -233,7 +233,7 @@ fn compare_detoasts_compressed_keys() {
 
     let col = ts_col();
     for (a, b, want) in [(&la, &la, 0), (&la, &lb, -1), (&lb, &la, 1)] {
-        let flat = crate::opclass::compare(&col, flat_key(mcx, a), flat_key(mcx, b));
+        let flat = crate::opclass::compare(&col, flat_key(mcx, a), flat_key(mcx, b)).unwrap();
         assert_eq!(flat.signum(), want, "flat/flat baseline");
         // Any mix of compressed sides must agree with the flat baseline.
         for (da, db) in [
@@ -241,7 +241,7 @@ fn compare_detoasts_compressed_keys() {
             (flat_key(mcx, a), pglz_key(mcx, b)),
             (pglz_key(mcx, a), pglz_key(mcx, b)),
         ] {
-            assert_eq!(crate::opclass::compare(&col, da, db).signum(), want);
+            assert_eq!(crate::opclass::compare(&col, da, db).unwrap().signum(), want);
         }
     }
 
@@ -255,9 +255,9 @@ fn compare_detoasts_compressed_keys() {
             support_collation: ::types_core::catalog::C_COLLATION_OID,
             ..col
         };
-        assert_eq!(crate::opclass::compare(&col, pglz_key(mcx, &la), flat_key(mcx, &la)), 0);
+        assert_eq!(crate::opclass::compare(&col, pglz_key(mcx, &la), flat_key(mcx, &la)).unwrap(), 0);
         assert_eq!(
-            crate::opclass::compare(&col, pglz_key(mcx, &la), pglz_key(mcx, &lb)).signum(),
+            crate::opclass::compare(&col, pglz_key(mcx, &la), pglz_key(mcx, &lb)).unwrap().signum(),
             -1
         );
     }
@@ -604,4 +604,28 @@ fn build_accumulator_comparator_equal_images_coalesce() {
     acc.begin_scan().unwrap();
     assert_eq!(acc.next_entry().unwrap().3,
         &[tid(2, 1), tid(3, 1), tid(4, 1), tid(5, 1), tid(6, 1), tid(7, 1), tid(8, 1), tid(9, 1)]);
+}
+
+#[test]
+fn try_sort_by_orders_stably_and_aborts_on_error() {
+    let mut v = [(3, 'a'), (1, 'b'), (2, 'c'), (1, 'd'), (3, 'e')];
+    crate::util::try_sort_by(&mut v, |a, b| Ok(a.0.cmp(&b.0))).unwrap();
+    assert_eq!(v, [(1, 'b'), (1, 'd'), (2, 'c'), (3, 'a'), (3, 'e')]);
+
+    let mut calls_after_failure = 0;
+    let mut failed = false;
+    let mut w = [5, 4, 3, 2, 1];
+    let err = crate::util::try_sort_by(&mut w, |a, b| {
+        if failed {
+            calls_after_failure += 1;
+        }
+        if *a == 3 || *b == 3 {
+            failed = true;
+            return Err(Box::new(::types_error::PgError::error("compare failed".to_string())));
+        }
+        Ok(a.cmp(b))
+    })
+    .unwrap_err();
+    assert_eq!(err.message(), "compare failed");
+    assert_eq!(calls_after_failure, 0);
 }

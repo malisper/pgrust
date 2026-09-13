@@ -423,7 +423,7 @@ fn check_entry_page<'a>(
                 parent_key_attnum,
                 parent_key,
                 parent_key_category,
-            ) < 0
+            )? < 0
         {
             // SAFETY: parenttup is a live owned tuple copy.
             let copy = unsafe { copy_itup_arena(amcx, parenttup)? };
@@ -489,7 +489,7 @@ fn check_entry_page<'a>(
                 current_attnum,
                 current_key,
                 current_key_category,
-            ) >= 0
+            )? >= 0
             {
                 return Err(corrupt(format!(
                     "index \"{}\" has wrong tuple order on entry tree page, block {}, offset {}, rightlink {}",
@@ -524,7 +524,7 @@ fn check_entry_page<'a>(
                 parent_key_attnum,
                 parent_key,
                 parent_key_category,
-            ) > 0
+            )? > 0
             {
                 cur.parenttup = gin_refind_parent(rel, cur.parentblk, cur.blkno, strategy, amcx)?;
 
@@ -552,7 +552,7 @@ fn check_entry_page<'a>(
                             new_attnum,
                             new_key,
                             cat,
-                        ) > 0
+                        )? > 0
                         {
                             return Err(corrupt(format!(
                                 "index \"{}\" has inconsistent records on page {} offset {}",

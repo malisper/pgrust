@@ -645,7 +645,7 @@ impl<'a, 'r, 's> EntryBtree<'a, 'r, 's> {
                 gintuple_get_key(self.scratch, self.rel, self.state, itup, &mut category)?,
             )
         };
-        Ok(crate::util::ginCompareAttEntries(
+        crate::util::ginCompareAttEntries(
             self.state,
             self.attnum,
             self.key,
@@ -653,7 +653,7 @@ impl<'a, 'r, 's> EntryBtree<'a, 'r, 's> {
             tup_attnum,
             key,
             category,
-        ))
+        )
     }
 
     /// entryIsEnoughSpace.

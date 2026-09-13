@@ -215,7 +215,7 @@ fn collect_match_bitmap<'scan>(
                     let newdatum =
                         unsafe { gintuple_get_key(smcx, rel, state, itup, &mut newcat)? };
                     let cmpto = saved.unwrap_or(idatum);
-                    if ginCompareEntries(state, attnum, newdatum, newcat, cmpto, icategory) == 0 {
+                    if ginCompareEntries(state, attnum, newdatum, newcat, cmpto, icategory)? == 0 {
                         break;
                     }
                 }
@@ -1136,7 +1136,7 @@ fn collect_matches_for_heap_row(
                             entry.queryCategory,
                             datum[mi],
                             category[mi],
-                        )
+                        )?
                     };
 
                     if res == 0 {
