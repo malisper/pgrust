@@ -2672,16 +2672,11 @@ fn json_item_from_datum<'mcx>(
             Ok(JbV::Numeric(leak_numeric(mcx, &img)?))
         }
         TEXTOID | VARCHAROID => {
-            // SAFETY: a text datum is a live varlena.
-            let p = val.as_usize() as *const u8;
-            let image =
-                unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
-            let data = if image[0] & 0x01 == 0x01 {
-                &image[1..]
-            } else {
-                &image[4..]
-            };
-            Ok(JbV::String(mcx::slice_in(mcx, data)?.leak()))
+            // Deliberate divergence: C 18.6 jsonpath_exec.c:3062-3067 takes
+            // VARDATA_ANY of the raw datum with no PG_DETOAST_DATUM, so a
+            // toasted PASSING text yields the toast pointer bytes; detoast.
+            let image = detoasted_passing_image(mcx, val)?;
+            Ok(JbV::String(&image[4..]))
         }
         DATEOID => Ok(JbV::Datetime {
             value: ParsedDatetime::Date(val.as_i32()),

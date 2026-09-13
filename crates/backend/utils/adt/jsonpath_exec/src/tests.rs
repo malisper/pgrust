@@ -620,3 +620,89 @@ fn decimal_method_typmod_range_honors_silent_mode() {
     // select '1234.5678'::jsonb @? '$.decimal(0)'  ->  NULL
     assert_eq!(exists("1234.5678", "$.decimal(0)"), None);
 }
+
+// A PASSING text/varchar Var pulled from a heap tuple may be a compressed or
+// out-of-line varlena; json_item_from_datum detoasts it (deliberate
+// divergence: C 18.6 jsonpath_exec.c:3062-3067 reads the toast pointer).
+mod passing_text_detoast {
+    use ::datum::Datum;
+    use ::mcx::MemoryContext;
+    use ::types_core::catalog::{TEXTOID, VARCHAROID};
+
+    use super::{jp_image, out, setup};
+    use crate::{jsonb_path_query_core, JsonPathVariable, JsonPathVars};
+
+    fn install_detoast_mock() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            if !::detoast_seams::detoast_attr::is_installed() {
+                // The rig's compressed images are [4B_C header][plain 4B_U
+                // image]; the mock hands back the embedded plain image,
+                // standing in for the real decompression engine (tested in
+                // its own crate), and otherwise mirrors detoast_attr's
+                // short-to-4B / verbatim arms.
+                ::detoast_seams::detoast_attr::set(|mcx, image| {
+                    let mut v = ::mcx::vec_with_capacity_in(mcx, image.len() + 4)?;
+                    match image[0] & 0x03 {
+                        0x02 => ::mcx::vec_append_bytes(&mut v, &image[4..])?,
+                        0x01 | 0x03 => {
+                            let len = (image[0] >> 1) as u32 - 1 + 4;
+                            ::mcx::vec_append_bytes(&mut v, &(len << 2).to_ne_bytes())?;
+                            ::mcx::vec_append_bytes(&mut v, &image[1..])?;
+                        }
+                        _ => ::mcx::vec_append_bytes(&mut v, image)?,
+                    }
+                    Ok(v)
+                });
+            }
+        });
+    }
+
+    // [u32 4B_C header][u32 4B_U header][payload] — varsize_any covers the
+    // whole compressed image, as a real inline-compressed varlena would.
+    fn compressed_text(payload: &[u8]) -> Vec<u8> {
+        let inner = (payload.len() + 4) as u32;
+        let mut v = Vec::with_capacity(payload.len() + 8);
+        v.extend_from_slice(&((inner + 4) << 2 | 0x02).to_ne_bytes());
+        v.extend_from_slice(&(inner << 2).to_ne_bytes());
+        v.extend_from_slice(payload);
+        v
+    }
+
+    fn passing_string(typid: ::types_core::Oid, image: &[u8]) -> String {
+        setup();
+        install_detoast_mock();
+        let cx = MemoryContext::new("jsonpath passing detoast test");
+        let mcx = cx.mcx();
+        let jb = super::jb_payload(mcx, "{}");
+        let jp = jp_image(mcx, "$x");
+        let var = [JsonPathVariable {
+            name: b"x",
+            typid,
+            typmod: -1,
+            value: Datum::from_usize(image.as_ptr() as usize),
+            isnull: false,
+        }];
+        let rows = jsonb_path_query_core(mcx, &jb[4..], &jp, JsonPathVars::List(&var), false, false)
+            .unwrap_or_else(|e| panic!("$x: {}", e.message()));
+        assert_eq!(rows.len(), 1);
+        out(mcx, &rows[0][4..])
+    }
+
+    #[test]
+    fn compressed_passing_text_is_detoasted() {
+        let payload = "x".repeat(10000);
+        let image = compressed_text(payload.as_bytes());
+        assert_eq!(passing_string(TEXTOID, &image), format!("\"{payload}\""));
+        assert_eq!(passing_string(VARCHAROID, &image), format!("\"{payload}\""));
+    }
+
+    #[test]
+    fn plain_and_short_passing_text_unchanged() {
+        let mut plain = (9u32 << 2).to_ne_bytes().to_vec();
+        plain.extend_from_slice(b"hello");
+        assert_eq!(passing_string(TEXTOID, &plain), "\"hello\"");
+        let short = [((6u8) << 1) | 0x01, b'h', b'e', b'l', b'l', b'o'];
+        assert_eq!(passing_string(VARCHAROID, &short), "\"hello\"");
+    }
+}
