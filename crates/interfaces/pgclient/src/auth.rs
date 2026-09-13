@@ -10,7 +10,7 @@ use scram_common::SCRAM_MAX_KEY_LEN;
 use timingsafe_bcmp::timingsafe_bcmp;
 use types_error::PgResult;
 
-use crate::{be_i32, msg, parse_error_fields, PgConn};
+use crate::{be_i32, msg, parse_diag, parse_error_fields, PgConn};
 
 // AuthRequest codes (src/include/libpq/protocol.h:74-87).
 const AUTH_REQ_OK: i32 = 0;
@@ -306,6 +306,25 @@ pub(crate) struct AuthOptions<'a> {
     pub(crate) password: Option<&'a str>,
     pub(crate) keys: ScramKeys,
     pub(crate) policy: AuthPolicy,
+    // The password file the password came from (pgpassfileWarning).
+    pub(crate) passfile: Option<&'a str>,
+}
+
+// An ErrorResponse during the ladder: conn->last_sqlstate plus the message.
+fn server_error(conn: &mut PgConn, mbody: &[u8]) -> String {
+    conn.last_sqlstate = parse_diag(mbody).sqlstate;
+    parse_error_fields(mbody)
+}
+
+// pgpassfileWarning (fe-connect.c): an invalid password that came from the
+// password file names the file.
+fn pgpassfile_warning(conn: &PgConn, auth: &AuthOptions<'_>, mut e: String) -> String {
+    if conn.used_password && conn.last_sqlstate == "28P01" {
+        if let Some(file) = auth.passfile {
+            e.push_str(&format!("\npassword retrieved from file \"{file}\""));
+        }
+    }
+    e
 }
 
 /// Authentication request code from an 'R' message body. Errors (instead of
@@ -441,7 +460,7 @@ pub(crate) fn handshake(
                             return Ok(Err("fe_sendauth: no password supplied".into()));
                         }
                         if let Err(e) = scram_exchange(conn, password, &auth.keys, &auth.policy)? {
-                            return Ok(Err(e));
+                            return Ok(Err(pgpassfile_warning(conn, auth, e)));
                         }
                         // fe-auth-scram.c:286 (FE_SCRAM_FINISHED after the
                         // server signature verified).
@@ -453,7 +472,10 @@ pub(crate) fn handshake(
                 }
             }
             b'S' | b'K' | b'N' | b'A' => conn.note_async(t, &mbody),
-            b'E' => return Ok(Err(parse_error_fields(&mbody))),
+            b'E' => {
+                let e = server_error(conn, &mbody);
+                return Ok(Err(pgpassfile_warning(conn, auth, e)));
+            }
             b'Z' => {
                 conn.txn_status = mbody.first().copied().unwrap_or(b'I');
                 return Ok(Ok(()));
@@ -599,7 +621,7 @@ fn scram_exchange(
         Err(e) => return Ok(Err(e)),
     };
     if t == b'E' {
-        return Ok(Err(parse_error_fields(&mbody)));
+        return Ok(Err(server_error(conn, &mbody)));
     }
     if let Err(e) = expect_sasl_request(t, &mbody, AUTH_REQ_SASL_CONT, policy) {
         return Ok(Err(e));
@@ -637,7 +659,7 @@ fn scram_exchange(
         Err(e) => return Ok(Err(e)),
     };
     if t == b'E' {
-        return Ok(Err(parse_error_fields(&mbody)));
+        return Ok(Err(server_error(conn, &mbody)));
     }
     if let Err(e) = expect_sasl_request(t, &mbody, AUTH_REQ_SASL_FIN, policy) {
         return Ok(Err(e));

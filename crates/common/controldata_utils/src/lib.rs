@@ -452,6 +452,26 @@ fn wait_end() {
     }
 }
 
+// controldata_utils.c:222/260 `#ifndef FRONTEND` arms: the backend's update
+// opens through BasicOpenFile (LRU release on EMFILE) and syncs through
+// pg_fsync (wal_sync_method); a process that never installed the file seams
+// is C's FRONTEND build. The read side stays a raw open: OpenTransientFile
+// registers the descriptor through the xact seam, which the test_boot
+// harnesses do not install.
+fn basic_open_file(path: &str, flags: i32) -> i32 {
+    if file_seams::basic_open_file::is_installed() {
+        return file_seams::basic_open_file::call(path, flags);
+    }
+    vfs::open(&c_path(path), flags, 0)
+}
+
+fn pg_fsync(fd: i32) -> i32 {
+    if file_seams::pg_fsync::is_installed() {
+        return file_seams::pg_fsync::call(fd);
+    }
+    vfs::fsync(fd)
+}
+
 /// get_controlfile(DataDir, &crc_ok): the CRC verdict is returned, not raised.
 pub fn get_controlfile(datadir: &str) -> PgResult<(ControlFileData, bool)> {
     get_controlfile_by_exact_path(&format!("{datadir}/{XLOG_CONTROL_FILE}"))
@@ -548,8 +568,7 @@ pub fn update_controlfile(
     buffer[..SIZEOF_CONTROL_FILE_DATA].copy_from_slice(&image);
 
     let path = format!("{datadir}/{XLOG_CONTROL_FILE}");
-    let cpath = c_path(&path);
-    let fd = vfs::open(&cpath, libc::O_RDWR, 0);
+    let fd = basic_open_file(&path, libc::O_RDWR);
     if fd < 0 {
         let e = strerror(vfs::get_errno());
         return ereport(PANIC)
@@ -583,7 +602,7 @@ pub fn update_controlfile(
 
     if do_sync {
         wait_start(WAIT_EVENT_CONTROL_FILE_SYNC_UPDATE);
-        if vfs::fsync(fd) != 0 {
+        if pg_fsync(fd) != 0 {
             let e = strerror(vfs::get_errno());
             vfs::close(fd);
             return ereport(PANIC)

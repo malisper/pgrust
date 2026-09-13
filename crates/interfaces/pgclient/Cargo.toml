@@ -13,6 +13,8 @@ init_small = { path = "../../backend/utils/init/init_small" }
 latch = { path = "../../backend/storage/ipc/latch" }
 libc = "0.2"
 mcx = { path = "../../_support/mcx" }
+pg_clock = { path = "../../port/pg_clock" }
+vfs = { path = "../../backend/storage/file/vfs" }
 pg_b64 = { path = "../../common/base64" }
 pg_string = { path = "../../common/string" }
 pg_hmac = { path = "../../common/hmac" }

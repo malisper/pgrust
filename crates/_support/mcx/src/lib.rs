@@ -2297,14 +2297,32 @@ pub fn vec_append_bytes(v: &mut PgVec<'_, u8>, bytes: &[u8]) -> PgResult<()> {
         return Ok(());
     }
     let mcx = *v.allocator();
-    v.try_reserve(n).map_err(|_| mcx.oom(n))?;
     let old = v.len();
-    // SAFETY: capacity >= old + n after try_reserve; dst disjoint; set_len covers the n bytes.
+    if v.capacity() - old < n {
+        let target = grow_target(v.capacity(), old.saturating_add(n));
+        v.try_reserve_exact(target - old).map_err(|_| mcx.oom(n))?;
+    }
+    // SAFETY: capacity >= old + n after the reserve; dst disjoint; set_len covers the n bytes.
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), v.as_mut_ptr().add(old), n);
         v.set_len(old + n);
     }
     Ok(())
+}
+
+/// enlargeStringInfo (stringinfo.c): double until `needed` fits, clamped to
+/// MaxAllocSize while `needed` itself is admissible (an over-limit need is
+/// requested as-is so the allocator reports that size).
+#[inline]
+pub fn grow_target(capacity: usize, needed: usize) -> usize {
+    let mut newlen = capacity.max(1).saturating_mul(2);
+    while needed > newlen {
+        newlen = newlen.saturating_mul(2);
+    }
+    if newlen > MAX_ALLOC_SIZE {
+        newlen = needed.max(MAX_ALLOC_SIZE);
+    }
+    newlen
 }
 
 #[inline]

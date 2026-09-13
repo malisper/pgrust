@@ -4759,6 +4759,7 @@ version = "0.0.0"
 dependencies = [
  "crc32c",
  "elog",
+ "file_seams",
  "libc",
  "pg_clock",
  "types_core",
@@ -13388,6 +13389,7 @@ dependencies = [
  "libc",
  "mcx",
  "pg_b64",
+ "pg_clock",
  "pg_hmac",
  "pg_md5",
  "pg_string",
@@ -13399,6 +13401,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "vfs",
 ]
 
 [[package]]

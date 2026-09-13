@@ -164,6 +164,64 @@ fn update_controlfile_reports_control_file_wait_events() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+// --- fd.c-arm witness (controldata_utils.c:222/260 `#ifndef FRONTEND`) -----
+// With the file seams installed, the update opens through BasicOpenFile and
+// syncs through pg_fsync. Recorded per thread; the stubs delegate to the raw
+// syscalls.
+
+static FILE_TRACE: std::sync::Mutex<Vec<(std::thread::ThreadId, &'static str)>> =
+    std::sync::Mutex::new(Vec::new());
+static FILE_SEAMS: std::sync::Once = std::sync::Once::new();
+
+fn record_file(what: &'static str) {
+    FILE_TRACE.lock().unwrap().push((std::thread::current().id(), what));
+}
+
+fn raw_open(name: &str, flags: i32) -> i32 {
+    let c = std::ffi::CString::new(name).unwrap();
+    // SAFETY: NUL-terminated path; the caller owns the descriptor.
+    unsafe { libc::open(c.as_ptr(), flags) }
+}
+
+fn install_file_recorder() {
+    FILE_SEAMS.call_once(|| {
+        file_seams::basic_open_file::set(|name, flags| {
+            record_file("basic_open_file");
+            raw_open(name, flags)
+        });
+        file_seams::pg_fsync::set(|fd| {
+            record_file("pg_fsync");
+            // SAFETY: an open descriptor from raw_open.
+            unsafe { libc::fsync(fd) }
+        });
+    });
+}
+
+fn my_file_trace() -> Vec<&'static str> {
+    let me = std::thread::current().id();
+    FILE_TRACE.lock().unwrap().iter().filter(|(t, _)| *t == me).map(|(_, w)| *w).collect()
+}
+
+#[test]
+fn backend_arm_opens_and_syncs_through_fd_seams() {
+    install_file_recorder();
+    let dir = std::env::temp_dir().join(format!("cdu_seams_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("global")).unwrap();
+    std::fs::write(dir.join("global/pg_control"), fixture_bytes()).unwrap();
+    let datadir = dir.to_str().unwrap();
+
+    let (mut cf, crc_ok) = get_controlfile(datadir).unwrap();
+    assert!(crc_ok);
+    assert_eq!(my_file_trace(), Vec::<&str>::new());
+
+    update_controlfile(datadir, &mut cf, true).unwrap();
+    assert_eq!(my_file_trace(), vec!["basic_open_file", "pg_fsync"]);
+
+    update_controlfile(datadir, &mut cf, false).unwrap();
+    assert_eq!(my_file_trace(), vec!["basic_open_file", "pg_fsync", "basic_open_file"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn wrong_endian_version_is_byte_ordering_mismatch() {
     let mut bytes = fixture_bytes();

@@ -624,3 +624,201 @@ mod ws_tests {
         assert_eq!(o[0].0, "\u{a0}dbname");
     }
 }
+
+const DEFAULT_PGSOCKET_DIR: &str = "/tmp";
+
+// pqConnectOptions2 (fe-connect.c:1440): the passfile option, else
+// ~/PGPASSFILE; None when no home directory can be found.
+pub fn passfile_path(opts: &[(String, String)]) -> Option<String> {
+    if let Some(f) = opt(opts, "passfile").filter(|f| !f.is_empty()) {
+        return Some(f.to_string());
+    }
+    home_directory().map(|home| format!("{home}/.pgpass"))
+}
+
+// pqGetHomeDirectory (fe-connect.c:8155): $HOME, else the effective uid's
+// passwd entry.
+fn home_directory() -> Option<String> {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(home);
+        }
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut buf = vec![0u8; 1024];
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: getpwuid_r fills `pw` and strings into `buf` of the given size.
+        let rc = unsafe {
+            libc::getpwuid_r(libc::geteuid(), &mut pw, buf.as_mut_ptr().cast(), buf.len(), &mut result)
+        };
+        if rc == 0 && !result.is_null() && !pw.pw_dir.is_null() {
+            // SAFETY: pw_dir points into `buf`, NUL-terminated by getpwuid_r.
+            let dir = unsafe { std::ffi::CStr::from_ptr(pw.pw_dir) };
+            return Some(dir.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+// passwordFromFile (fe-connect.c:7906): the de-escaped password of the first
+// line matching host:port:db:user, or None when the file is missing, not a
+// plain 0600-or-tighter file (warned on stderr as libpq does), or has no
+// match. 'localhost' stands for an empty host and the default socket dir.
+pub fn password_from_file(
+    hostname: &str,
+    port: &str,
+    dbname: &str,
+    username: &str,
+    pgpassfile: &str,
+) -> Option<String> {
+    if dbname.is_empty() || username.is_empty() {
+        return None;
+    }
+    let is_unixsock_path = hostname.starts_with('/') || hostname.starts_with('@');
+    let hostname = if hostname.is_empty() || (is_unixsock_path && hostname == DEFAULT_PGSOCKET_DIR) {
+        "localhost"
+    } else {
+        hostname
+    };
+    let port = if port.is_empty() { "5432" } else { port };
+
+    let cpath = std::ffi::CString::new(pgpassfile).ok()?;
+    let fd = vfs::open(&cpath, libc::O_RDONLY, 0);
+    if fd < 0 {
+        return None;
+    }
+    let mut st = vfs::FileInfo::zeroed();
+    if vfs::fstat(fd, &mut st) != 0 {
+        vfs::close(fd);
+        return None;
+    }
+    if !st.is_file() {
+        eprintln!("WARNING: password file \"{pgpassfile}\" is not a plain file");
+        vfs::close(fd);
+        return None;
+    }
+    if st.mode & 0o077 != 0 {
+        eprintln!(
+            "WARNING: password file \"{pgpassfile}\" has group or world access; permissions should be u=rw (0600) or less"
+        );
+        vfs::close(fd);
+        return None;
+    }
+    let mut data = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = vfs::pread(fd, &mut buf, data.len() as libc::off_t);
+        if n < 0 && vfs::get_errno() == libc::EINTR {
+            continue;
+        }
+        if n <= 0 {
+            break;
+        }
+        data.extend_from_slice(&buf[..n as usize]);
+    }
+    vfs::close(fd);
+    for line in data.split(|&b| b == b'\n') {
+        if line.first() == Some(&b'#') {
+            continue;
+        }
+        let t = pg_string::pg_strip_crlf(line);
+        if t.is_empty() {
+            continue;
+        }
+        let Some(t) = pwdf_matches(t, hostname.as_bytes()) else { continue };
+        let Some(t) = pwdf_matches(t, port.as_bytes()) else { continue };
+        let Some(t) = pwdf_matches(t, dbname.as_bytes()) else { continue };
+        let Some(t) = pwdf_matches(t, username.as_bytes()) else { continue };
+        let mut password = Vec::with_capacity(t.len());
+        let mut i = 0;
+        while i < t.len() && t[i] != b':' {
+            if t[i] == b'\\' && i + 1 < t.len() {
+                i += 1;
+            }
+            password.push(t[i]);
+            i += 1;
+        }
+        return Some(String::from_utf8_lossy(&password).into_owned());
+    }
+    None
+}
+
+// pwdfMatchesString (fe-connect.c:7868): the text after the field's ':'
+// when the field equals `token` ("*" matches anything; "\:" is a literal
+// colon), else None.
+fn pwdf_matches<'a>(buf: &'a [u8], token: &[u8]) -> Option<&'a [u8]> {
+    let at = |i: usize| buf.get(i).copied().unwrap_or(0);
+    let tok = |j: usize| token.get(j).copied().unwrap_or(0);
+    if at(0) == b'*' && at(1) == b':' {
+        return Some(&buf[2..]);
+    }
+    let (mut i, mut j, mut bslash) = (0usize, 0usize, false);
+    while at(i) != 0 {
+        if at(i) == b'\\' && !bslash {
+            i += 1;
+            bslash = true;
+        }
+        if at(i) == b':' && tok(j) == 0 && !bslash {
+            return Some(&buf[i + 1..]);
+        }
+        bslash = false;
+        if tok(j) == 0 {
+            return None;
+        }
+        if at(i) == tok(j) {
+            i += 1;
+            j += 1;
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
+#[cfg(all(test, unix))]
+mod passfile_tests {
+    use super::password_from_file;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write(name: &str, body: &str, mode: u32) -> String {
+        let p = std::env::temp_dir().join(format!("pgpass_{name}_{}", std::process::id()));
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn matches_fields_wildcards_and_escapes() {
+        let body = concat!(
+            "# comment\n",
+            "h1:5432:db:bob:s\\:e\\\\c\n",
+            "h2:*:db:bob:plain\r\n",
+            "localhost:5432:db:bob:local\n",
+            "a\\:b:5432:db:bob:colonhost\n",
+            "*:*:*:alice:wild"
+        );
+        let f = write("ok", body, 0o600);
+        let pw = |h: &str, p: &str, d: &str, u: &str| password_from_file(h, p, d, u, &f);
+        assert_eq!(pw("h1", "5432", "db", "bob").as_deref(), Some("s:e\\c"));
+        assert_eq!(pw("h2", "9999", "db", "bob").as_deref(), Some("plain"));
+        assert_eq!(pw("", "", "db", "bob").as_deref(), Some("local"));
+        assert_eq!(pw("/tmp", "5432", "db", "bob").as_deref(), Some("local"));
+        assert_eq!(pw("a:b", "5432", "db", "bob").as_deref(), Some("colonhost"));
+        assert_eq!(pw("h9", "1", "x", "alice").as_deref(), Some("wild"));
+        assert_eq!(pw("h1", "5433", "db", "bob"), None);
+        assert_eq!(pw("h1", "5432", "d", "bob"), None);
+        assert_eq!(pw("h1", "5432", "", "bob"), None);
+        assert_eq!(pw("h1", "5432", "db", ""), None);
+        std::fs::remove_file(&f).unwrap();
+    }
+
+    #[test]
+    fn insecure_or_missing_file_is_ignored() {
+        let f = write("insecure", "h1:5432:db:bob:pw\n", 0o644);
+        assert_eq!(password_from_file("h1", "5432", "db", "bob", &f), None);
+        std::fs::remove_file(&f).unwrap();
+        assert_eq!(password_from_file("h1", "5432", "db", "bob", "/nonexistent/pgpass"), None);
+    }
+}

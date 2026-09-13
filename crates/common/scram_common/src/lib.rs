@@ -34,11 +34,15 @@ pub fn scram_salted_password(
     let mut i = 1;
     while i < iterations {
         // Interruptible: scram_iterations may be set very large. Wipe the
-        // key-derived intermediates before bailing on an interrupt.
-        if let Err(e) = postgres_seams::check_for_interrupts::call() {
-            secure_zero_slice(&mut result);
-            secure_zero_slice(&mut ui_prev);
-            return Err(e);
+        // key-derived intermediates before bailing on an interrupt. C
+        // compiles the check out of FRONTEND builds: a client binary never
+        // installs the seam.
+        if postgres_seams::check_for_interrupts::is_installed() {
+            if let Err(e) = postgres_seams::check_for_interrupts::call() {
+                secure_zero_slice(&mut result);
+                secure_zero_slice(&mut ui_prev);
+                return Err(e);
+            }
         }
 
         let mut ui = hmac_sha256(password, &ui_prev);

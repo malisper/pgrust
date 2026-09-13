@@ -75,6 +75,8 @@ pub struct PgConn {
     be_key: Vec<u8>,
     server_version: i32,
     used_password: bool,
+    // conn->last_sqlstate: the SQLSTATE of the last ErrorResponse.
+    last_sqlstate: String,
     params: Vec<(String, String)>,
     notifies: std::collections::VecDeque<Notify>,
     we: WaitEvents,
@@ -187,7 +189,7 @@ pub(crate) fn cstr_at(b: &[u8], pos: usize) -> (String, usize) {
     (String::from_utf8_lossy(&b[pos..end]).into_owned(), end + 1)
 }
 
-fn parse_diag(body: &[u8]) -> ErrorFields {
+pub(crate) fn parse_diag(body: &[u8]) -> ErrorFields {
     let mut f = ErrorFields { severity: "ERROR".into(), ..Default::default() };
     let mut i = 0;
     while i < body.len() && body[i] != 0 {
@@ -381,17 +383,17 @@ fn unix_connect(path: &str) -> Result<(Stream, RawFd), String> {
 }
 
 pub fn validate_port(opts: &[(String, String)]) -> Result<u16, String> {
-    // PQconnectPoll's try-next-host arm (fe-connect.c): the port option is
-    // validated BEFORE address resolution or any socket attempt. Regress
-    // relies on this ordering — CREATE SUBSCRIPTION ... 'port=-1' must fail
-    // "invalid port number: \"-1\"" WITHOUT a connection ever being tried.
-    let port_s = opt(opts, "port").unwrap_or("").to_string();
+    let hosts = conn_hosts(opts)?;
+    parse_port(&hosts[0].port)
+}
+
+// PQconnectPoll's try-next-host arm (fe-connect.c): the port option is
+// validated BEFORE address resolution or any socket attempt. Regress
+// relies on this ordering — CREATE SUBSCRIPTION ... 'port=-1' must fail
+// "invalid port number: \"-1\"" WITHOUT a connection ever being tried.
+fn parse_port(port_s: &str) -> Result<u16, String> {
     if port_s.is_empty() {
         return Ok(5432); // DEF_PGPORT
-    }
-    if port_s.contains(',') {
-        // unported: multi-host conninfo port list (recorded divergence).
-        return Err("connecting to multiple hosts is not supported yet".to_string());
     }
     // pqParseIntParam: strtol with surrounding whitespace allowed (C-locale
     // isspace, VT included), no trailing garbage, overflow-checked into int.
@@ -405,6 +407,139 @@ pub fn validate_port(opts: &[(String, String)]) -> Result<u16, String> {
         Ok(n) if !(1..=65535).contains(&n) => Err(format!("invalid port number: \"{port_s}\"")),
         Ok(n) => Ok(n as u16),
     }
+}
+
+#[derive(Debug)]
+struct ConnHost {
+    host: String,
+    hostaddr: String,
+    port: String,
+}
+
+// pqConnectOptions2 (fe-connect.c:1247): one slot per element of the
+// hostaddr list (else the host list); a single port is broadcast, otherwise
+// the counts must match.
+fn conn_hosts(opts: &[(String, String)]) -> Result<Vec<ConnHost>, String> {
+    let host = opt(opts, "host").unwrap_or("");
+    let hostaddr = opt(opts, "hostaddr").unwrap_or("");
+    let port = opt(opts, "port").unwrap_or("");
+    let n = if !hostaddr.is_empty() {
+        hostaddr.split(',').count()
+    } else if !host.is_empty() {
+        host.split(',').count()
+    } else {
+        1
+    };
+    let mut hosts: Vec<ConnHost> = (0..n)
+        .map(|_| ConnHost { host: String::new(), hostaddr: String::new(), port: String::new() })
+        .collect();
+    if !hostaddr.is_empty() {
+        for (h, a) in hosts.iter_mut().zip(hostaddr.split(',')) {
+            h.hostaddr = a.to_string();
+        }
+    }
+    if !host.is_empty() {
+        let names: Vec<&str> = host.split(',').collect();
+        if names.len() != n {
+            return Err(format!(
+                "could not match {} host names to {} hostaddr values",
+                names.len(),
+                n
+            ));
+        }
+        for (h, name) in hosts.iter_mut().zip(names) {
+            h.host = name.to_string();
+        }
+    }
+    if !port.is_empty() {
+        let ports: Vec<&str> = port.split(',').collect();
+        if ports.len() == 1 {
+            for h in &mut hosts {
+                h.port = port.to_string();
+            }
+        } else if ports.len() != n {
+            return Err(format!("could not match {} port numbers to {} hosts", ports.len(), n));
+        } else {
+            for (h, p) in hosts.iter_mut().zip(ports) {
+                h.port = p.to_string();
+            }
+        }
+    }
+    Ok(hosts)
+}
+
+// libpq_append_conn_error: every attempt's message stays in the buffer.
+fn append_conn_error(errs: &mut String, msg: &str) {
+    if !errs.is_empty() {
+        errs.push('\n');
+    }
+    errs.push_str(msg);
+}
+
+// One connhost's socket. Err((message, terminal)): a terminal failure
+// (requirepeer, C's error_return) ends the host walk.
+fn dial(
+    ch: &ConnHost,
+    port: u16,
+    opts: &[(String, String)],
+) -> Result<(Stream, RawFd, DialTarget, String), (String, bool)> {
+    if ch.host.starts_with('/') {
+        let path = format!("{}/.s.PGSQL.{port}", ch.host);
+        let (s, fd) = unix_connect(&path).map_err(|e| (e, false))?;
+        // fe-connect.c PQconnectPoll: requirepeer verifies the socket peer's
+        // OS identity before the startup packet (and any credential) is
+        // sent — the only server authentication available on a Unix socket
+        // in a world-writable directory.
+        if let Some(want) = opt(opts, "requirepeer").filter(|s| !s.is_empty()) {
+            check_requirepeer(fd, want).map_err(|e| (e, true))?;
+        }
+        return Ok((s, fd, DialTarget::Unix(path), ch.host.clone()));
+    }
+    let target = if !ch.hostaddr.is_empty() { ch.hostaddr.clone() } else { ch.host.clone() };
+    let target = if target.is_empty() { "localhost".to_string() } else { target };
+    match std::net::TcpStream::connect((target.as_str(), port)) {
+        Ok(s) => {
+            use std::os::fd::AsRawFd;
+            let _ = s.set_nodelay(true);
+            let fd = s.as_raw_fd();
+            Ok((Stream::Tcp(s), fd, DialTarget::Tcp(target.clone(), port), target))
+        }
+        Err(e) => Err((
+            format!("connection to server at \"{target}\", port {port} failed: {e}"),
+            false,
+        )),
+    }
+}
+
+// The cancel connection's dial under libpqsrv_cancel's endtime: each
+// resolved address gets the time left; nothing blocks past the deadline.
+fn tcp_connect_deadline(
+    host: &str,
+    port: u16,
+    deadline_ns: u64,
+) -> Result<std::net::TcpStream, String> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<std::net::SocketAddr> = match (host, port).to_socket_addrs() {
+        Ok(a) => a.collect(),
+        Err(e) => return Err(format!("could not translate host name \"{host}\" to address: {e}")),
+    };
+    let mut last = format!("could not translate host name \"{host}\" to address: no address");
+    for addr in addrs {
+        let left = deadline_ns.saturating_sub(pg_clock::mono_ns());
+        if left == 0 {
+            return Err("cancel request timed out".into());
+        }
+        match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_nanos(left)) {
+            Ok(s) => return Ok(s),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                return Err("cancel request timed out".into())
+            }
+            Err(e) => {
+                last = format!("connection to server at \"{host}\", port {port} failed: {e}")
+            }
+        }
+    }
+    Err(last)
 }
 
 // Dial + startup + auth, stopping at ReadyForQuery. `startup_params` is the
@@ -529,12 +664,10 @@ pub fn connect(
         Ok(k) => k,
         Err(e) => return Ok(Err(e)),
     };
-    let port = match validate_port(&opts) {
-        Ok(p) => p,
+    let hosts = match conn_hosts(&opts) {
+        Ok(h) => h,
         Err(e) => return Ok(Err(e)),
     };
-    let host = opt(&opts, "host").unwrap_or("").to_string();
-    let hostaddr = opt(&opts, "hostaddr").unwrap_or("").to_string();
     // md5/SCRAM hash the user the server was told about — the startup
     // packet's, not a re-derivation from the options.
     let user = startup_params
@@ -542,127 +675,148 @@ pub fn connect(
         .find(|(k, _)| *k == "user")
         .map(|(_, v)| v.to_string())
         .unwrap_or_else(|| resolve_user(&opts));
-    let password = resolve_password(&opts);
+    let explicit_password = resolve_password(&opts);
+    // pqConnectOptions2: with no password given the file is consulted per
+    // host, keyed by the database the startup packet names (physical
+    // replication says "replication").
+    let pw_dbname = startup_params
+        .iter()
+        .find(|(k, _)| *k == "database")
+        .map(|(_, v)| v.to_string())
+        .or_else(|| opt(&opts, "dbname").filter(|s| !s.is_empty()).map(|s| s.to_string()))
+        .unwrap_or_else(|| user.clone());
+    let passfile = if explicit_password.is_none() { conninfo::passfile_path(&opts) } else { None };
 
-    let (stream, fd, target, display_host) = if !host.is_empty() && host.starts_with('/') {
-        let path = format!("{host}/.s.PGSQL.{port}");
-        match unix_connect(&path) {
-            Ok((s, fd)) => {
-                // fe-connect.c PQconnectPoll: requirepeer verifies the
-                // socket peer's OS identity before the startup packet (and
-                // any credential) is sent — the only server authentication
-                // available on a Unix socket in a world-writable directory.
-                if let Some(want) = opt(&opts, "requirepeer").filter(|s| !s.is_empty()) {
-                    if let Err(e) = check_requirepeer(fd, want) {
-                        return Ok(Err(e));
-                    }
-                }
-                (s, fd, DialTarget::Unix(path), host.clone())
-            }
-            Err(e) => return Ok(Err(e)),
-        }
-    } else {
-        let target = if !hostaddr.is_empty() { hostaddr.clone() } else { host.clone() };
-        let target = if target.is_empty() { "localhost".to_string() } else { target };
-        match std::net::TcpStream::connect((target.as_str(), port)) {
-            Ok(s) => {
-                use std::os::fd::AsRawFd;
-                let _ = s.set_nodelay(true);
-                let fd = s.as_raw_fd();
-                (Stream::Tcp(s), fd, DialTarget::Tcp(target.clone(), port), target)
-            }
+    // PQconnectPoll's host walk: a failed attempt appends its message and
+    // the next host is tried; a server error other than "cannot connect
+    // now" ends the walk.
+    let mut errs = String::new();
+    for ch in &hosts {
+        let port = match parse_port(&ch.port) {
+            Ok(p) => p,
             Err(e) => {
-                return Ok(Err(format!(
-                    "connection to server at \"{target}\", port {port} failed: {e}"
-                )))
+                append_conn_error(&mut errs, &e);
+                continue;
             }
-        }
-    };
-
-    match &stream {
-        Stream::Tcp(s) => s.set_nonblocking(true).expect("set_nonblocking"),
-        #[cfg(not(target_family = "wasm"))]
-        Stream::Unix(s) => s.set_nonblocking(true).expect("set_nonblocking"),
-    }
-
-    // libpq's emitHostIdentityInfo (fe-connect.c), emitted SPECULATIVELY into
-    // conn->errorMessage the moment the target address is identified
-    // (PQconnectPoll, "all errors ... should be prefixed with host-identity
-    // information"): every later failure of this attempt — the startup-packet
-    // send, a server-sent FATAL during auth (role/database does not exist),
-    // fe_sendauth, a SCRAM failure — carries the prefix. Dial failures above
-    // already build it inline.
-    let host_identity = match &target {
-        DialTarget::Unix(path) => {
-            format!("connection to server on socket \"{path}\" failed: ")
-        }
-        DialTarget::Tcp(disp_host, disp_port) => {
-            // C: a CHT_HOST_ADDRESS target (hostaddr=) displays bare; a host
-            // NAME whose looked-up address differs textually displays
-            // "name" (addr) (emitHostIdentityInfo's strcmp arm).
-            let peer_ip = match &stream {
-                Stream::Tcp(s) => {
-                    s.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default()
+        };
+        let mut from_file = None;
+        let password = match &explicit_password {
+            Some(p) => Some(p.clone()),
+            None => passfile.as_deref().and_then(|f| {
+                let pwhost = if ch.host.is_empty() { &ch.hostaddr } else { &ch.host };
+                let p = conninfo::password_from_file(pwhost, &ch.port, &pw_dbname, &user, f)?;
+                from_file = Some(f);
+                Some(p)
+            }),
+        };
+        let (stream, fd, target, display_host) = match dial(ch, port, &opts) {
+            Ok(d) => d,
+            Err((e, terminal)) => {
+                append_conn_error(&mut errs, &e);
+                if terminal {
+                    return Ok(Err(errs));
                 }
-                #[cfg(not(target_family = "wasm"))]
-                Stream::Unix(_) => String::new(),
-            };
-            if !hostaddr.is_empty() || peer_ip.is_empty() || peer_ip == *disp_host {
-                format!("connection to server at \"{disp_host}\", port {disp_port} failed: ")
-            } else {
-                format!(
-                    "connection to server at \"{disp_host}\" ({peer_ip}), port {disp_port} failed: "
-                )
+                continue;
+            }
+        };
+
+        match &stream {
+            Stream::Tcp(s) => s.set_nonblocking(true).expect("set_nonblocking"),
+            #[cfg(not(target_family = "wasm"))]
+            Stream::Unix(s) => s.set_nonblocking(true).expect("set_nonblocking"),
+        }
+
+        // libpq's emitHostIdentityInfo (fe-connect.c), emitted SPECULATIVELY
+        // into conn->errorMessage the moment the target address is
+        // identified: every later failure of this attempt — the
+        // startup-packet send, a server-sent FATAL during auth, fe_sendauth,
+        // a SCRAM failure — carries the prefix. Dial failures above already
+        // build it inline.
+        let host_identity = match &target {
+            DialTarget::Unix(path) => {
+                format!("connection to server on socket \"{path}\" failed: ")
+            }
+            DialTarget::Tcp(disp_host, disp_port) => {
+                // C: a CHT_HOST_ADDRESS target (hostaddr=) displays bare; a
+                // host NAME whose looked-up address differs textually
+                // displays "name" (addr) (emitHostIdentityInfo's strcmp arm).
+                let peer_ip = match &stream {
+                    Stream::Tcp(s) => {
+                        s.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default()
+                    }
+                    #[cfg(not(target_family = "wasm"))]
+                    Stream::Unix(_) => String::new(),
+                };
+                if !ch.hostaddr.is_empty() || peer_ip.is_empty() || peer_ip == *disp_host {
+                    format!("connection to server at \"{disp_host}\", port {disp_port} failed: ")
+                } else {
+                    format!(
+                        "connection to server at \"{disp_host}\" ({peer_ip}), port {disp_port} failed: "
+                    )
+                }
+            }
+        };
+
+        let mut conn = PgConn {
+            _stream: stream,
+            fd,
+            target,
+            inbuf: Vec::new(),
+            inpos: 0,
+            conn_ok: true,
+            in_copy: false,
+            copy_server_done: false,
+            copy_client_done: false,
+            pending_results: false,
+            txn_status: b'I',
+            err: String::new(),
+            opts: opts.clone(),
+            display_host,
+            display_port: port as i32,
+            be_pid: 0,
+            be_key: Vec::new(),
+            server_version: 0,
+            used_password: false,
+            last_sqlstate: String::new(),
+            params: Vec::new(),
+            notifies: std::collections::VecDeque::new(),
+            we,
+        };
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&PG_PROTOCOL_3_0.to_be_bytes());
+        for (k, v) in startup_params {
+            body.extend_from_slice(k.as_bytes());
+            body.push(0);
+            body.extend_from_slice(v.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
+        let mut pkt = Vec::with_capacity(4 + body.len());
+        pkt.extend_from_slice(&((body.len() as u32 + 4).to_be_bytes()));
+        pkt.extend_from_slice(&body);
+        if let Err(e) = conn.send_all(&pkt) {
+            append_conn_error(&mut errs, &format!("{host_identity}{e}"));
+            continue;
+        }
+
+        let auth_opts = auth::AuthOptions {
+            password: password.as_deref(),
+            keys: keys.clone(),
+            policy: policy.clone(),
+            passfile: from_file,
+        };
+        match auth::handshake(&mut conn, &user, &auth_opts)? {
+            Ok(()) => return Ok(Ok(conn)),
+            Err(e) => {
+                append_conn_error(&mut errs, &format!("{host_identity}{e}"));
+                if conn.last_sqlstate != "57P03" {
+                    return Ok(Err(errs));
+                }
             }
         }
-    };
-
-    let mut conn = PgConn {
-        _stream: stream,
-        fd,
-        target,
-        inbuf: Vec::new(),
-        inpos: 0,
-        conn_ok: true,
-        in_copy: false,
-        copy_server_done: false,
-        copy_client_done: false,
-        pending_results: false,
-        txn_status: b'I',
-        err: String::new(),
-        opts,
-        display_host,
-        display_port: port as i32,
-        be_pid: 0,
-        be_key: Vec::new(),
-        server_version: 0,
-        used_password: false,
-        params: Vec::new(),
-        notifies: std::collections::VecDeque::new(),
-        we,
-    };
-
-    let mut body = Vec::new();
-    body.extend_from_slice(&PG_PROTOCOL_3_0.to_be_bytes());
-    for (k, v) in startup_params {
-        body.extend_from_slice(k.as_bytes());
-        body.push(0);
-        body.extend_from_slice(v.as_bytes());
-        body.push(0);
     }
-    body.push(0);
-    let mut pkt = Vec::with_capacity(4 + body.len());
-    pkt.extend_from_slice(&((body.len() as u32 + 4).to_be_bytes()));
-    pkt.extend_from_slice(&body);
-    if let Err(e) = conn.send_all(&pkt) {
-        return Ok(Err(format!("{host_identity}{e}")));
-    }
-
-    let auth_opts = auth::AuthOptions { password: password.as_deref(), keys, policy };
-    match auth::handshake(&mut conn, &user, &auth_opts)? {
-        Ok(()) => Ok(Ok(conn)),
-        Err(e) => Ok(Err(format!("{host_identity}{e}"))),
-    }
+    Ok(Err(errs))
 }
 
 // Standard SQL connection (libpq PQconnectdb shape): resolve conninfo, build
@@ -1621,15 +1775,12 @@ impl PgConn {
     // saved BackendKeyData, wait (interruptibly, deadline-bounded) for the
     // server to close. None = accepted; Some(msg) = failure text.
     pub fn cancel(&self, timeout_ms: i64) -> PgResult<Option<String>> {
+        let deadline_ns = pg_clock::mono_ns().saturating_add(timeout_ms.max(0) as u64 * 1_000_000);
         let sock = match &self.target {
-            DialTarget::Tcp(host, port) => {
-                match std::net::TcpStream::connect((host.as_str(), *port)) {
-                    Ok(s) => CancelSock::Tcp(s),
-                    Err(e) => return Ok(Some(format!(
-                        "connection to server at \"{host}\", port {port} failed: {e}"
-                    ))),
-                }
-            }
+            DialTarget::Tcp(host, port) => match tcp_connect_deadline(host, *port, deadline_ns) {
+                Ok(s) => CancelSock::Tcp(s),
+                Err(e) => return Ok(Some(e)),
+            },
             #[cfg(not(target_family = "wasm"))]
             DialTarget::Unix(path) => match std::os::unix::net::UnixStream::connect(path) {
                 Ok(s) => CancelSock::Unix(s),
@@ -1662,7 +1813,6 @@ impl PgConn {
         sock.set_nonblocking();
         // Await EOF: the server closes the cancel connection once processed.
         let fd = sock.raw_fd();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(0) as u64);
         loop {
             let mut buf = [0u8; 16];
             let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
@@ -1676,15 +1826,16 @@ impl PgConn {
             match e.raw_os_error() {
                 Some(libc::EINTR) => continue,
                 Some(libc::EAGAIN) => {
-                    let left = deadline.saturating_duration_since(std::time::Instant::now());
-                    if left.is_zero() {
+                    // TimestampDifferenceMilliseconds rounds up.
+                    let left_ns = deadline_ns.saturating_sub(pg_clock::mono_ns());
+                    if left_ns == 0 {
                         return Ok(Some("cancel request timed out".into()));
                     }
                     let rc = latch::WaitLatchOrSocket(
                         init_small::globals::MyLatch(),
                         WL_LATCH_SET | WL_EXIT_ON_PM_DEATH | WL_SOCKET_READABLE | WL_TIMEOUT,
                         fd,
-                        left.as_millis().min(i64::MAX as u128) as i64,
+                        left_ns.div_ceil(1_000_000).min(i64::MAX as u64) as i64,
                         self.we.receive,
                     )?;
                     if rc & WL_LATCH_SET != 0 {
@@ -1945,6 +2096,71 @@ mod tests {
         assert_eq!(parse("port= 5433 ").unwrap(), 5433);
     }
 
+    // pqConnectOptions2's host/hostaddr/port list matching.
+    #[test]
+    fn multi_host_lists() {
+        let hosts = |s: &str| conn_hosts(&parse_conninfo(s).unwrap());
+        let h = hosts("host=a,b port=1,2").unwrap();
+        assert_eq!(h.len(), 2);
+        assert_eq!((h[0].host.as_str(), h[0].port.as_str()), ("a", "1"));
+        assert_eq!((h[1].host.as_str(), h[1].port.as_str()), ("b", "2"));
+        let h = hosts("host=a,b port=7").unwrap();
+        assert_eq!((h[0].port.as_str(), h[1].port.as_str()), ("7", "7"));
+        let h = hosts("hostaddr=1.1.1.1,2.2.2.2").unwrap();
+        assert_eq!(
+            (h[1].hostaddr.as_str(), h[1].host.as_str(), h[1].port.as_str()),
+            ("2.2.2.2", "", "")
+        );
+        assert_eq!(
+            hosts("host=a,b port=1,2,3").unwrap_err(),
+            "could not match 3 port numbers to 2 hosts"
+        );
+        assert_eq!(
+            hosts("host=a,b hostaddr=1.1.1.1").unwrap_err(),
+            "could not match 2 host names to 1 hostaddr values"
+        );
+        assert_eq!(hosts("").unwrap().len(), 1);
+        assert_eq!(
+            validate_port(&parse_conninfo("port=1,2").unwrap()).unwrap_err(),
+            "could not match 2 port numbers to 1 hosts"
+        );
+    }
+
+    // The host walk: every refused host leaves its own line, in order.
+    #[test]
+    fn connect_reports_every_host_attempt() {
+        let free = || {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let (p1, p2) = (free(), free());
+        let opts =
+            parse_conninfo(&format!("host=127.0.0.1,127.0.0.1 port={p1},{p2} user=u")).unwrap();
+        let err = connect(
+            opts,
+            &[("user", "u"), ("database", "u")],
+            WaitEvents { connect: 0, receive: 0 },
+        )
+        .unwrap()
+        .err()
+        .unwrap();
+        let lines: Vec<&str> = err.split('\n').collect();
+        assert_eq!(lines.len(), 2, "{err}");
+        let prefix = |p: u16| format!("connection to server at \"127.0.0.1\", port {p} failed: ");
+        assert!(lines[0].starts_with(&prefix(p1)), "{err}");
+        assert!(lines[1].starts_with(&prefix(p2)), "{err}");
+    }
+
+    #[test]
+    fn cancel_dial_is_bounded_by_the_deadline() {
+        let start = std::time::Instant::now();
+        let deadline_ns = pg_clock::mono_ns() + 300_000_000;
+        assert!(tcp_connect_deadline("10.255.255.1", 9, deadline_ns).is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
+        let r = tcp_connect_deadline("127.0.0.1", 9, 0);
+        assert_eq!(r.unwrap_err(), "cancel request timed out");
+    }
+
     #[test]
     fn msg_framing() {
         let m = msg(b'Q', b"SELECT 1\0");
@@ -2072,6 +2288,7 @@ mod tests {
             be_key: Vec::new(),
             server_version: 0,
             used_password: false,
+            last_sqlstate: String::new(),
             params: Vec::new(),
             notifies: std::collections::VecDeque::new(),
             we: WaitEvents { connect: 0, receive: 0 },
@@ -2431,6 +2648,7 @@ mod tests {
                 password: Some("secret"),
                 keys: auth::ScramKeys::default(),
                 policy,
+                passfile: None,
             };
             let err = auth::handshake(&mut conn, "u", &auth_opts).unwrap().unwrap_err();
             assert_eq!(err, want, "areq {areq}");

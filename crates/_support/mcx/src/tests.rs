@@ -21,6 +21,24 @@ fn alloc_size_gate_matches_palloc() {
 }
 
 #[test]
+fn append_growth_clamps_to_max_alloc_size() {
+    assert_eq!(grow_target(1024, 1025), 2048);
+    assert_eq!(grow_target(1024, 5000), 8192);
+    assert_eq!(grow_target(0, 5), 8);
+    assert_eq!(grow_target(536_870_912, 536_936_448), MAX_ALLOC_SIZE);
+    assert_eq!(grow_target(MAX_ALLOC_SIZE, MAX_ALLOC_SIZE + 1), MAX_ALLOC_SIZE + 1);
+
+    let ctx = MemoryContext::new("t");
+    let mut v: PgVec<u8> = PgVec::new_in(ctx.mcx());
+    vec_append_bytes(&mut v, &[7u8; 1025]).unwrap();
+    assert_eq!(v.len(), 1025);
+    assert_eq!(v.capacity(), 2048);
+    vec_append_bytes(&mut v, &[8u8; 3000]).unwrap();
+    assert_eq!(v.len(), 4025);
+    assert_eq!(v.capacity(), 4096);
+}
+
+#[test]
 fn accounting_tracks_capacity_exactly() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();

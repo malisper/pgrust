@@ -153,7 +153,7 @@ impl DistAcc {
                     grow(slots, entries);
                 }
                 let mask = slots.len() - 1;
-                let mut i = crate::hash::slot_index(h1, mask);
+                let mut i = probe_start(slots, h1).expect("grown");
                 loop {
                     let s = slots[i];
                     if s == 0 {
@@ -187,9 +187,17 @@ impl DistAcc {
     #[inline]
     pub fn prefetch(&self, h1: u64) {
         if let Acc::Hash { slots, .. } = &self.acc {
-            if !slots.is_empty() {
-                std::hint::black_box(slots[(h1 as usize) & (slots.len() - 1)]);
+            if let Some(i) = probe_start(slots, h1) {
+                std::hint::black_box(slots[i]);
             }
+        }
+    }
+
+    #[cfg(test)]
+    fn prefetch_slot(&self, h1: u64) -> Option<usize> {
+        match &self.acc {
+            Acc::Hash { slots, .. } => probe_start(slots, h1),
+            Acc::BTree(_) => None,
         }
     }
 
@@ -322,6 +330,16 @@ pub fn distribution_from_sorted_counts(entries: &[(Vec<u8>, u64)]) -> ColDistrib
 
 /// Grow (or lazily create) the slot table and rehash by the STORED h1 —
 /// no byte access on the rehash path.
+/// The slot `h1` probes first (the seeded index shared with `grow`); None
+/// before the lazy table exists.
+#[inline]
+fn probe_start(slots: &[u32], h1: u64) -> Option<usize> {
+    if slots.is_empty() {
+        return None;
+    }
+    Some(crate::hash::slot_index(h1, slots.len() - 1))
+}
+
 fn grow(slots: &mut Vec<u32>, entries: &[Entry]) {
     let ncap = if slots.is_empty() { 16 } else { slots.len() * 2 };
     let mask = ncap - 1;
@@ -368,6 +386,25 @@ mod tests {
         let mut sorted = out.hist_bounds.clone();
         sorted.sort();
         assert_eq!(sorted, out.hist_bounds, "bounds are byte-ordered");
+    }
+
+    // The look-ahead hint must warm the line the insert's first probe
+    // touches: with one entry in a fresh table, that is where it landed.
+    #[test]
+    fn prefetch_targets_the_insert_probe_slot() {
+        let mut d = DistAcc::default();
+        assert_eq!(d.prefetch_slot(1), None);
+        for v in [&b"v"[..], b"w", b"xyz", b"0123456789"] {
+            let mut d = DistAcc::default();
+            let (h1, h2) = crate::hash::meta_hash128(v);
+            d.observe_hashed(h1, h2, v);
+            let Acc::Hash { slots, .. } = &d.acc else { panic!("hash arm") };
+            let landed = slots.iter().position(|&s| s == 1).unwrap();
+            assert_eq!(probe_start(slots, h1), Some(landed));
+            assert_eq!(d.prefetch_slot(h1), Some(landed));
+        }
+        d.observe(b"v");
+        assert!(d.prefetch_slot(1).is_some());
     }
 
     #[test]

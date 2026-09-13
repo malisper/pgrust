@@ -1,9 +1,12 @@
 use super::*;
 use mcx::MemoryContext;
 
-fn install_cfi() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| postgres_seams::check_for_interrupts::set(|| Ok(())));
+// scram-common.c:79 `#ifndef FRONTEND CHECK_FOR_INTERRUPTS()`: this binary,
+// like psql, never installs the seam, and every derivation below runs on it.
+#[test]
+fn key_derivation_runs_without_the_interrupt_seam() {
+    assert!(!postgres_seams::check_for_interrupts::is_installed());
+    scram_salted_password(b"pencil", b"salt", 4096).unwrap();
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -13,7 +16,6 @@ fn hex(bytes: &[u8]) -> String {
 // Published PBKDF2-HMAC-SHA256 vectors (password/salt, 1/2/4096 iterations).
 #[test]
 fn pbkdf2_reference_vectors() {
-    install_cfi();
     let cases = [
         (1, "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"),
         (2, "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"),
@@ -28,7 +30,6 @@ fn pbkdf2_reference_vectors() {
 // RFC 7677 test vector: pencil / base64(W22ZaJ0SNY7soEsUEjb6gQ==) / 4096.
 #[test]
 fn rfc7677_key_derivation() {
-    install_cfi();
     let salt = b64decode("W22ZaJ0SNY7soEsUEjb6gQ==");
     let sp = scram_salted_password(b"pencil", &salt, 4096).unwrap();
     assert_eq!(
@@ -43,7 +44,6 @@ fn rfc7677_key_derivation() {
 
 #[test]
 fn build_secret_rfc7677_verifier() {
-    install_cfi();
     let cx = MemoryContext::new("scram-test");
     let salt = b64decode("W22ZaJ0SNY7soEsUEjb6gQ==");
     let secret = scram_build_secret(cx.mcx(), &salt, 4096, b"pencil").unwrap();
@@ -57,7 +57,6 @@ fn build_secret_rfc7677_verifier() {
 
 #[test]
 fn build_secret_fixed_salt_fixture() {
-    install_cfi();
     let cx = MemoryContext::new("scram-test");
     let salt: Vec<u8> = (0..16u8).collect();
     let secret = scram_build_secret(cx.mcx(), &salt, 4096, b"secret").unwrap();
@@ -71,7 +70,6 @@ fn build_secret_fixed_salt_fixture() {
 
 #[test]
 fn one_iteration_is_first_hmac_only() {
-    install_cfi();
     let sp = scram_salted_password(b"pw", b"abcd", 1).unwrap();
     let mut ctx = PgHmacCtx::<Sha256>::init(b"pw");
     ctx.update(b"abcd");

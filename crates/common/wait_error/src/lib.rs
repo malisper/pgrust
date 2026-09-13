@@ -15,12 +15,24 @@ pub fn system(command: &str) -> i32 {
 #[cfg(not(target_family = "wasm"))]
 pub fn system_tracked(command: &str, spawned: impl FnOnce(u32), reaped: impl FnOnce(u32)) -> i32 {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
-    let mut child = match std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
-        .process_group(0)
-        .spawn()
-    {
+    // system(3): the child inherits the caller's SIGPIPE disposition (every
+    // backend ignores it); std resets it to SIG_DFL before exec.
+    let mut parent: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: query-only sigaction into a zeroed out-param.
+    let ignored = unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut parent) } == 0
+        && parent.sa_sigaction == libc::SIG_IGN;
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg(command).process_group(0);
+    if ignored {
+        // SAFETY: signal(2) is async-signal-safe; runs between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+                Ok(())
+            })
+        };
+    }
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(_) => return -1,
     };
@@ -171,6 +183,16 @@ pub fn wait_result_to_exit_code(exit_status: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn child_inherits_ignored_sigpipe() {
+        // SAFETY: process-wide disposition, the std default for this binary.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let rc = super::system("kill -PIPE $$; exit 0");
+        assert!(super::WIFEXITED(rc), "status {rc:#x}");
+        assert_eq!(super::WEXITSTATUS(rc), 0);
+    }
 
     fn exited(code: i32) -> i32 {
         code << 8

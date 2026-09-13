@@ -22,6 +22,8 @@ types_error = { path = "../../_support/types/types_error" }
 # the wait seams (seam_core only — no backend cone); a process that never
 # installs them (frontend bins, plain crate tests) is C's FRONTEND build.
 waitevent_seams = { path = "../../backend/utils/activity/waitevent_seams" }
+# controldata_utils.c:90/222/260 `#ifndef FRONTEND` fd.c arms, same shape.
+file_seams = { path = "../../backend/storage/file/file_seams" }
 
 # `pgrust_sim` (non-default cfg, set only by the sim harness RUSTFLAGS): the
 # close-fault witness tests/sim_close_fault.rs lives behind it.
