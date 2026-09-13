@@ -206,11 +206,8 @@ pub(crate) fn fc_brin_page_items(
             // dtup signals decoding the next item.
             if dtup.is_none() {
                 let item_id = page_item_id(b, offset);
-                if item_id.is_used()
-                    && item_id.has_storage()
-                    && (item_id.off as usize) + (item_id.len as usize) <= b.len()
-                {
-                    let tuple = &b[item_id.off as usize..(item_id.off + item_id.len) as usize];
+                if item_id.is_used() && item_id.has_storage() && (item_id.off as usize) < b.len() {
+                    let tuple = &b[item_id.off as usize..];
                     let mut mem = brin_tuple::brin_new_memtuple(&bdesc);
                     brin_tuple::brin_deform_tuple(&bdesc, tuple, &mut mem)?;
                     dtup = Some(mem);
@@ -244,11 +241,11 @@ pub(crate) fn fc_brin_page_items(
                 values[5] = Datum::from_bool(d.bt_placeholder);
                 values[6] = Datum::from_bool(d.bt_empty_range);
                 if !d.bt_columns[att].bv_allnulls {
-                    let mut s = String::new();
-                    s.push('{');
+                    let mut s: Vec<u8> = Vec::new();
+                    s.push(b'{');
                     for i in 0..out_fns[att].len() {
                         if i > 0 {
-                            s.push_str(" .. ");
+                            s.extend_from_slice(b" .. ");
                         }
                         let val = types_fmgr::function_call1_coll_in(
                             &mut out_fns[att][i],
@@ -260,10 +257,10 @@ pub(crate) fn fc_brin_page_items(
                         let cs = unsafe {
                             core::ffi::CStr::from_ptr(val.as_usize() as *const core::ffi::c_char)
                         };
-                        s.push_str(&String::from_utf8_lossy(cs.to_bytes()));
+                        s.extend_from_slice(cs.to_bytes());
                     }
-                    s.push('}');
-                    values[7] = text_datum(mcx, s.as_bytes())?;
+                    s.push(b'}');
+                    values[7] = text_datum(mcx, &s)?;
                 } else {
                     nulls[7] = true;
                 }

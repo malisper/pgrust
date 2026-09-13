@@ -29,6 +29,7 @@ detoast_seams = { path = "../../backend/access/common/detoast_seams" }
 heaptuple = { path = "../../backend/access/common/heaptuple" }
 hashfn = { path = "../../common/hashfn" }
 crc32c = { path = "../../port/crc32c" }
+pg_qsort = { path = "../../_support/pg_qsort" }
 pqformat = { path = "../../backend/libpq/pqformat" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 typcache = { path = "../../backend/utils/cache/typcache" }

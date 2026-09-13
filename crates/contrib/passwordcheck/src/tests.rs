@@ -40,3 +40,16 @@ fn plaintext_user_name_and_letter_mix_arms_in_c_order() {
     assert!(check_plaintext("u", "abcdefg1", 8).is_ok());
     assert!(check_plaintext("u", "good1234", 8).is_ok());
 }
+
+#[test]
+fn min_password_length_cell_feeds_the_hook() {
+    set_min_password_length(1024);
+    let e = check_plaintext("pc_test", "Aa123456", min_password_length()).expect_err("too short");
+    assert_eq!(e.message(), "password is too short");
+    assert_eq!(
+        detail(&e),
+        "password must be at least \"passwordcheck.min_password_length\" (1024) bytes long"
+    );
+    set_min_password_length(8);
+    assert!(check_plaintext("pc_test", "Aa123456", min_password_length()).is_ok());
+}

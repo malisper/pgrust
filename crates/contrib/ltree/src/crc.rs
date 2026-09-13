@@ -10,16 +10,19 @@ pub fn ltree_crc32_sz(buf: &[u8]) -> u32 {
     ::crc32c::traditional_crc32(&folded)
 }
 
+// C crc32.c / lquery_op.c branch on `pg_newlocale_from_collation(
+// DEFAULT_COLLATION_OID)->ctype_is_c`, not on datctype: an ICU default
+// locale answers false even with LC_CTYPE=C. A lookup failure is
+// unreachable once the default locale is stamped at boot; fall back to the
+// C arm so the CRC stays deterministic.
+pub(crate) fn default_ctype_is_c() -> bool {
+    ::pg_locale::pg_newlocale_from_collation(DEFAULT_COLLATION_OID)
+        .map(|l| l.ctype_is_c)
+        .unwrap_or(true)
+}
+
 pub fn fold(buf: &[u8]) -> Vec<u8> {
-    // C crc32.c branches on `pg_newlocale_from_collation(DEFAULT_COLLATION_OID)
-    // ->ctype_is_c`, NOT on the encoding width: a UTF8 database with LC_CTYPE=C
-    // (initdb --locale=C --encoding=UTF8) takes the ascii-tolower arm in C.
-    // Branching on the encoding width sent that very common configuration down
-    // the casemap arm, changing the CRC — which is the lquery_variant `val`
-    // and part of the GiST on-disk format. `database_ctype_is_c` is the same
-    // datctype-derived flag the default locale's ctype_is_c carries, and it is
-    // the signal ts_locale's t_isalnum already uses on these same labels.
-    if ::pg_locale::database_ctype_is_c() {
+    if default_ctype_is_c() {
         // C ctype: ascii tolower per byte.
         buf.iter().map(|&b| b.to_ascii_lowercase()).collect()
     } else {

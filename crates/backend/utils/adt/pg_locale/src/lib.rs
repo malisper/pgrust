@@ -131,6 +131,10 @@ impl PgLocale {
         libc_locale::tolower_l_byte(c, self.lt)
     }
 
+    pub fn toupper_l(&self, c: u8) -> u8 {
+        libc_locale::toupper_l_byte(c, self.lt)
+    }
+
     // regc_pg_locale.c LIBC_WIDE/LIBC_1BYTE arms; the strategy dispatch lives
     // in regex_core::regex_locale. libc provider only.
     pub fn wc_isclass_wide(&self, c: u32, class: WcClass) -> bool {

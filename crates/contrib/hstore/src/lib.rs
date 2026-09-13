@@ -285,21 +285,21 @@ fn fc_hstore_recv(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
 fn fc_hstore_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg is a non-null hstore varlena (strict fn).
     let hs = unsafe { arg_hstore(fcinfo, 0)? };
-    let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(&(hs.count() as i32).to_be_bytes());
+    let mut buf = pqformat::pq_begintypsend(fcinfo.result_mcx())?;
+    pqformat::pq_sendint32(&mut buf, hs.count() as u32)?;
     for i in 0..hs.count() {
         let key = hs.key(i);
-        buf.extend_from_slice(&(key.len() as i32).to_be_bytes());
-        buf.extend_from_slice(key);
+        pqformat::pq_sendint32(&mut buf, key.len() as u32)?;
+        pqformat::pq_sendtext(&mut buf, key)?;
         if hs.val_isnull(i) {
-            buf.extend_from_slice(&(-1i32).to_be_bytes());
+            pqformat::pq_sendint32(&mut buf, -1i32 as u32)?;
         } else {
             let val = hs.val(i);
-            buf.extend_from_slice(&(val.len() as i32).to_be_bytes());
-            buf.extend_from_slice(val);
+            pqformat::pq_sendint32(&mut buf, val.len() as u32)?;
+            pqformat::pq_sendtext(&mut buf, val)?;
         }
     }
-    ret_text(fcinfo, &buf)
+    Ok(varlena_result(pqformat::pq_endtypsend(buf)))
 }
 
 fn fc_hstore_version_diag(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {

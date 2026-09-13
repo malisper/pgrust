@@ -143,11 +143,15 @@ pub(crate) fn fc_gist_page_items_bytea(
     Ok(srf.finish(fcinfo))
 }
 
-fn output_fn_text(finfo: &mut FmgrInfo, mcx: Mcx<'_>, val: Datum) -> PgResult<String> {
+fn output_fn_text(finfo: &mut FmgrInfo, mcx: Mcx<'_>, val: Datum) -> PgResult<Vec<u8>> {
     let d = types_fmgr::function_call1_coll_in(finfo, InvalidOid, mcx, val)?;
     // SAFETY: type output functions return a NUL-terminated cstring datum.
     let cs = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
-    Ok(String::from_utf8_lossy(cs.to_bytes()).into_owned())
+    Ok(cs.to_bytes().to_vec())
+}
+
+fn record_out_needs_quotes(ch: u8) -> bool {
+    matches!(ch, b'"' | b'\\' | b'(' | b')' | b',') || pg_string::isspace_c_locale(ch)
 }
 
 /// Bounds-check every attribute's aligned start and length in an untrusted
@@ -344,10 +348,10 @@ pub(crate) fn fc_gist_page_items(
         values[3] = Datum::from_bool(id.is_dead());
 
         if let Some(ref index_columns) = index_columns {
-            let mut buf = String::new();
-            buf.push('(');
-            buf.push_str(index_columns);
-            buf.push_str(")=(");
+            let mut buf: Vec<u8> = Vec::new();
+            buf.push(b'(');
+            buf.extend_from_slice(index_columns.as_bytes());
+            buf.extend_from_slice(b")=(");
 
             // Mostly copied from record_out().
             for i in 0..natts {
@@ -359,45 +363,33 @@ pub(crate) fn fc_gist_page_items(
                 let val_datum =
                     unsafe { nbtree::itup::index_getattr(itup, (i + 1) as i16, &tupdesc, &mut isnull) };
                 let value = if isnull {
-                    "null".to_string()
+                    b"null".to_vec()
                 } else {
                     output_fn_text(out_fns[i].as_mut().expect("resolved"), mcx, val_datum)?
                 };
 
                 if i == nkeyatts as usize {
-                    buf.push_str(") INCLUDE (");
+                    buf.extend_from_slice(b") INCLUDE (");
                 } else if i > 0 {
-                    buf.push_str(", ");
+                    buf.extend_from_slice(b", ");
                 }
 
-                let mut nq = value.is_empty();
-                for ch in value.chars() {
-                    if ch == '"'
-                        || ch == '\\'
-                        || ch == '('
-                        || ch == ')'
-                        || ch == ','
-                        || (ch.is_ascii() && pg_string::isspace_c_locale(ch as u8))
-                    {
-                        nq = true;
-                        break;
-                    }
-                }
+                let nq = value.is_empty() || value.iter().any(|&ch| record_out_needs_quotes(ch));
                 if nq {
-                    buf.push('"');
+                    buf.push(b'"');
                 }
-                for ch in value.chars() {
-                    if ch == '"' || ch == '\\' {
+                for &ch in &value {
+                    if ch == b'"' || ch == b'\\' {
                         buf.push(ch);
                     }
                     buf.push(ch);
                 }
                 if nq {
-                    buf.push('"');
+                    buf.push(b'"');
                 }
             }
-            buf.push(')');
-            values[4] = text_datum(mcx, buf.as_bytes())?;
+            buf.push(b')');
+            values[4] = text_datum(mcx, &buf)?;
         } else {
             nulls[4] = true;
         }
@@ -407,4 +399,19 @@ pub(crate) fn fc_gist_page_items(
 
     index_rel.close(types_rel::AccessShareLock)?;
     Ok(srf.finish(fcinfo))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_out_needs_quotes;
+
+    #[test]
+    fn record_out_quotes_only_c_delimiters() {
+        for ch in [b'"', b'\\', b'(', b')', b',', b' ', b'\t'] {
+            assert!(record_out_needs_quotes(ch));
+        }
+        for ch in [b'a', b'1', 0xe9u8, 0xffu8] {
+            assert!(!record_out_needs_quotes(ch));
+        }
+    }
 }

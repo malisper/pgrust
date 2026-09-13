@@ -255,6 +255,11 @@ pub(crate) fn tolower_l_byte(c: u8, lt: LibcLocale) -> u8 {
     unsafe { tolower_l(c as c_int, lt.get()) as u8 }
 }
 
+pub(crate) fn toupper_l_byte(c: u8, lt: LibcLocale) -> u8 {
+    // SAFETY: pure ctype call; c promoted as unsigned char per C.
+    unsafe { toupper_l(c as c_int, lt.get()) as u8 }
+}
+
 /// wc-ctype classes probed by the regex engine (regc_pg_locale.c).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WcClass {

@@ -1452,14 +1452,23 @@ fn rel_sync_cache_relation_cb(_arg: Datum, relid: Oid) {
         };
         if relid != InvalidOid {
             if let Some(entry) = cache.get(&relid) {
-                entry.borrow_mut().replicate_valid = false;
+                invalidate_entry(entry);
             }
         } else {
             for entry in cache.values() {
-                entry.borrow_mut().replicate_valid = false;
+                invalidate_entry(entry);
             }
         }
     });
+}
+
+// An entry borrowed here is the one get_rel_sync_entry is validating; C's
+// replicate_valid = true at the end of that validation (pgoutput.c:2329)
+// overwrites the callback's flag anyway, so skipping it is C's outcome.
+fn invalidate_entry(entry: &RefCell<RelationSyncEntry>) {
+    if let Ok(mut e) = entry.try_borrow_mut() {
+        e.replicate_valid = false;
+    }
 }
 
 // rel_sync_cache_publication_cb (pgoutput.c:2432).
@@ -1470,7 +1479,7 @@ fn rel_sync_cache_publication_cb(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
             return;
         };
         for entry in cache.values() {
-            entry.borrow_mut().replicate_valid = false;
+            invalidate_entry(entry);
         }
     });
 }
@@ -2160,6 +2169,32 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // An invalidation processed while get_rel_sync_entry holds the entry
+    // (catalog reads during validation take locks) must not panic; C's
+    // end-of-validation replicate_valid = true drops that invalidation too.
+    #[test]
+    fn invalidation_callbacks_skip_the_entry_under_validation() {
+        let entry = Rc::new(RefCell::new(RelationSyncEntry::new()));
+        let other = Rc::new(RefCell::new(RelationSyncEntry::new()));
+        other.borrow_mut().replicate_valid = true;
+        REL_SYNC_CACHE.with(|c| {
+            let mut m: HashMap<Oid, Rc<RefCell<RelationSyncEntry>>> = HashMap::default();
+            m.insert(1234, Rc::clone(&entry));
+            m.insert(1235, Rc::clone(&other));
+            *c.borrow_mut() = Some(m);
+        });
+        {
+            let mut e = entry.borrow_mut();
+            rel_sync_cache_relation_cb(Datum::from_usize(0), 1234);
+            rel_sync_cache_relation_cb(Datum::from_usize(0), InvalidOid);
+            rel_sync_cache_publication_cb(Datum::from_usize(0), 0, 0);
+            e.replicate_valid = true;
+        }
+        assert!(entry.borrow().replicate_valid);
+        assert!(!other.borrow().replicate_valid);
+        REL_SYNC_CACHE.with(|c| *c.borrow_mut() = None);
+    }
 
     #[test]
     fn update_transform_decision_table() {

@@ -20,6 +20,8 @@ types_storage = { path = "../../_support/types/types_storage" }
 types_tuple = { path = "../../_support/types/types_tuple" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+tupdesc = { path = "../../backend/access/common/tupdesc" }
+typcache_seams = { path = "../../backend/utils/cache/typcache_seams" }
 heaptuple = { path = "../../backend/access/common/heaptuple" }
 relation = { path = "../../backend/access/common/relation" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }

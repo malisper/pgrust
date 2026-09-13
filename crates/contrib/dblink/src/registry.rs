@@ -28,7 +28,7 @@ impl RemoteConn {
 
 thread_local! {
     static PCONN: RefCell<Option<RemoteConn>> = const { RefCell::new(None) };
-    static NAMED: RefCell<HashMap<String, RemoteConn, FxBuildHasher>> =
+    static NAMED: RefCell<HashMap<String, Option<RemoteConn>, FxBuildHasher>> =
         RefCell::new(HashMap::with_hasher(FxBuildHasher));
     static WE_CONNECT: Cell<u32> = const { Cell::new(0) };
     static WE_GET_CONN: Cell<u32> = const { Cell::new(0) };
@@ -112,9 +112,29 @@ pub fn named_present(name: &str) -> PgResult<bool> {
     Ok(NAMED.with(|m| m.borrow().contains_key(&key)))
 }
 
+// C keeps the hash readable while a connection is in use: lift the entry out.
 pub fn with_named<R>(name: &str, f: impl FnOnce(Option<&mut RemoteConn>) -> R) -> PgResult<R> {
     let key = conn_key(name, false)?;
-    Ok(NAMED.with(|m| f(m.borrow_mut().get_mut(&key))))
+    let taken = NAMED.with(|m| m.borrow_mut().get_mut(&key).and_then(Option::take));
+    match taken {
+        Some(mut rc) => {
+            let r = f(Some(&mut rc));
+            NAMED.with(|m| {
+                if let Some(slot) = m.borrow_mut().get_mut(&key) {
+                    *slot = Some(rc);
+                }
+            });
+            Ok(r)
+        }
+        None => Ok(f(None)),
+    }
+}
+
+pub fn with_named_present<R>(name: &str, f: impl FnOnce(&mut RemoteConn) -> R) -> PgResult<R> {
+    match with_named(name, |rc| rc.map(f))? {
+        Some(r) => Ok(r),
+        None => Err(conn_not_avail(Some(name))),
+    }
 }
 
 // createNewConnection (dblink.c:2579): the hash entry is made BEFORE the
@@ -141,7 +161,7 @@ pub fn reserve_named(name: &str) -> PgResult<()> {
 pub fn store_named(name: &str, conn: PgConn) -> PgResult<()> {
     let key = conn_key(name, false)?;
     NAMED.with(|m| {
-        let prev = m.borrow_mut().insert(key, RemoteConn::new(conn));
+        let prev = m.borrow_mut().insert(key, Some(RemoteConn::new(conn)));
         debug_assert!(prev.is_none(), "store_named without reserve_named");
         Ok(())
     })

@@ -19,3 +19,4 @@ arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
 mbutils = { path = "../../backend/utils/mb/mbutils" }
 wchar = { path = "../../common/wchar" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+pg_locale = { path = "../../backend/utils/adt/pg_locale" }

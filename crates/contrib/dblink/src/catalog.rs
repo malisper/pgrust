@@ -149,24 +149,24 @@ fn quote_ident_str(mcx: Mcx<'_>, name: &[u8]) -> PgResult<String> {
 
 // quote_literal_cstr (quote.c): E-prefix whenever a backslash forces
 // doubled-backslash escaping; double ' and \.
-fn quote_literal_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    if s.contains('\\') {
-        out.push('E');
+fn quote_literal_str(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len() + 2);
+    if s.contains(&b'\\') {
+        out.push(b'E');
     }
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' || c == '\\' {
+    out.push(b'\'');
+    for &c in s {
+        if c == b'\'' || c == b'\\' {
             out.push(c);
         }
         out.push(c);
     }
-    out.push('\'');
+    out.push(b'\'');
     out
 }
 
 // get_text_array_contents: text[] -> Vec of element strings (None = NULL).
-fn get_text_array_contents(mcx: Mcx<'_>, image: &[u8]) -> PgResult<Vec<Option<String>>> {
+fn get_text_array_contents(mcx: Mcx<'_>, image: &[u8]) -> PgResult<Vec<Option<Vec<u8>>>> {
     let (datums, nulls) =
         arrayfuncs::deconstruct_array_builtin(mcx, image, types_core::TEXTOID, true)?;
     let mut out = Vec::with_capacity(datums.len());
@@ -176,7 +176,7 @@ fn get_text_array_contents(mcx: Mcx<'_>, image: &[u8]) -> PgResult<Vec<Option<St
         } else {
             // SAFETY: text element datum from the array image.
             let pv = unsafe { types_fmgr::datum_varlena_packed(*d, mcx)? };
-            out.push(Some(String::from_utf8_lossy(pv.data()).into_owned()));
+            out.push(Some(pv.data().to_vec()));
         }
     }
     Ok(out)
@@ -243,7 +243,7 @@ fn get_tuple_of_interest<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     pkattnums: &[usize],
-    src_pkattvals: &[Option<String>],
+    src_pkattvals: &[Option<Vec<u8>>],
 ) -> PgResult<Option<heaptuple::HeapTuple<'mcx>>> {
     spi::SPI_connect()?;
     let tupdesc = rel.descr();
@@ -269,7 +269,10 @@ fn get_tuple_of_interest<'mcx>(
         }
         sql.push_str(&quote_ident_str(mcx, tupdesc.attr(pkidx).attname.name_str())?);
         match &src_pkattvals[i] {
-            Some(v) => sql.push_str(&format!(" = {}", quote_literal_str(v))),
+            Some(v) => {
+                sql.push_str(" = ");
+                sql.push_str(&String::from_utf8_lossy(&quote_literal_str(v)));
+            }
             None => sql.push_str(" IS NULL"),
         }
     }
@@ -299,25 +302,24 @@ fn tuple_value(
     tuple: &types_tuple::HeapTupleData<'_>,
     tupdesc: &types_tuple::TupleDescData<'_>,
     attnum: i32,
-) -> PgResult<Option<String>> {
-    Ok(spi::SPI_getvalue(mcx, tuple, tupdesc, attnum)?
-        .map(|b| String::from_utf8_lossy(b).into_owned()))
+) -> PgResult<Option<Vec<u8>>> {
+    Ok(spi::SPI_getvalue(mcx, tuple, tupdesc, attnum)?.map(|b| b.to_vec()))
 }
 
 fn get_sql_insert(
     mcx: Mcx<'_>,
     rel: &Relation<'_>,
     pkattnums: &[usize],
-    src_pkattvals: &[Option<String>],
-    tgt_pkattvals: &[Option<String>],
-) -> PgResult<String> {
+    src_pkattvals: &[Option<Vec<u8>>],
+    tgt_pkattvals: &[Option<Vec<u8>>],
+) -> PgResult<Vec<u8>> {
     let relname = generate_relation_name(mcx, rel)?;
     let tupdesc = rel.descr();
     let natts = tupdesc.natts as usize;
     let tuple = get_tuple_of_interest(mcx, rel, pkattnums, src_pkattvals)?
         .ok_or_else(source_not_found)?;
 
-    let mut buf = format!("INSERT INTO {relname}(");
+    let mut buf = format!("INSERT INTO {relname}(").into_bytes();
     let mut need_comma = false;
     for i in 0..natts {
         let att = tupdesc.attr(i);
@@ -325,31 +327,31 @@ fn get_sql_insert(
             continue;
         }
         if need_comma {
-            buf.push(',');
+            buf.push(b',');
         }
-        buf.push_str(&quote_ident_str(mcx, att.attname.name_str())?);
+        buf.extend_from_slice(quote_ident_str(mcx, att.attname.name_str())?.as_bytes());
         need_comma = true;
     }
-    buf.push_str(") VALUES(");
+    buf.extend_from_slice(b") VALUES(");
     need_comma = false;
     for i in 0..natts {
         if tupdesc.attr(i).attisdropped {
             continue;
         }
         if need_comma {
-            buf.push(',');
+            buf.push(b',');
         }
         let val = match get_attnum_pk_pos(pkattnums, i) {
             Some(k) => tgt_pkattvals[k].clone(),
             None => tuple_value(mcx, &tuple, tupdesc, i as i32 + 1)?,
         };
         match val {
-            Some(v) => buf.push_str(&quote_literal_str(&v)),
-            None => buf.push_str("NULL"),
+            Some(v) => buf.extend_from_slice(&quote_literal_str(&v)),
+            None => buf.extend_from_slice(b"NULL"),
         }
         need_comma = true;
     }
-    buf.push(')');
+    buf.push(b')');
     Ok(buf)
 }
 
@@ -357,19 +359,22 @@ fn get_sql_delete(
     mcx: Mcx<'_>,
     rel: &Relation<'_>,
     pkattnums: &[usize],
-    tgt_pkattvals: &[Option<String>],
-) -> PgResult<String> {
+    tgt_pkattvals: &[Option<Vec<u8>>],
+) -> PgResult<Vec<u8>> {
     let relname = generate_relation_name(mcx, rel)?;
     let tupdesc = rel.descr();
-    let mut buf = format!("DELETE FROM {relname} WHERE ");
+    let mut buf = format!("DELETE FROM {relname} WHERE ").into_bytes();
     for (i, &pkidx) in pkattnums.iter().enumerate() {
         if i > 0 {
-            buf.push_str(" AND ");
+            buf.extend_from_slice(b" AND ");
         }
-        buf.push_str(&quote_ident_str(mcx, tupdesc.attr(pkidx).attname.name_str())?);
+        buf.extend_from_slice(quote_ident_str(mcx, tupdesc.attr(pkidx).attname.name_str())?.as_bytes());
         match &tgt_pkattvals[i] {
-            Some(v) => buf.push_str(&format!(" = {}", quote_literal_str(v))),
-            None => buf.push_str(" IS NULL"),
+            Some(v) => {
+                buf.extend_from_slice(b" = ");
+                buf.extend_from_slice(&quote_literal_str(v));
+            }
+            None => buf.extend_from_slice(b" IS NULL"),
         }
     }
     Ok(buf)
@@ -379,16 +384,16 @@ fn get_sql_update(
     mcx: Mcx<'_>,
     rel: &Relation<'_>,
     pkattnums: &[usize],
-    src_pkattvals: &[Option<String>],
-    tgt_pkattvals: &[Option<String>],
-) -> PgResult<String> {
+    src_pkattvals: &[Option<Vec<u8>>],
+    tgt_pkattvals: &[Option<Vec<u8>>],
+) -> PgResult<Vec<u8>> {
     let relname = generate_relation_name(mcx, rel)?;
     let tupdesc = rel.descr();
     let natts = tupdesc.natts as usize;
     let tuple = get_tuple_of_interest(mcx, rel, pkattnums, src_pkattvals)?
         .ok_or_else(source_not_found)?;
 
-    let mut buf = format!("UPDATE {relname} SET ");
+    let mut buf = format!("UPDATE {relname} SET ").into_bytes();
     let mut need_comma = false;
     for i in 0..natts {
         let att = tupdesc.attr(i);
@@ -396,28 +401,31 @@ fn get_sql_update(
             continue;
         }
         if need_comma {
-            buf.push_str(", ");
+            buf.extend_from_slice(b", ");
         }
-        buf.push_str(&format!("{} = ", quote_ident_str(mcx, att.attname.name_str())?));
+        buf.extend_from_slice(format!("{} = ", quote_ident_str(mcx, att.attname.name_str())?).as_bytes());
         let val = match get_attnum_pk_pos(pkattnums, i) {
             Some(k) => tgt_pkattvals[k].clone(),
             None => tuple_value(mcx, &tuple, tupdesc, i as i32 + 1)?,
         };
         match val {
-            Some(v) => buf.push_str(&quote_literal_str(&v)),
-            None => buf.push_str("NULL"),
+            Some(v) => buf.extend_from_slice(&quote_literal_str(&v)),
+            None => buf.extend_from_slice(b"NULL"),
         }
         need_comma = true;
     }
-    buf.push_str(" WHERE ");
+    buf.extend_from_slice(b" WHERE ");
     for (i, &pkidx) in pkattnums.iter().enumerate() {
         if i > 0 {
-            buf.push_str(" AND ");
+            buf.extend_from_slice(b" AND ");
         }
-        buf.push_str(&quote_ident_str(mcx, tupdesc.attr(pkidx).attname.name_str())?);
+        buf.extend_from_slice(quote_ident_str(mcx, tupdesc.attr(pkidx).attname.name_str())?.as_bytes());
         match &tgt_pkattvals[i] {
-            Some(v) => buf.push_str(&format!(" = {}", quote_literal_str(v))),
-            None => buf.push_str(" IS NULL"),
+            Some(v) => {
+                buf.extend_from_slice(b" = ");
+                buf.extend_from_slice(&quote_literal_str(v));
+            }
+            None => buf.extend_from_slice(b" IS NULL"),
         }
     }
     Ok(buf)
@@ -489,7 +497,7 @@ pub fn fc_dblink_build_sql_insert(
     }
     let sql = get_sql_insert(mcx, &rel, &pkattnums, &src, &tgt)?;
     table::table_close(rel, AccessShareLock)?;
-    Ok(crate::text_result(mcx, &sql)?)
+    Ok(crate::text_result_bytes(mcx, &sql)?)
 }
 
 pub fn fc_dblink_build_sql_delete(
@@ -508,7 +516,7 @@ pub fn fc_dblink_build_sql_delete(
     }
     let sql = get_sql_delete(mcx, &rel, &pkattnums, &tgt)?;
     table::table_close(rel, AccessShareLock)?;
-    Ok(crate::text_result(mcx, &sql)?)
+    Ok(crate::text_result_bytes(mcx, &sql)?)
 }
 
 pub fn fc_dblink_build_sql_update(
@@ -532,7 +540,7 @@ pub fn fc_dblink_build_sql_update(
     }
     let sql = get_sql_update(mcx, &rel, &pkattnums, &src, &tgt)?;
     table::table_close(rel, AccessShareLock)?;
-    Ok(crate::text_result(mcx, &sql)?)
+    Ok(crate::text_result_bytes(mcx, &sql)?)
 }
 
 #[cfg(test)]
@@ -541,11 +549,17 @@ mod tests {
 
     #[test]
     fn quote_literal_matches_c() {
-        assert_eq!(quote_literal_str("plain"), "'plain'");
-        assert_eq!(quote_literal_str("O'Brien"), "'O''Brien'");
+        assert_eq!(quote_literal_str(b"plain"), b"'plain'");
+        assert_eq!(quote_literal_str(b"O'Brien"), b"'O''Brien'");
         // backslash forces the E'' prefix and doubled backslash.
-        assert_eq!(quote_literal_str("a\\b"), "E'a\\\\b'");
-        assert_eq!(quote_literal_str("x'\\y"), "E'x''\\\\y'");
+        assert_eq!(quote_literal_str(b"a\\b"), b"E'a\\\\b'");
+        assert_eq!(quote_literal_str(b"x'\\y"), b"E'x''\\\\y'");
+    }
+
+    #[test]
+    fn quote_literal_keeps_non_utf8_bytes() {
+        assert_eq!(quote_literal_str(b"\xff"), b"'\xff'");
+        assert_eq!(quote_literal_str(b"a\xe9'"), b"'a\xe9'''");
     }
 
     #[test]

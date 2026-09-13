@@ -3,8 +3,8 @@
 //! (utils/adt/uuid.c); this module only adds generators.
 //!
 //! v1 reproduces libuuid `uuid_generate_time` semantics: strictly monotonic
-//! (timestamp, clock_seq) per session, node = cached random multicast node
-//! (no hardware MAC is ever read, matching libuuid's random-node fallback).
+//! (timestamp, clock_seq) per session, node = the first non-zero hardware MAC
+//! (gen_uuid.c get_node_id), else a cached random multicast node.
 
 use std::cell::Cell;
 
@@ -112,12 +112,71 @@ fn v1_state() -> PgResult<V1State> {
     let mut seed = [0u8; 8];
     fill_random(&mut seed)?;
     let clock_seq = u16::from_be_bytes([seed[0], seed[1]]) & 0x3FFF;
-    let mut node = [seed[2], seed[3], seed[4], seed[5], seed[6], seed[7]];
-    // libuuid sets the multicast bit on a generated random node.
-    node[0] |= 0x01;
+    let node = get_node_id().unwrap_or_else(|| {
+        let mut node = [seed[2], seed[3], seed[4], seed[5], seed[6], seed[7]];
+        // libuuid sets the multicast bit on a generated random node.
+        node[0] |= 0x01;
+        node
+    });
     let s = V1State { last_ts: 0, clock_seq, node };
     V1_STATE.with(|c| c.set(Some(s)));
     Ok(s)
+}
+
+fn get_node_id() -> Option<[u8; 6]> {
+    let mut found = None;
+    // SAFETY: getifaddrs owns the list until freeifaddrs.
+    unsafe {
+        let mut ifa: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifa) < 0 {
+            return None;
+        }
+        let mut l = ifa;
+        while !l.is_null() && found.is_none() {
+            let sa = (*l).ifa_addr;
+            if !sa.is_null() {
+                found = link_addr(sa).filter(|a| a.iter().any(|&b| b != 0));
+            }
+            l = (*l).ifa_next;
+        }
+        libc::freeifaddrs(ifa);
+    }
+    found
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+unsafe fn link_addr(sa: *const libc::sockaddr) -> Option<[u8; 6]> {
+    if (*sa).sa_family as i32 != libc::AF_LINK {
+        return None;
+    }
+    let sdl = sa.cast::<libc::sockaddr_dl>();
+    if (*sdl).sdl_alen != 6 {
+        return None;
+    }
+    let base = (*sdl).sdl_data.as_ptr().cast::<u8>().add((*sdl).sdl_nlen as usize);
+    let mut node = [0u8; 6];
+    std::ptr::copy_nonoverlapping(base, node.as_mut_ptr(), 6);
+    Some(node)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+unsafe fn link_addr(sa: *const libc::sockaddr) -> Option<[u8; 6]> {
+    if (*sa).sa_family as i32 != libc::AF_PACKET {
+        return None;
+    }
+    let sll = sa.cast::<libc::sockaddr_ll>();
+    if (*sll).sll_halen != 6 {
+        return None;
+    }
+    let addr = (*sll).sll_addr;
+    let mut node = [0u8; 6];
+    node.copy_from_slice(&addr[..6]);
+    Some(node)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "linux", target_os = "android")))]
+unsafe fn link_addr(_sa: *const libc::sockaddr) -> Option<[u8; 6]> {
+    None
 }
 
 fn v1_next() -> PgResult<(u64, u16)> {
@@ -274,6 +333,20 @@ mod tests {
         let u = uuid_v4().unwrap();
         assert_eq!(u[6] & 0xF0, 0x40);
         assert_eq!(u[8] & 0xC0, 0x80);
+    }
+
+    #[test]
+    fn v1_node_is_the_host_mac() {
+        let node = get_node_id();
+        if cfg!(target_os = "macos") {
+            assert!(node.is_some());
+        }
+        if let Some(node) = node {
+            assert_eq!(node[0] & 1, 0);
+            assert!(node.iter().any(|&b| b != 0));
+            let u = uuid_v1().unwrap();
+            assert_eq!(&u[10..16], &node);
+        }
     }
 
     #[test]

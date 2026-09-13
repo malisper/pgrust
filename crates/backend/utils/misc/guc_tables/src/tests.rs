@@ -115,13 +115,16 @@ fn table_counts_match_compiled_backend_shape() {
     //   http_timeout (-> 181) = 496. Under the oauth-test-validator feature
     //   only: String +1 oauth_validator.authn_id, Bool +1
     //   oauth_validator.authorize_tokens (the C test module's custom GUCs).
+    // bug-inventory 2026-09-13 batch-11 (contrib/passwordcheck/passwordcheck.c:152
+    //   _PG_init DefineCustomIntVariable, GUC_UNIT_BYTE): Int +1
+    //   passwordcheck.min_password_length (-> 182) = 497.
     let test_validator = usize::from(cfg!(feature = "oauth-test-validator"));
     assert_eq!(ConfigureNamesBool.len(), 145 + test_validator);
-    assert_eq!(ConfigureNamesInt.len(), 181);
+    assert_eq!(ConfigureNamesInt.len(), 182);
     assert_eq!(ConfigureNamesReal.len(), 31);
     assert_eq!(ConfigureNamesString.len(), 89 + test_validator);
     assert_eq!(ConfigureNamesEnum.len(), 50);
-    assert_eq!(all_settings().count(), 496 + 2 * test_validator);
+    assert_eq!(all_settings().count(), 497 + 2 * test_validator);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
@@ -495,4 +498,16 @@ fn pg_trgm_thresholds_match_trgm_op_c() {
         assert!(t.show_hook.is_none(), "{name}");
         assert_eq!(t.variable.c_symbol(), symbol, "{name}");
     }
+}
+
+#[test]
+fn passwordcheck_min_password_length_matches_passwordcheck_c() {
+    let GucSetting::Int(len) = find("passwordcheck.min_password_length") else {
+        panic!("passwordcheck.min_password_length should be an int GUC");
+    };
+    assert_eq!(len.context, PGC_SUSET);
+    assert_eq!(len.flags, GUC_UNIT_BYTE);
+    assert_eq!(len.boot_val, GucDefaultValue::Int(8));
+    assert_eq!(len.min, 0);
+    assert_eq!(len.max, i32::MAX);
 }

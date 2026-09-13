@@ -13,8 +13,8 @@ datum = { path = "../../_support/types/datum" }
 mcx = { path = "../../_support/mcx" }
 types_error = { path = "../../_support/types/types_error" }
 types_fmgr = { path = "../../_support/types/fmgr" }
-types_guc = { path = "../../_support/types/types_guc" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 guc = { path = "../../backend/utils/misc/guc" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 crypt = { path = "../../backend/libpq/crypt" }
 user = { path = "../../backend/commands/user" }

@@ -327,7 +327,7 @@ pub fn lca_inner(a: &[&[u8]]) -> Option<Vec<u8>> {
 /// `prefix` ('*') the predicate is a prefix; with `ci` ('@') the comparison
 /// is case-insensitive under the default collation's ctype.
 fn ltree_label_match(pred: &[u8], label: &[u8], prefix: bool, ci: bool) -> bool {
-    label_match_with(pred, label, prefix, ci, ::pg_locale::database_ctype_is_c(), fold)
+    label_match_with(pred, label, prefix, ci, crate::crc::default_ctype_is_c(), fold)
 }
 
 /// The matcher over an explicit ctype flag and fold primitive. A casefold can

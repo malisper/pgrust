@@ -5,6 +5,7 @@
 //! (strategies 15 `~>` / 16 `<#>` / 17 `<->` / 18 `<=>`).
 
 use datum::Datum;
+use mcx::Mcx;
 use types_error::{PgError, PgResult, ERRCODE_ARRAY_ELEMENT_ERROR};
 use types_fmgr::{byref_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_gist::{GistEntryVector, GistSplitVec, GISTENTRY};
@@ -31,25 +32,19 @@ pub(crate) unsafe fn entry_arg<'a>(fcinfo: &Fcinfo, i: usize) -> &'a GISTENTRY {
     unsafe { &*(fcinfo.arg(i).as_usize() as *const GISTENTRY) }
 }
 
-/// Payload (post-varlena-header) bytes of a cube datum. cube has
-/// `STORAGE = plain`, so images are 4-byte-header everywhere (heap, index
-/// keys, expression results); short/toasted forms are canonicalized
-/// defensively anyway.
-pub(crate) unsafe fn cube_payload<'a>(d: Datum) -> std::borrow::Cow<'a, [u8]> {
+/// `DatumGetNDBOXP` payload: 4-byte-header images are borrowed, anything
+/// else (short, compressed, external) is detoasted.
+pub(crate) unsafe fn cube_payload<'a>(mcx: Mcx<'_>, d: Datum) -> PgResult<std::borrow::Cow<'a, [u8]>> {
     let p = d.as_usize() as *const u8;
     // SAFETY: caller passes a live non-null cube datum.
     unsafe {
         if varatt::varatt_is_4b_u(p) {
-            std::borrow::Cow::Borrowed(core::slice::from_raw_parts(
+            Ok(std::borrow::Cow::Borrowed(core::slice::from_raw_parts(
                 p.add(4),
                 varatt::varsize_4b(p) - 4,
-            ))
+            )))
         } else {
-            let total = varatt::varsize_any(p);
-            let hdr = if varatt::varatt_is_1b(p) { 1 } else { 4 };
-            std::borrow::Cow::Owned(
-                core::slice::from_raw_parts(p.add(hdr), total - hdr).to_vec(),
-            )
+            Ok(std::borrow::Cow::Owned(types_fmgr::datum_varlena_packed(d, mcx)?.data().to_vec()))
         }
     }
 }
@@ -84,10 +79,10 @@ pub fn fc_g_cube_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     unsafe { *recheck = false };
 
     // SAFETY: non-null cube datums per the strict catalog signature.
-    let key_img = unsafe { cube_payload(entry.key) };
-    let query_img = unsafe { cube_payload(fcinfo.arg(1)) };
+    let key_img = unsafe { cube_payload(fcinfo.result_mcx(), entry.key)? };
+    let query_img = unsafe { fcinfo.arg_varlena_packed(1)? };
     let key = CubeView::from_payload(&key_img);
-    let query = CubeView::from_payload(&query_img);
+    let query = CubeView::from_payload(query_img.data());
 
     let res = if entry.page_is_leaf {
         // g_cube_leaf_consistent
@@ -119,7 +114,7 @@ pub fn fc_g_cube_union(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 
     let n = entryvec.n as usize;
     // SAFETY: non-null cube key datums.
-    let mut out: Vec<u8> = unsafe { cube_payload(entryvec.vector[0].key) }.to_vec();
+    let mut out: Vec<u8> = unsafe { cube_payload(fcinfo.result_mcx(), entryvec.vector[0].key)? }.to_vec();
     // Rebuild the full image (header + payload) for the union loop.
     let mut cur = {
         let mut img = Vec::with_capacity(4 + out.len());
@@ -129,7 +124,7 @@ pub fn fc_g_cube_union(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     };
     for i in 1..n {
         // SAFETY: non-null cube key datums.
-        let other = unsafe { cube_payload(entryvec.vector[i].key) };
+        let other = unsafe { cube_payload(fcinfo.result_mcx(), entryvec.vector[i].key)? };
         let mut full = Vec::with_capacity(4 + other.len());
         full.extend_from_slice(&datum::varlena::set_varsize_4b(4 + other.len()));
         full.extend_from_slice(&other);
@@ -158,8 +153,8 @@ pub fn fc_g_cube_penalty(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     let result = fcinfo.arg(2).as_usize() as *mut f32;
 
     // SAFETY: non-null cube key datums.
-    let orig = unsafe { cube_payload(origentry.key) };
-    let new = unsafe { cube_payload(newentry.key) };
+    let orig = unsafe { cube_payload(fcinfo.result_mcx(), origentry.key)? };
+    let new = unsafe { cube_payload(fcinfo.result_mcx(), newentry.key)? };
     let ud = ops::cube_union_v0(
         &CubeView::from_payload(&orig),
         &CubeView::from_payload(&new),
@@ -185,7 +180,7 @@ pub fn fc_g_cube_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     imgs.push(Vec::new()); // offset 0 unused
     for i in 1..n {
         // SAFETY: non-null cube key datums.
-        let payload = unsafe { cube_payload(entryvec.vector[i].key) };
+        let payload = unsafe { cube_payload(fcinfo.result_mcx(), entryvec.vector[i].key)? };
         let mut full = Vec::with_capacity(4 + payload.len());
         full.extend_from_slice(&datum::varlena::set_varsize_4b(4 + payload.len()));
         full.extend_from_slice(&payload);
@@ -265,8 +260,8 @@ pub fn fc_g_cube_picksplit(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
 /// `g_cube_same`.
 pub fn fc_g_cube_same(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: non-null cube datums per the catalog signature.
-    let a_img = unsafe { cube_payload(fcinfo.arg(0)) };
-    let b_img = unsafe { cube_payload(fcinfo.arg(1)) };
+    let a_img = unsafe { cube_payload(fcinfo.result_mcx(), fcinfo.arg(0))? };
+    let b_img = unsafe { cube_payload(fcinfo.result_mcx(), fcinfo.arg(1))? };
     let same = ops::cube_cmp_v0(
         &CubeView::from_payload(&a_img),
         &CubeView::from_payload(&b_img),
@@ -283,7 +278,7 @@ pub fn fc_g_cube_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     let entry = unsafe { entry_arg(fcinfo, 0) };
     let strategy = fcinfo.arg(2).as_u32() as u16;
     // SAFETY: non-null cube key datum.
-    let key_img = unsafe { cube_payload(entry.key) };
+    let key_img = unsafe { cube_payload(fcinfo.result_mcx(), entry.key)? };
     let cube = CubeView::from_payload(&key_img);
 
     let retval = if strategy == KNN_COORD {
@@ -298,8 +293,8 @@ pub fn fc_g_cube_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         ops::coord_llur(&cube, coord, !entry.page_is_leaf)
     } else {
         // SAFETY: non-null cube query datum.
-        let query_img = unsafe { cube_payload(fcinfo.arg(1)) };
-        let query = CubeView::from_payload(&query_img);
+        let query_img = unsafe { fcinfo.arg_varlena_packed(1)? };
+        let query = CubeView::from_payload(query_img.data());
         match strategy {
             KNN_TAXICAB => ops::distance_taxicab(&cube, &query),
             KNN_EUCLID => ops::cube_distance(&cube, &query),

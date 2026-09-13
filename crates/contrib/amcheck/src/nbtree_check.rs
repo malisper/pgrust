@@ -7,7 +7,7 @@ use core::slice::from_raw_parts;
 use ::bloomfilter::BloomFilter;
 use ::datum::Datum;
 use ::detoast::detoast_attr;
-use ::execindexing::{table_index_build_scan, BuildIndexInfo, IndexInfo};
+use ::execindexing::{table_index_build_scan_with_snapshot, BuildIndexInfo, IndexInfo};
 use ::mcx::{vec_from_elem_in, Mcx, MemoryContext};
 use ::snapmgr::{GetTransactionSnapshot, RegisterSnapshot, Snapshot, UnregisterSnapshot};
 use ::cache_syscache::{
@@ -444,6 +444,7 @@ fn bt_check_every_level<'mcx>(
         let filter = state.filter.as_mut().expect("filter set for heapallindexed");
         let heaptuplespresent = &mut state.heaptuplespresent;
         let scratch = &mut state.scratch;
+        let snapshot = state.snapshot.as_ref().expect("snapshot registered for heapallindexed");
 
         // verify_nbtree.c:586-588
         elog_seams::ereport::call(PgError::new(
@@ -455,14 +456,14 @@ fn bt_check_every_level<'mcx>(
             ),
         ))?;
 
-        // C divergence: table_index_build_scan builds its own heap scan and does not read our registered snapshot (acceptable for committed data).
-        table_index_build_scan(
+        table_index_build_scan_with_snapshot(
             scan_mcx,
             &heaprel_alias,
             &rel_alias,
             &mut indexinfo,
             true,
             /* progress */ false, // verify_nbtree.c:590
+            snapshot,
             |index, tid, values, isnull, _alive| {
                 bt_tuple_present_callback(
                     scratch,

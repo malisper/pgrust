@@ -97,6 +97,38 @@ fn at_eosubxact_abort_clears_handed_off_spi_tuptable() {
     SPI_finish().unwrap();
 }
 
+// C's SPITupleTable is a stable heap pointer: a domain input function or
+// PL/pgSQL call reached while a caller walks a result table may connect to
+// SPI again (tablefunc crosstab under a plpgsql-checked output domain).
+#[test]
+fn tuptable_with_allows_nested_spi_connect() {
+    reset();
+    SPI_connect().unwrap();
+    let cur = xact::GetCurrentSubTransactionId();
+    let table = mcx::McxOwned::<tuptable::TuptabTy>::try_new(
+        MemoryContext::new("SPI TupTable"),
+        |mcx| {
+            Ok(TuptabData {
+                tupdesc: tupdesc::CreateTemplateTupleDesc(mcx, 0)?,
+                vals: mcx::vec_with_capacity_in(mcx, 1)?,
+            })
+        },
+    )
+    .unwrap();
+    with_current(|c| {
+        c.tuptables.push(tuptable::TuptabEntry { id: 78, subid: cur, table });
+    });
+    let n = tuptable_with(TuptabHandle(78), |t| {
+        SPI_connect().unwrap();
+        let depth = debug_stack_depth();
+        SPI_finish().unwrap();
+        (t.vals.len(), depth)
+    });
+    assert_eq!(n, (0, 2));
+    SPI_freetuptable(TuptabHandle(78)).unwrap();
+    SPI_finish().unwrap();
+}
+
 #[test]
 fn empty_stack_seam_arms() {
     reset();

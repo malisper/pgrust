@@ -225,6 +225,11 @@ impl<'m, 'f> TupleSink<'m, 'f> {
             None => Datum::from_usize(0),
         }
     }
+
+    pub fn finish_command_status(self, fcinfo: &mut Fcinfo, tag: &str) -> PgResult<Datum> {
+        restore_local_gucs(self.guc_nestlevel);
+        materialize_command_status(self.mcx, fcinfo, tag)
+    }
 }
 
 impl RowSink for TupleSink<'_, '_> {

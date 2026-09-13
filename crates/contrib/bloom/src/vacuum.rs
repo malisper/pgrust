@@ -66,8 +66,7 @@ fn bulkdelete_common<'mcx>(
     let state = init_bloom_state(index)?;
     let size = state.size_of_bloom_tuple;
 
-    let scratch = mcx::MemoryContext::new_bump("blbulkdelete xlog");
-    let smcx = scratch.mcx();
+    let mut scratch = mcx::MemoryContext::new_bump("blbulkdelete xlog");
 
     let mut not_full_page: Vec<BlockNumber> = Vec::new();
 
@@ -84,13 +83,14 @@ fn bulkdelete_common<'mcx>(
             info.strategy.clone(),
         )?;
         LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE)?;
-        let mut gxlog = GenericXLogStart(smcx, index)?;
+        let mut gxlog = GenericXLogStart(scratch.mcx(), index)?;
         let page = gxlog.register_buffer(buffer, 0)?;
 
         // Empty/deleted pages wait for blvacuumcleanup().
         if page_is_new(page) || page_is_deleted(page) {
             UnlockReleaseBuffer(buffer)?;
             GenericXLogAbort(gxlog);
+            scratch.reset();
             continue;
         }
 
@@ -132,12 +132,13 @@ fn bulkdelete_common<'mcx>(
             GenericXLogAbort(gxlog);
         }
         UnlockReleaseBuffer(buffer)?;
+        scratch.reset();
     }
 
     // The rebuilt notFullPage list may already be stale; blinsert() copes.
     let buffer = bufmgr::ReadBuffer(index, BLOOM_METAPAGE_BLKNO)?;
     LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE)?;
-    let mut gxlog = GenericXLogStart(smcx, index)?;
+    let mut gxlog = GenericXLogStart(scratch.mcx(), index)?;
     let page = gxlog.register_buffer(buffer, 0)?;
     for (i, &b) in not_full_page.iter().enumerate() {
         meta_set_notfull(page, i, b);

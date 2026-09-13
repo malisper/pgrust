@@ -156,3 +156,13 @@ fn daitch_mokotoff_utf8_oracle() {
     assert_eq!(dm("ţamas"), "364000,464000");
     assert_eq!(dm("țamas"), "364000,464000");
 }
+
+#[test]
+fn ctype_follows_libc_locale() {
+    // No default locale is installed here: ASCII ctype, high-bit bytes are not letters.
+    assert!(!c_isalpha(0xe9));
+    assert_eq!(c_toupper(0xe9), 0xe9);
+    assert_eq!(c_toupper(b'a'), b'A');
+    assert!(c_isalpha(b'z'));
+    assert_eq!(sx("\u{e9}"), "");
+}

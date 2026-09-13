@@ -397,40 +397,43 @@ fn pg_decode_filter_prepare(
     Ok(gid.contains("_nodecode"))
 }
 
-fn print_literal(s: &mut logical::OutBuf, typid: Oid, outputstr: &str) {
+fn print_literal(s: &mut logical::OutBuf, typid: Oid, outputstr: &[u8]) {
+    let buf = s.as_mut_vec();
     match typid {
         INT2OID | INT4OID | INT8OID | OIDOID | FLOAT4OID | FLOAT8OID | NUMERICOID => {
-            s.push_str(outputstr);
+            buf.extend_from_slice(outputstr);
         }
         BITOID | VARBITOID => {
-            let _ = write!(s, "B'{outputstr}'");
+            buf.extend_from_slice(b"B'");
+            buf.extend_from_slice(outputstr);
+            buf.push(b'\'');
         }
         BOOLOID => {
-            if outputstr == "t" {
-                s.push_str("true");
+            if outputstr == b"t" {
+                buf.extend_from_slice(b"true");
             } else {
-                s.push_str("false");
+                buf.extend_from_slice(b"false");
             }
         }
         _ => {
-            s.push('\'');
-            for ch in outputstr.chars() {
-                if ch == '\'' {
-                    s.push(ch);
+            buf.push(b'\'');
+            for &ch in outputstr {
+                if ch == b'\'' {
+                    buf.push(ch);
                 }
-                s.push(ch);
+                buf.push(ch);
             }
-            s.push('\'');
+            buf.push(b'\'');
         }
     }
 }
 
-fn oid_output_function_call(mcx: Mcx<'_>, typoutput: Oid, val: Datum) -> PgResult<String> {
+fn oid_output_function_call(mcx: Mcx<'_>, typoutput: Oid, val: Datum) -> PgResult<Vec<u8>> {
     let mut flinfo = fmgr_seams::fmgr_info::call(typoutput)?;
     let d = types_fmgr::function_call1_coll_in(&mut flinfo, InvalidOid, mcx, val)?;
     // SAFETY: output functions return a NUL-terminated cstring datum.
     let bytes = unsafe { core::ffi::CStr::from_ptr((d.as_usize() as *const u8).cast()) }.to_bytes();
-    Ok(String::from_utf8_lossy(bytes).into_owned())
+    Ok(bytes.to_vec())
 }
 
 fn varatt_is_external_ondisk(val: Datum) -> bool {
@@ -466,8 +469,8 @@ fn tuple_to_stringinfo(
         }
 
         s.push(' ');
-        let attname = String::from_utf8_lossy(attr.attname.name_str()).into_owned();
-        s.push_str(&format_type::quote_identifier(&attname));
+        s.as_mut_vec()
+            .extend_from_slice(&format_type::quote_identifier_bytes(attr.attname.name_str()));
 
         s.push('[');
         s.push_str(&format_type::format_type_be(typid)?);
@@ -959,4 +962,22 @@ pub fn init_seams() {
         lookup,
         pg_init: None,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_literal_keeps_non_utf8_bytes() {
+        let mut out = logical::OutBuf::default();
+        print_literal(&mut out, types_core::TEXTOID, b"a\xe9'b");
+        assert_eq!(out.as_bytes(), b"'a\xe9''b'");
+        out.clear();
+        print_literal(&mut out, BOOLOID, b"t");
+        assert_eq!(out.as_bytes(), b"true");
+        out.clear();
+        print_literal(&mut out, VARBITOID, b"101");
+        assert_eq!(out.as_bytes(), b"B'101'");
+    }
 }

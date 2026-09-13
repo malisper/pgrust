@@ -108,6 +108,70 @@ pub fn table_index_build_range_scan_with_xmin<'mcx, F>(
     start_blockno: BlockNumber,
     numblocks: BlockNumber,
     hoisted_oldest_xmin: Option<types_core::TransactionId>,
+    callback: F,
+) -> PgResult<f64>
+where
+    F: FnMut(&Relation<'mcx>, &ItemPointerData, &[Datum], &[bool], bool) -> PgResult<()>,
+{
+    build_range_scan_core(
+        mcx,
+        heap_relation,
+        index_relation,
+        index_info,
+        allow_sync,
+        anyvisible,
+        progress,
+        start_blockno,
+        numblocks,
+        hoisted_oldest_xmin,
+        None,
+        callback,
+    )
+}
+
+/// verify_nbtree.c:557: the caller's registered snapshot drives the scan.
+pub fn table_index_build_scan_with_snapshot<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfo<'mcx>,
+    allow_sync: bool,
+    progress: bool,
+    snapshot: &snapmgr::Snapshot,
+    callback: F,
+) -> PgResult<f64>
+where
+    F: FnMut(&Relation<'mcx>, &ItemPointerData, &[Datum], &[bool], bool) -> PgResult<()>,
+{
+    build_range_scan_core(
+        mcx,
+        heap_relation,
+        index_relation,
+        index_info,
+        allow_sync,
+        false,
+        progress,
+        0,
+        InvalidBlockNumber,
+        None,
+        Some(snapshot),
+        callback,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_range_scan_core<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfo<'mcx>,
+    allow_sync: bool,
+    anyvisible: bool,
+    progress: bool,
+    start_blockno: BlockNumber,
+    numblocks: BlockNumber,
+    hoisted_oldest_xmin: Option<types_core::TransactionId>,
+    snapshot: Option<&snapmgr::Snapshot>,
     mut callback: F,
 ) -> PgResult<f64>
 where
@@ -129,11 +193,13 @@ where
 
     // Concurrent builds scan under a registered MVCC snapshot; OldestXmin is
     // only for the SnapshotAny lane's HTSV routing.
-    let registered = if concurrent {
+    let (registered, owned) = if let Some(snap) = snapshot {
+        (Some(snap.clone()), false)
+    } else if concurrent {
         let snap = snapmgr::GetTransactionSnapshot()?;
-        Some(snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot"))
+        (Some(snapmgr::RegisterSnapshot(Some(&snap))?.expect("registered snapshot")), true)
     } else {
-        None
+        (None, false)
     };
     let oldest_xmin = if concurrent {
         types_core::InvalidTransactionId
@@ -396,8 +462,8 @@ where
 
     exectuples::exec_clear_tuple(&mut slot, mcx);
     heapam::heap_endscan(scan)?;
-    if let Some(snap) = registered {
-        snapmgr::UnregisterSnapshot(Some(&snap));
+    if owned {
+        snapmgr::UnregisterSnapshot(registered.as_ref());
     }
     Ok(reltuples)
 }

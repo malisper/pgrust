@@ -19,17 +19,34 @@ const MAX_METAPHONE_STRLEN: usize = 255;
 //                                     ABCDEFGHIJKLMNOPQRSTUVWXYZ
 const SOUNDEX_TABLE: &[u8; 26] = b"01230120022455012623010202";
 
-fn ascii_upper(c: u8) -> u8 {
-    // C-locale toupper: ASCII-only folding.
-    if c.is_ascii_lowercase() {
-        c - b'a' + b'A'
-    } else {
-        c
+// C's toupper()/isalpha() under the backend's LC_CTYPE (pg_perm_setlocale).
+// C's toupper()/isalpha() run under the backend's LC_CTYPE (postinit's
+// pg_perm_setlocale); here that is the default locale's libc ctype.
+fn ctype_locale() -> Option<&'static pg_locale::PgLocale> {
+    if !pg_locale::default_locale_installed() {
+        return None;
+    }
+    pg_locale::pg_newlocale_from_collation(types_core::DEFAULT_COLLATION_OID)
+        .ok()
+        .filter(|l| l.provider == pg_locale::COLLPROVIDER_LIBC && !l.ctype_is_c)
+}
+
+fn c_toupper(c: u8) -> u8 {
+    match ctype_locale() {
+        Some(l) => l.toupper_l(c),
+        None => c.to_ascii_uppercase(),
+    }
+}
+
+fn c_isalpha(c: u8) -> bool {
+    match ctype_locale() {
+        Some(l) => l.isalpha_l(c),
+        None => c.is_ascii_alphabetic(),
     }
 }
 
 fn soundex_code(letter: u8) -> u8 {
-    let letter = ascii_upper(letter);
+    let letter = c_toupper(letter);
     if letter.is_ascii_uppercase() {
         SOUNDEX_TABLE[(letter - b'A') as usize]
     } else {
@@ -40,17 +57,17 @@ fn soundex_code(letter: u8) -> u8 {
 fn soundex(instr: &[u8]) -> [u8; SOUNDEX_LEN] {
     let mut out = [0u8; SOUNDEX_LEN];
     let mut i = 0;
-    while i < instr.len() && !instr[i].is_ascii_alphabetic() {
+    while i < instr.len() && !c_isalpha(instr[i]) {
         i += 1;
     }
     if i == instr.len() {
         return out;
     }
-    out[0] = ascii_upper(instr[i]);
+    out[0] = c_toupper(instr[i]);
     i += 1;
     let mut count = 1;
     while i < instr.len() && count < SOUNDEX_LEN {
-        if instr[i].is_ascii_alphabetic() && soundex_code(instr[i]) != soundex_code(instr[i - 1]) {
+        if c_isalpha(instr[i]) && soundex_code(instr[i]) != soundex_code(instr[i - 1]) {
             let c = soundex_code(instr[i]);
             if c != b'0' {
                 out[count] = c;
@@ -80,8 +97,8 @@ const METAPHONE_CODES: [u8; 26] = [
 ];
 
 fn getcode(c: u8) -> u8 {
-    if c.is_ascii_alphabetic() {
-        let c = ascii_upper(c);
+    if c_isalpha(c) {
+        let c = c_toupper(c);
         if c.is_ascii_uppercase() {
             return METAPHONE_CODES[(c - b'A') as usize];
         }
@@ -110,7 +127,7 @@ fn metaphone(word: &[u8], max_phonemes: usize, out: &mut Vec<u8>) {
 
     let at = |i: isize| -> u8 {
         if i >= 0 && (i as usize) < word.len() {
-            ascii_upper(word[i as usize])
+            c_toupper(word[i as usize])
         } else {
             0
         }
@@ -130,7 +147,7 @@ fn metaphone(word: &[u8], max_phonemes: usize, out: &mut Vec<u8>) {
         if at(w_idx) == 0 {
             return;
         }
-        if at(w_idx).is_ascii_alphabetic() {
+        if c_isalpha(at(w_idx)) {
             break;
         }
         w_idx += 1;
@@ -179,7 +196,7 @@ fn metaphone(word: &[u8], max_phonemes: usize, out: &mut Vec<u8>) {
         let next = at(w_idx + 1);
         let after_next = if next != 0 { at(w_idx + 2) } else { 0 };
 
-        if !curr.is_ascii_alphabetic() || (curr == prev && curr != b'C') {
+        if !c_isalpha(curr) || (curr == prev && curr != b'C') {
             w_idx += 1;
             continue;
         }
@@ -225,7 +242,7 @@ fn metaphone(word: &[u8], max_phonemes: usize, out: &mut Vec<u8>) {
                         skip_letter += 1;
                     }
                 } else if next == b'N' {
-                    if !after_next.is_ascii_alphabetic()
+                    if !c_isalpha(after_next)
                         || (after_next == b'E' && look_ahead(w_idx, 3) == b'D')
                     {
                         // dropped

@@ -65,6 +65,31 @@ fn composite_tupdesc<'m>(mcx: Mcx<'m>, flinfo: &FmgrInfo) -> PgResult<TupleDescD
     Ok(resolved.result_tuple_desc.expect("composite result has tupdesc"))
 }
 
+fn pg_visibility_tupdesc<'m>(
+    mcx: Mcx<'m>,
+    include_blkno: bool,
+    include_pd: bool,
+) -> PgResult<TupleDescData<'m>> {
+    let maxattr = 2 + include_blkno as i32 + include_pd as i32;
+    let mut td = tupdesc::CreateTemplateTupleDesc(mcx, maxattr)?;
+    let mut a = 0;
+    if include_blkno {
+        a += 1;
+        tupdesc::TupleDescInitBuiltinEntry(&mut td, a, "blkno", types_core::INT8OID, -1, 0)?;
+    }
+    a += 1;
+    tupdesc::TupleDescInitBuiltinEntry(&mut td, a, "all_visible", types_core::BOOLOID, -1, 0)?;
+    a += 1;
+    tupdesc::TupleDescInitBuiltinEntry(&mut td, a, "all_frozen", types_core::BOOLOID, -1, 0)?;
+    if include_pd {
+        a += 1;
+        tupdesc::TupleDescInitBuiltinEntry(&mut td, a, "pd_all_visible", types_core::BOOLOID, -1, 0)?;
+    }
+    debug_assert_eq!(a, maxattr as i16);
+    typcache_seams::assign_record_type_typmod::call(&mut td)?;
+    Ok(td)
+}
+
 fn composite_result(
     mcx: Mcx<'_>,
     tupdesc: &TupleDescData<'_>,
@@ -393,8 +418,7 @@ fn collect_corrupt_items(
 }
 
 
-fn fc_pg_visibility_map(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let flinfo = flinfo.expect("pg_visibility_map: resolved FmgrInfo required");
+fn fc_pg_visibility_map(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let relid = fcinfo.arg(0).as_oid();
     let blkno = fcinfo.arg(1).as_i64();
     // SAFETY: the arming context outlives this call.
@@ -405,7 +429,7 @@ fn fc_pg_visibility_map(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     if blkno < 0 || blkno > MaxBlockNumber as i64 {
         return Err(invalid_block_err());
     }
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = pg_visibility_tupdesc(mcx, false, false)?;
 
     let mut vmbuffer = VmBuffer::new();
     let mapbits = visibilitymap_get_status(&rel, blkno as BlockNumber, &mut vmbuffer)?;
@@ -419,8 +443,7 @@ fn fc_pg_visibility_map(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     composite_result(mcx, &tupdesc, &values, &[false; 2])
 }
 
-fn fc_pg_visibility(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let flinfo = flinfo.expect("pg_visibility: resolved FmgrInfo required");
+fn fc_pg_visibility(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let relid = fcinfo.arg(0).as_oid();
     let blkno = fcinfo.arg(1).as_i64();
     // SAFETY: the arming context outlives this call.
@@ -431,7 +454,7 @@ fn fc_pg_visibility(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     if blkno < 0 || blkno > MaxBlockNumber as i64 {
         return Err(invalid_block_err());
     }
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = pg_visibility_tupdesc(mcx, false, true)?;
 
     let mut vmbuffer = VmBuffer::new();
     let mapbits = visibilitymap_get_status(&rel, blkno as BlockNumber, &mut vmbuffer)?;
@@ -469,11 +492,10 @@ fn fc_pg_visibility(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 
 fn vbits_rows(
     mcx: Mcx<'_>,
-    flinfo: &FmgrInfo,
     relid: types_core::Oid,
     include_pd: bool,
 ) -> PgResult<Vec<Vec<u8>>> {
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = pg_visibility_tupdesc(mcx, true, include_pd)?;
     let info = collect_visibility_data(mcx, relid, include_pd)?;
     let mut rows = Vec::with_capacity(info.bits.len());
     for (blkno, bits) in info.bits.iter().enumerate() {
@@ -497,7 +519,7 @@ fn fc_pg_visibility_map_rel(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
         let relid = fcinfo.arg(0).as_oid();
         // SAFETY: the arming context outlives this call.
         let mcx = unsafe { fcinfo.result_mcx_detached() };
-        Some(vbits_rows(mcx, flinfo, relid, false)?)
+        Some(vbits_rows(mcx, relid, false)?)
     } else {
         None
     };
@@ -510,7 +532,7 @@ fn fc_pg_visibility_rel(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
         let relid = fcinfo.arg(0).as_oid();
         // SAFETY: the arming context outlives this call.
         let mcx = unsafe { fcinfo.result_mcx_detached() };
-        Some(vbits_rows(mcx, flinfo, relid, true)?)
+        Some(vbits_rows(mcx, relid, true)?)
     } else {
         None
     };

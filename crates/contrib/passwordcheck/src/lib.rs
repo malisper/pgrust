@@ -6,15 +6,8 @@
 //!
 //! The cracklib arm (`USE_CRACKLIB`, passwordcheck.c:120-127) is a build
 //! option pgrust never sets, exactly like a stock PGDG build.
-//!
-//! DIVERGENCE (GUC): C's `_PG_init` runs
-//! `DefineCustomIntVariable("passwordcheck.min_password_length", ..., 8, 0,
-//! INT_MAX, PGC_SUSET, GUC_UNIT_BYTE, ...)`. pgrust has no typed custom-GUC
-//! store (the isn/pg_trgm pattern), so the parameter is a PGC_SUSET custom
-//! string with boot value "8", parsed on every check: a non-integer or
-//! negative SET falls back to 8 where C would refuse the SET, and SHOW echoes
-//! the SET spelling rather than C's byte-unit rendering. The check messages,
-//! SQLSTATEs and the DETAIL that quotes the parameter are byte-identical.
+
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use datum::Datum;
 use mcx::Mcx;
@@ -22,26 +15,21 @@ use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_fmgr::PGFunction;
 
 const LIBRARY: &str = "passwordcheck";
-const MIN_PASSWORD_LENGTH_GUC: &str = "passwordcheck.min_password_length";
-/// `static int min_password_length = 8;`
-const DEFAULT_MIN_PASSWORD_LENGTH: i32 = 8;
+
+// passwordcheck.c:37 `static int min_password_length = 8` (PGC_SUSET custom
+// GUC, statically defined like auto_explain.*).
+static MIN_PASSWORD_LENGTH: AtomicI32 = AtomicI32::new(8);
 
 fn invalid(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg.to_string()).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
-/// C's `min_password_length` global, read from the custom GUC (see the
-/// DIVERGENCE note above).
 fn min_password_length() -> i32 {
-    match guc::GetConfigOption(MIN_PASSWORD_LENGTH_GUC, true, false) {
-        Ok(Some(s)) => s
-            .trim()
-            .parse::<i32>()
-            .ok()
-            .filter(|v| *v >= 0)
-            .unwrap_or(DEFAULT_MIN_PASSWORD_LENGTH),
-        _ => DEFAULT_MIN_PASSWORD_LENGTH,
-    }
+    MIN_PASSWORD_LENGTH.load(Ordering::Relaxed)
+}
+
+fn set_min_password_length(v: i32) {
+    MIN_PASSWORD_LENGTH.store(v, Ordering::Relaxed);
 }
 
 /// `check_password` (passwordcheck.c:44-131). The previous-hook call at the
@@ -116,20 +104,16 @@ fn lookup(_function: &str) -> Option<PGFunction> {
 /// `_PG_init` (passwordcheck.c:134-155): the custom GUC, the reserved prefix,
 /// then the hook.
 fn pg_init() -> PgResult<()> {
-    guc::DefineCustomStringVariable(
-        MIN_PASSWORD_LENGTH_GUC,
-        Some("Minimum allowed password length."),
-        None,
-        Some("8"),
-        types_guc::PGC_SUSET,
-        0,
-    )?;
     guc::MarkGUCPrefixReserved("passwordcheck");
     user::install_check_password_hook(check_password);
     Ok(())
 }
 
 pub fn init_seams() {
+    guc_tables::vars::passwordcheck_min_password_length.install(guc_tables::GucVarAccessors {
+        get: min_password_length,
+        set: set_min_password_length,
+    });
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: LIBRARY,
         lookup,

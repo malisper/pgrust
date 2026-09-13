@@ -8,7 +8,7 @@
 
 #![allow(non_snake_case)]
 
-use ::mcx::Mcx;
+use ::mcx::{Mcx, MemoryContext};
 use ::stringinfo::StringInfo;
 use ::types_core::{XLogRecPtr, TEXTOID};
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OUT_OF_MEMORY};
@@ -226,6 +226,7 @@ fn fc_pg_get_wal_record_info(
     }
 
     let (values, nulls) = GetWALRecordInfo(mcx, &reader)?;
+    reader.XLogReaderFree(&mut routine);
 
     let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
     let d = Datum::from_usize(tup.header_ptr() as usize);
@@ -247,11 +248,16 @@ fn GetWALRecordsInfo(
 
     let (mut reader, mut routine) = InitXLogReaderState(mcx, start_lsn)?;
 
+    let mut tmp = MemoryContext::new_bump("GetWALRecordsInfo temporary cxt");
+
     while ReadNextXLogRecord(&mut reader, &mut routine)? && reader.v.EndRecPtr <= end_lsn {
-        let (values, nulls) = GetWALRecordInfo(mcx, &reader)?;
+        let (values, nulls) = GetWALRecordInfo(tmp.mcx(), &reader)?;
         srf.putvalues(&values, &nulls)?;
+        tmp.reset();
         postgres_seams::check_for_interrupts::call()?;
     }
+
+    reader.XLogReaderFree(&mut routine);
 
     Ok(srf.finish(fcinfo))
 }
@@ -416,6 +422,8 @@ fn GetWalStats(
         xlogstats::XLogRecStoreStats(&mut stats, &reader.v);
         postgres_seams::check_for_interrupts::call()?;
     }
+
+    reader.XLogReaderFree(&mut routine);
 
     GetXLogSummaryStats(mcx, &mut srf, &stats, stats_per_record)?;
 
@@ -618,14 +626,19 @@ fn fc_pg_get_wal_block_info(
 
     let (mut reader, mut routine) = InitXLogReaderState(mcx, start_lsn)?;
 
+    let mut tmp = MemoryContext::new_bump("pg_get_wal_block_info temporary cxt");
+
     while ReadNextXLogRecord(&mut reader, &mut routine)? && reader.v.EndRecPtr <= end_lsn {
         postgres_seams::check_for_interrupts::call()?;
 
         if !reader.XLogRecHasAnyBlockRefs() {
             continue;
         }
-        GetWALBlockInfo(mcx, &mut srf, &mut reader, show_data)?;
+        GetWALBlockInfo(tmp.mcx(), &mut srf, &mut reader, show_data)?;
+        tmp.reset();
     }
+
+    reader.XLogReaderFree(&mut routine);
 
     Ok(srf.finish(fcinfo))
 }
@@ -654,7 +667,7 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ::mcx::MemoryContext;
+
 
     /// pg_walinspect.c:120-125 — when the WAL reader cannot be allocated,
     /// InitXLogReaderState raises ERRCODE_OUT_OF_MEMORY "out of memory" with

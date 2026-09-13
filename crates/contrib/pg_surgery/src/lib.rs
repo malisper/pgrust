@@ -5,6 +5,7 @@
 //! heapam freeze record — replay is the shared FPI path on both engines).
 
 use datum::Datum;
+use tableam_vocab::HEAP_TABLE_AM_OID;
 use types_core::{
     BlockNumber, ForkNumber, FrozenTransactionId, InvalidTransactionId, OffsetNumber,
     RELATION_RELATION_ID,
@@ -167,7 +168,7 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
         ));
     }
 
-    if tableam_vocab::TableAm::of(&rel) != Some(tableam_vocab::TableAm::Heap) {
+    if rel.rd_rel.relam != HEAP_TABLE_AM_OID {
         return Err(Box::new(
             PgError::error("only heap AM is supported")
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),

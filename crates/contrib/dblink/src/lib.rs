@@ -47,7 +47,11 @@ fn pchomp(s: &str) -> String {
 }
 
 pub(crate) fn text_result(mcx: mcx::Mcx<'_>, s: &str) -> PgResult<Datum> {
-    Ok(types_fmgr::varlena_result(varlena::cstring_to_text(mcx, s.as_bytes())?))
+    text_result_bytes(mcx, s.as_bytes())
+}
+
+pub(crate) fn text_result_bytes(mcx: mcx::Mcx<'_>, s: &[u8]) -> PgResult<Datum> {
+    Ok(types_fmgr::varlena_result(varlena::cstring_to_text(mcx, s)?))
 }
 
 // C's `PG_GETARG_TEXT_PP` + text_to_cstring, as an owned String.
@@ -195,7 +199,7 @@ fn with_target<R>(target: &mut ConnTarget, f: impl FnOnce(&mut PgConn) -> R) -> 
             if !registry::named_present(name)? {
                 return Err(registry::conn_not_avail(Some(name)));
             }
-            registry::with_named(name, |rc| f(&mut rc.expect("present").conn))
+            registry::with_named_present(name, |rc| f(&mut rc.conn))
         }
         ConnTarget::Unnamed => registry::with_unnamed(|rc| match rc {
             Some(rc) => Ok(f(&mut rc.conn)),
@@ -207,7 +211,7 @@ fn with_target<R>(target: &mut ConnTarget, f: impl FnOnce(&mut PgConn) -> R) -> 
 fn with_target_ref<R>(target: &ConnTarget, f: impl FnOnce(&PgConn) -> R) -> PgResult<R> {
     match target {
         ConnTarget::Transient(c) => Ok(f(c)),
-        ConnTarget::Named(name) => registry::with_named(name, |rc| f(&rc.expect("present").conn)),
+        ConnTarget::Named(name) => registry::with_named_present(name, |rc| f(&rc.conn)),
         ConnTarget::Unnamed => registry::with_unnamed(|rc| match rc {
             Some(rc) => Ok(f(&rc.conn)),
             None => Err(registry::conn_not_avail(None)),
@@ -306,7 +310,7 @@ fn fc_dblink_error_message(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     if !registry::named_present(&name)? {
         return Err(registry::conn_not_avail(Some(&name)));
     }
-    let msg = registry::with_named(&name, |rc| rc.expect("present").conn.error_message())?;
+    let msg = registry::with_named_present(&name, |rc| rc.conn.error_message())?;
     if msg.is_empty() {
         text_result(mcx, "OK")
     } else {
@@ -319,8 +323,7 @@ fn fc_dblink_is_busy(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     if !registry::named_present(&name)? {
         return Err(registry::conn_not_avail(Some(&name)));
     }
-    let busy = registry::with_named(&name, |rc| {
-        let rc = rc.expect("present");
+    let busy = registry::with_named_present(&name, |rc| {
         rc.conn.consume_input();
         rc.conn.is_busy()
     })?;
@@ -333,7 +336,7 @@ fn fc_dblink_cancel_query(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     if !registry::named_present(&name)? {
         return Err(registry::conn_not_avail(Some(&name)));
     }
-    let msg = registry::with_named(&name, |rc| rc.expect("present").conn.cancel(30_000))??;
+    let msg = registry::with_named_present(&name, |rc| rc.conn.cancel(30_000))??;
     text_result(mcx, msg.as_deref().unwrap_or("OK"))
 }
 
@@ -343,8 +346,7 @@ fn fc_dblink_send_query(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     if !registry::named_present(&name)? {
         return Err(registry::conn_not_avail(Some(&name)));
     }
-    let (ok, errmsg) = registry::with_named(&name, |rc| {
-        let rc = rc.expect("present");
+    let (ok, errmsg) = registry::with_named_present(&name, |rc| {
         let ok = rc.conn.send_query(&sql);
         (ok, if ok { String::new() } else { rc.conn.error_message() })
     })?;
@@ -398,7 +400,7 @@ fn fc_dblink_record(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
         // fail=false: return the (empty) result the sink already holds.
         Ok(sink.finish(unsafe { &mut *fcinfo_ptr }))
     } else if res.status == ExecStatus::CommandOk {
-        materialize::materialize_command_status(mcx, unsafe { &mut *fcinfo_ptr }, &res.cmd_tag)
+        sink.finish_command_status(unsafe { &mut *fcinfo_ptr }, &res.cmd_tag)
     } else {
         Ok(sink.finish(unsafe { &mut *fcinfo_ptr }))
     };
@@ -448,8 +450,7 @@ fn fc_dblink_get_result(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     if !registry::named_present(&name)? {
         return Err(registry::conn_not_avail(Some(&name)));
     }
-    let (res, gucs) = registry::with_named(&name, |rc| {
-        let rc = rc.expect("present");
+    let (res, gucs) = registry::with_named_present(&name, |rc| {
         let res = rc.conn.get_result();
         let gucs = materialize::RemoteIoGucs::capture(&rc.conn);
         (res, gucs)
@@ -458,8 +459,8 @@ fn fc_dblink_get_result(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
         return Ok(Datum::from_usize(0)); // NULL: async results exhausted
     };
     if res.status != ExecStatus::CommandOk && res.status != ExecStatus::TuplesOk {
-        registry::with_named(&name, |rc| {
-            res_error(&rc.expect("present").conn, Some(&name), &res, fail, "while executing query")
+        registry::with_named_present(&name, |rc| {
+            res_error(&rc.conn, Some(&name), &res, fail, "while executing query")
         })??;
         return Ok(Datum::from_usize(0));
     }
@@ -644,7 +645,7 @@ fn conn_present(conname: &Option<String>) -> PgResult<bool> {
 
 fn on_conn<R>(conname: &Option<String>, f: impl FnOnce(&mut RemoteConn) -> R) -> PgResult<R> {
     match conname {
-        Some(name) => registry::with_named(name, |rc| f(rc.expect("present"))),
+        Some(name) => registry::with_named_present(name, f),
         None => registry::with_unnamed(|rc| match rc {
             Some(rc) => Ok(f(rc)),
             None => Err(registry::conn_not_avail(None)),

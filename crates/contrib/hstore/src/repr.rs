@@ -31,27 +31,43 @@ impl Pair {
     }
 }
 
-// comparePairs (hstore_io.c): (keylen, key) asc; exact tie sorts the
-// needfree entry after.
-fn compare_pairs(a: &Pair, b: &Pair) -> core::cmp::Ordering {
-    use core::cmp::Ordering;
-    match a.key.len().cmp(&b.key.len()) {
-        Ordering::Equal => match a.key.cmp(&b.key) {
-            Ordering::Equal => a.needfree.cmp(&b.needfree),
-            other => other,
-        },
-        other => other,
+// comparePairs (hstore_io.c:329): (keylen, key) asc; on an exact tie the
+// needfree entry sorts later.
+fn compare_pairs(a: &Pair, b: &Pair) -> i32 {
+    if a.key.len() == b.key.len() {
+        return match a.key.cmp(&b.key) {
+            core::cmp::Ordering::Equal => {
+                if a.needfree == b.needfree {
+                    0
+                } else if a.needfree {
+                    1
+                } else {
+                    -1
+                }
+            }
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Greater => 1,
+        };
+    }
+    if a.key.len() > b.key.len() {
+        1
+    } else {
+        -1
     }
 }
 
-// hstoreUniquePairs: sort, keep the first of each equal-key run.
-pub fn unique_pairs(mut pairs: Vec<Pair>) -> Vec<Pair> {
+// hstoreUniquePairs: pg_qsort (its equal-key permutation is observable:
+// which duplicate survives), then keep the first of each equal-key run.
+pub fn unique_pairs(pairs: Vec<Pair>) -> Vec<Pair> {
     if pairs.len() < 2 {
         return pairs;
     }
-    pairs.sort_by(compare_pairs);
-    let mut out: Vec<Pair> = Vec::with_capacity(pairs.len());
-    for p in pairs {
+    let mut order: Vec<usize> = (0..pairs.len()).collect();
+    pg_qsort::pg_qsort(&mut order, |&a, &b| compare_pairs(&pairs[a], &pairs[b]));
+    let mut slots: Vec<Option<Pair>> = pairs.into_iter().map(Some).collect();
+    let mut out: Vec<Pair> = Vec::with_capacity(slots.len());
+    for i in order {
+        let p = slots[i].take().expect("each index visited once");
         match out.last() {
             Some(last) if last.key == p.key => {}
             _ => out.push(p),
@@ -276,6 +292,26 @@ mod tests {
         ]);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].val.as_deref(), Some(b"old".as_slice()));
+    }
+
+    #[test]
+    fn dedup_survivor_follows_pg_qsort() {
+        let pairs = unique_pairs(vec![
+            p("b", Some("0")),
+            p("a", Some("1")),
+            p("a", Some("2")),
+            p("a", Some("3")),
+            p("a", Some("4")),
+            p("a", Some("5")),
+            p("a", Some("6")),
+        ]);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].key, b"a");
+        assert_eq!(pairs[0].val.as_deref(), Some(b"3".as_slice()));
+        assert_eq!(pairs[1].key, b"b");
+        let few = unique_pairs(vec![p("a", Some("1")), p("a", Some("2")), p("a", Some("3"))]);
+        assert_eq!(few.len(), 1);
+        assert_eq!(few[0].val.as_deref(), Some(b"1".as_slice()));
     }
 
     #[test]

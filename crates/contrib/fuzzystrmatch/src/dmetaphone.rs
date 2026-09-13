@@ -2,7 +2,7 @@
 //! string padded with five trailing spaces, exactly as the C works on its
 //! padded metastring; `length`/`last` are the pre-padding values.
 
-use crate::ascii_upper;
+use crate::c_toupper;
 
 fn get_at(s: &[u8], pos: isize) -> u8 {
     if pos < 0 || pos as usize >= s.len() {
@@ -43,7 +43,7 @@ pub fn double_metaphone(input: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let last = length - 1;
 
     let mut original: Vec<u8> = Vec::with_capacity(input.len() + 5);
-    original.extend(input.iter().map(|&c| ascii_upper(c)));
+    original.extend(input.iter().map(|&c| c_toupper(c)));
     original.extend_from_slice(b"     ");
     let s = &original[..];
 
