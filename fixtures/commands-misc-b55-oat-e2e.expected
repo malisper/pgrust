@@ -1,0 +1,40 @@
+-- bugs/batch-55-backend-commands-misc, fp-commands-event_trigger#1: the
+-- object-access hooks at event_trigger.c:340 (create), :465 (enable/disable)
+-- and :568 (owner change) fire. Witnessed via LOAD 'test_oat_hooks'; the
+-- expected file is captured from pgrust (the C install has no test modules).
+LOAD 'test_oat_hooks';
+SET test_oat_hooks.audit = on;
+NOTICE:  in object_access_hook_str: superuser attempting alter (subId=0x1000, set) [test_oat_hooks.audit]
+NOTICE:  in object_access_hook_str: superuser finished alter (subId=0x1000, set) [test_oat_hooks.audit]
+CREATE FUNCTION b55_etf() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN END $$;
+NOTICE:  in object access: superuser attempting namespace search (subId=0x0) [no report on violation, allowed]
+NOTICE:  in object access: superuser finished namespace search (subId=0x0) [no report on violation, allowed]
+NOTICE:  in object access: superuser attempting create (subId=0x0) [explicit]
+NOTICE:  in object access: superuser finished create (subId=0x0) [explicit]
+CREATE ROLE b55_oat_su SUPERUSER;
+NOTICE:  in object access: superuser attempting create (subId=0x0) [explicit]
+NOTICE:  in object access: superuser finished create (subId=0x0) [explicit]
+CREATE EVENT TRIGGER b55_et ON ddl_command_end EXECUTE FUNCTION b55_etf();
+NOTICE:  in object access: superuser attempting namespace search (subId=0x0) [no report on violation, allowed]
+NOTICE:  in object access: superuser finished namespace search (subId=0x0) [no report on violation, allowed]
+NOTICE:  in object access: superuser attempting create (subId=0x0) [explicit]
+NOTICE:  in object access: superuser finished create (subId=0x0) [explicit]
+ALTER EVENT TRIGGER b55_et DISABLE;
+NOTICE:  in object access: superuser attempting alter (subId=0x0) [explicit without auxiliary object]
+NOTICE:  in object access: superuser finished alter (subId=0x0) [explicit without auxiliary object]
+ALTER EVENT TRIGGER b55_et ENABLE;
+NOTICE:  in object access: superuser attempting alter (subId=0x0) [explicit without auxiliary object]
+NOTICE:  in object access: superuser finished alter (subId=0x0) [explicit without auxiliary object]
+ALTER EVENT TRIGGER b55_et OWNER TO b55_oat_su;
+NOTICE:  in object access: superuser attempting alter (subId=0x0) [explicit without auxiliary object]
+NOTICE:  in object access: superuser finished alter (subId=0x0) [explicit without auxiliary object]
+ALTER EVENT TRIGGER b55_et OWNER TO b55_oat_su;
+DROP EVENT TRIGGER b55_et;
+NOTICE:  in object access: superuser attempting drop (subId=0x0) []
+NOTICE:  in object access: superuser finished drop (subId=0x0) []
+DROP FUNCTION b55_etf();
+NOTICE:  in object access: superuser attempting drop (subId=0x0) []
+NOTICE:  in object access: superuser finished drop (subId=0x0) []
+DROP ROLE b55_oat_su;
+NOTICE:  in object access: superuser attempting drop (subId=0x0) []
+NOTICE:  in object access: superuser finished drop (subId=0x0) []

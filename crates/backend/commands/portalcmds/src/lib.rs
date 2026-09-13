@@ -77,9 +77,11 @@ pub fn PerformCursorOpen(
     // C: "Query contained by DeclareCursor needs to be jumbled if requested"
     // — the analysis-time jumble covered only the outer utility Query.
     // Jumbling the copy leaves the caller's tree unscribbled; the planned
-    // tree's queryId is the same either way. post_parse_analyze_hook: no
-    // plugin surface exists.
-    if queryjumble::IsQueryIdEnabled() {
+    // tree's queryId is the same either way.
+    if parser_analyze::tap_post_parse_analyze::is_installed() && queryjumble::IsQueryIdEnabled() {
+        let js = queryjumble::JumbleQuery(pmcx, &mut query)?;
+        parser_analyze::tap_post_parse_analyze::call_if(|f| f(&mut query, &js, source_text));
+    } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(pmcx, &mut query)?;
     }
 

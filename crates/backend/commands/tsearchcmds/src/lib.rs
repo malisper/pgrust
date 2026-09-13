@@ -178,18 +178,14 @@ fn first_ts_object_on_path(cache_id: i32, objname: &str, path: &[Oid]) -> PgResu
 }
 
 fn lookup_ts_object_in_search_path(cache_id: i32, objname: &str) -> PgResult<Oid> {
-    let mut path = [InvalidOid; 64];
-    let n = catalog_namespace::fetch_search_path_array(&mut path)?;
-    if n <= path.len() {
-        return first_ts_object_on_path(cache_id, objname, &path[..n]);
+    let mut path = vec![InvalidOid; 64];
+    loop {
+        let n = catalog_namespace::fetch_search_path_array(&mut path)?;
+        if n <= path.len() {
+            return first_ts_object_on_path(cache_id, objname, &path[..n]);
+        }
+        path.resize(n, InvalidOid);
     }
-    let mut rest = [InvalidOid; 1024];
-    let n = catalog_namespace::fetch_search_path_array(&mut rest)?;
-    first_ts_object_on_path(cache_id, objname, search_path_view(&rest, n))
-}
-
-fn search_path_view(buf: &[Oid], reported: usize) -> &[Oid] {
-    &buf[..reported.min(buf.len())]
 }
 
 pub fn get_ts_dict_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid> {

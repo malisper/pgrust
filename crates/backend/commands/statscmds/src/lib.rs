@@ -863,30 +863,13 @@ fn first_statext_on_path(stats_name: &str, path: &[Oid]) -> PgResult<Oid> {
     Ok(InvalidOid)
 }
 
-// fetch_search_path_array may report n larger than the stack slot.
 fn lookup_statext_in_search_path(stats_name: &str) -> PgResult<Oid> {
-    let mut path = [InvalidOid; 64];
-    let n = catalog_namespace::fetch_search_path_array(&mut path)?;
-    if n <= path.len() {
-        return first_statext_on_path(stats_name, &path[..n]);
-    }
-    let mut rest = [InvalidOid; 1024];
-    let n = catalog_namespace::fetch_search_path_array(&mut rest)?;
-    first_statext_on_path(stats_name, search_path_view(&rest, n))
-}
-
-fn search_path_view(buf: &[Oid], reported: usize) -> &[Oid] {
-    &buf[..reported.min(buf.len())]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn search_path_view_survives_count_past_slot() {
-        let buf = [InvalidOid; 64];
-        let view = search_path_view(&buf, 65);
-        assert_eq!(view.len(), 64);
+    let mut path = vec![InvalidOid; 64];
+    loop {
+        let n = catalog_namespace::fetch_search_path_array(&mut path)?;
+        if n <= path.len() {
+            return first_statext_on_path(stats_name, &path[..n]);
+        }
+        path.resize(n, InvalidOid);
     }
 }

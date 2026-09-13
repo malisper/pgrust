@@ -49,5 +49,6 @@ xlogutils_seams = { path = "../../access/transam/xlogutils_seams" }
 checkpointer = { path = "../../postmaster/checkpointer" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
 fd = { path = "../../storage/file/fd" }
 standby = { path = "../../storage/ipc/standby" }

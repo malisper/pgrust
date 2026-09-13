@@ -28,6 +28,7 @@ seam_core::seam!(
     pub fn define_sequence<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         stmt: &types_nodes::rawnodes::CreateSeqStmt<'mcx>,
+        source_text: &str,
     ) -> PgResult<Oid>
 );
 
@@ -35,6 +36,7 @@ seam_core::seam!(
     pub fn alter_sequence<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         stmt: &types_nodes::AlterSeqStmt<'mcx>,
+        source_text: &str,
     ) -> PgResult<Oid>
 );
 

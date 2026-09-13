@@ -200,12 +200,34 @@ pub fn init_seams() {
     sequence_seams::sequence_change_persistence::set(SequenceChangePersistence);
 }
 
-fn define_sequence_entry<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResult<Oid> {
-    DefineSequence(mcx, None, seq)
+// ProcessUtilityForAlterTable (tablecmds.c): the queued sequence statements
+// run under a ParseState carrying the ALTER TABLE source text.
+fn utility_parsestate<'mcx>(
+    mcx: Mcx<'mcx>,
+    source_text: &str,
+) -> PgResult<parser_small1::ParseState<'mcx, 'mcx>> {
+    let mut pstate = parser_small1::make_parsestate(mcx, None);
+    pstate.p_sourcetext =
+        Some(mcx::PgString::from_str_in(source_text, mcx)?.into_bytes().leak());
+    Ok(pstate)
 }
 
-fn alter_sequence_entry<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResult<Oid> {
-    AlterSequence(mcx, None, stmt)
+fn define_sequence_entry<'mcx>(
+    mcx: Mcx<'mcx>,
+    seq: &CreateSeqStmt<'mcx>,
+    source_text: &str,
+) -> PgResult<Oid> {
+    let pstate = utility_parsestate(mcx, source_text)?;
+    DefineSequence(mcx, Some(&pstate), seq)
+}
+
+fn alter_sequence_entry<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &AlterSeqStmt<'mcx>,
+    source_text: &str,
+) -> PgResult<Oid> {
+    let pstate = utility_parsestate(mcx, source_text)?;
+    AlterSequence(mcx, Some(&pstate), stmt)
 }
 
 fn my_lxid() -> LocalTransactionId {

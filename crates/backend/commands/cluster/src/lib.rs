@@ -445,11 +445,6 @@ fn swap_relation_files<'mcx>(
         mapped_tables.push(r2);
     }
 
-    // C's rd_createSubid/rd_*RelfilelocatorSubid transfer +
-    // RelationAssumeNewRelfilelocator(rel1) (cluster.c:1188-1205) is not
-    // ported: heapam never WAL-skips permanent rels and bulkwrite/nbtree
-    // smgrimmedsync eagerly, so no deferred pendingSyncs read those fields.
-    // Load-bearing the day a WAL-skip (wal_level=minimal) lane lands.
     if row1.relkind != RELKIND_INDEX as i8 {
         row1.vals.push((Anum_pg_class_relfrozenxid, Datum::from_transaction_id(frozen_xid)));
         row1.vals.push((Anum_pg_class_relminmxid, Datum::from_u32(cutoff_multi)));
@@ -501,6 +496,19 @@ fn swap_relation_files<'mcx>(
         }
     }
     rel_relation.close(RowExclusiveLock)?;
+
+    // cluster.c:1188-1205: rel1's storage (swapped in from rel2) is new in
+    // this subtransaction; COPY FREEZE reads these fields.
+    {
+        let rel1 = relation::relation_open(mcx, r1, NoLock)?;
+        let rel2 = relation::relation_open(mcx, r2, NoLock)?;
+        rel2.rd_createSubid.set(rel1.rd_createSubid.get());
+        rel2.rd_newRelfilelocatorSubid.set(rel1.rd_newRelfilelocatorSubid.get());
+        rel2.rd_firstRelfilelocatorSubid.set(rel1.rd_firstRelfilelocatorSubid.get());
+        relcache::invalidate::RelationAssumeNewRelfilelocator(&rel1);
+        rel1.close(NoLock)?;
+        rel2.close(NoLock)?;
+    }
 
     // Repoint the relations' pg_am dependencies at their post-swap AMs
     // (cluster.c:1275-1297).

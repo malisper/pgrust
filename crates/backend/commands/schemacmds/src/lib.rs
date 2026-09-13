@@ -64,8 +64,9 @@ pub fn CreateSchemaCommand<'mcx>(
     let schema_name = match stmt.schemaname {
         Some(s) => s,
         None => {
-            owner_name =
-                miscinit::GetUserNameFromId(mcx, owner_uid, false)?.expect("noerr=false");
+            owner_name = miscinit::GetUserNameFromId(mcx, owner_uid, true)?.ok_or_else(|| {
+                Box::new(PgError::error(format!("cache lookup failed for role {owner_uid}")))
+            })?;
             owner_name.as_str()
         }
     };

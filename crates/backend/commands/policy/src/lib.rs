@@ -29,7 +29,7 @@ use pg_shdepend::deleteSharedDependencyRecordsFor;
 use parse_clause::transformWhereClause;
 use parse_collate::assign_expr_collations;
 use parse_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
-use parser_small1::{make_parsestate, ParseExprKind};
+use parser_small1::{make_parsestate, ParseExprKind, ParseState};
 use pg_depend::{
     recordDependencyOn, DependencyType, ObjectAddress,
 };
@@ -295,18 +295,33 @@ struct PolicyQual<'mcx> {
     rtable: NodeList<'mcx>,
 }
 
-fn transform_policy_qual<'mcx>(
+fn transform_policy_where<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     raw: Node<'mcx>,
-) -> PgResult<PolicyQual<'mcx>> {
+) -> PgResult<(ParseState<'mcx, 'mcx>, Node<'mcx>)> {
     let mut pstate = make_parsestate(mcx, None);
     let nsitem = addRangeTableEntryForRelation(mcx, &mut pstate, rel, AccessShareLock, None, false, false)?;
     addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
     let qual = transformWhereClause(mcx, &mut pstate, Some(raw), ParseExprKind::EXPR_KIND_POLICY, "POLICY")?
         .expect("policy qual transform yields an expression");
+    Ok((pstate, qual))
+}
+
+fn assign_policy_collations<'mcx>(
+    mcx: Mcx<'mcx>,
+    (pstate, qual): (ParseState<'mcx, 'mcx>, Node<'mcx>),
+) -> PgResult<PolicyQual<'mcx>> {
     assign_expr_collations(mcx, &pstate, qual)?;
     Ok(PolicyQual { expr: qual, rtable: pstate.p_rtable })
+}
+
+fn transform_policy_qual<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    raw: Node<'mcx>,
+) -> PgResult<PolicyQual<'mcx>> {
+    assign_policy_collations(mcx, transform_policy_where(mcx, rel, raw)?)
 }
 
 // Range table carrying only the policy's relation, for dependency extraction
@@ -339,13 +354,15 @@ pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgRe
     let target_table = table::table_open(mcx, table_id, NoLock)?;
 
     let qual = match stmt.qual {
-        Some(raw) => Some(transform_policy_qual(mcx, &target_table, raw)?),
+        Some(raw) => Some(transform_policy_where(mcx, &target_table, raw)?),
         None => None,
     };
     let with_check = match stmt.with_check {
-        Some(raw) => Some(transform_policy_qual(mcx, &target_table, raw)?),
+        Some(raw) => Some(transform_policy_where(mcx, &target_table, raw)?),
         None => None,
     };
+    let qual = qual.map(|q| assign_policy_collations(mcx, q)).transpose()?;
+    let with_check = with_check.map(|q| assign_policy_collations(mcx, q)).transpose()?;
 
     let pg_policy_rel = table::table_open(mcx, POLICY_RELATION_ID, RowExclusiveLock)?;
 

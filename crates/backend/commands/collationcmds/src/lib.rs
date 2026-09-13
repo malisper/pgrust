@@ -242,20 +242,22 @@ pub fn DefineCollation<'mcx>(
             let Some(loc) = clocale.as_deref() else {
                 return Err(param_required("locale"));
             };
-            let elevel =
-                types_error::ErrorLevel(guc_tables::vars::icu_validation_level.read());
-            if let Some(langtag) = pg_locale::icu_language_tag(loc, elevel)? {
-                if langtag != loc {
-                    elog::ereport(types_error::NOTICE)
-                        .errmsg(format!(
-                            "using standard form \"{langtag}\" for ICU locale \"{loc}\""
-                        ))
-                        .finish(types_error::ErrorLocation::new(
-                            "src/backend/commands/collationcmds.c",
-                            293,
-                            "DefineCollation",
-                        ))?;
-                    clocale = Some(langtag);
+            if !init_small::globals::IsBinaryUpgrade() {
+                let elevel =
+                    types_error::ErrorLevel(guc_tables::vars::icu_validation_level.read());
+                if let Some(langtag) = pg_locale::icu_language_tag(loc, elevel)? {
+                    if langtag != loc {
+                        elog::ereport(types_error::NOTICE)
+                            .errmsg(format!(
+                                "using standard form \"{langtag}\" for ICU locale \"{loc}\""
+                            ))
+                            .finish(types_error::ErrorLocation::new(
+                                "src/backend/commands/collationcmds.c",
+                                293,
+                                "DefineCollation",
+                            ))?;
+                        clocale = Some(langtag);
+                    }
                 }
             }
             pg_locale::icu_validate_locale(clocale.as_deref().expect("checked"))?;

@@ -243,6 +243,8 @@ fn insert_event_trigger_tuple<'mcx>(
     // Depend on extension, if any (event_trigger.c:337).
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
+    objectaccess::InvokeObjectPostCreateHook(EVENT_TRIGGER_RELATION_ID, trigoid, 0)?;
+
     tgrel.close(RowExclusiveLock)?;
     Ok(trigoid)
 }
@@ -339,6 +341,8 @@ pub fn AlterEventTrigger<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterEventTrigStmt<'mcx>) 
         SetDatabaseHasLoginEventTriggers(mcx)?;
     }
 
+    objectaccess::InvokeObjectPostAlterHook(EVENT_TRIGGER_RELATION_ID, trigoid, 0)?;
+
     tgrel.close(RowExclusiveLock)?;
     Ok(trigoid)
 }
@@ -417,6 +421,8 @@ pub fn AlterEventTriggerOwner<'mcx>(
             evt_oid,
             newOwnerId,
         )?;
+
+        objectaccess::InvokeObjectPostAlterHook(EVENT_TRIGGER_RELATION_ID, evt_oid, 0)?;
     }
 
     rel.close(RowExclusiveLock)?;
@@ -520,7 +526,9 @@ fn AlterEventTriggerOwner_internal<'mcx>(
     let otid = tup.t_self;
     catalog_indexing::CatalogTupleUpdate(mcx, rel, &otid, &mut newtup)?;
 
-    pg_shdepend::changeDependencyOnOwner(mcx, EVENT_TRIGGER_RELATION_ID, trigoid, new_owner_id)
+    pg_shdepend::changeDependencyOnOwner(mcx, EVENT_TRIGGER_RELATION_ID, trigoid, new_owner_id)?;
+
+    objectaccess::InvokeObjectPostAlterHook(EVENT_TRIGGER_RELATION_ID, trigoid, 0)
 }
 
 

@@ -941,6 +941,14 @@ pub fn AlterTableSpaceOwner(mcx: Mcx<'_>, name: &str, new_owner_id: Oid) -> PgRe
     }
     .as_oid();
 
+    // objectaddress.c:1176 (get_object_address for OBJECT_TABLESPACE).
+    lmgr::LockSharedObject(
+        TableSpaceRelationId,
+        tablespaceoid,
+        0,
+        types_storage::lock::AccessExclusiveLock,
+    )?;
+
     if old_owner_id != new_owner_id {
         if !superuser::superuser()? {
             if !adt_acl::has_privs_of_role(miscinit::GetUserId(), old_owner_id)? {

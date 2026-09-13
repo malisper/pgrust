@@ -26,6 +26,7 @@ nodes_params = { path = "../../nodes/params" }
 postgres = { path = "../../tcop/postgres" }
 pquery = { path = "../../tcop/pquery" }
 queryjumble = { path = "../../nodes/queryjumble" }
+parser_analyze = { path = "../../parser/parser_analyze" }
 rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 tcop_dest = { path = "../../tcop/dest" }
@@ -63,7 +64,6 @@ gram_core = { path = "../../parser/gram_core" }
 scan_fgram = { path = "../../parser/scan_fgram" }
 parser_seams = { path = "../../parser/parser_seams" }
 parse_expr = { path = "../../parser/parse_expr" }
-parser_analyze = { path = "../../parser/parser_analyze" }
 outfuncs = { path = "../../nodes/outfuncs" }
 pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }

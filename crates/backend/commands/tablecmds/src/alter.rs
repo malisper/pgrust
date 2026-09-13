@@ -602,7 +602,7 @@ fn ATController<'mcx>(
     rel.close(NoLock)?;
 
     ATRewriteCatalogs(mcx, &mut wqueue, lockmode, query_string)?;
-    ATRewriteTables(mcx, &mut wqueue, lockmode, rewrite_tag)
+    ATRewriteTables(mcx, &mut wqueue, lockmode, rewrite_tag, query_string)
 }
 
 // ATSimpleRecursion: prep-time recursion to all inheritors.
@@ -1059,7 +1059,7 @@ fn ATPrepCmd<'mcx>(
             let relname = rel.name().to_string();
             let cxt =
                 parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode, query_string)?;
-            run_seq_stmts(mcx, &cxt.blist)?;
+            run_seq_stmts(mcx, &cxt.blist, query_string)?;
             debug_assert!(cxt.alist.is_nil());
             debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
             debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
@@ -1804,7 +1804,7 @@ fn ATRewriteCatalogs<'mcx>(
                             cnode,
                             query_string,
                         )?;
-                        run_seq_stmts(mcx, &cxt.blist)?;
+                        run_seq_stmts(mcx, &cxt.blist, query_string)?;
                         debug_assert!(cxt.alist.is_nil());
                         debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
                         debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
@@ -1820,7 +1820,7 @@ fn ATRewriteCatalogs<'mcx>(
                             cnode,
                             query_string,
                         )?;
-                        run_seq_stmts(mcx, &cxt.blist)?;
+                        run_seq_stmts(mcx, &cxt.blist, query_string)?;
                         debug_assert!(cxt.alist.is_nil());
                         debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
                         debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
@@ -1963,6 +1963,7 @@ fn ATRewriteTables<'mcx>(
     wqueue: &mut Wqueue<'mcx>,
     lockmode: LOCKMODE,
     rewrite_tag: Option<types_core::CommandTag>,
+    query_string: &str,
 ) -> PgResult<()> {
     for tabidx in 0..wqueue.len() {
         ATRewriteTableOne(mcx, &mut wqueue[tabidx], lockmode, rewrite_tag)?;
@@ -1982,7 +1983,7 @@ fn ATRewriteTables<'mcx>(
         rel.close(NoLock)?;
     }
     for tab in wqueue.iter() {
-        run_seq_stmts(mcx, &tab.after_stmts)?;
+        run_seq_stmts(mcx, &tab.after_stmts, query_string)?;
     }
     Ok(())
 }
@@ -2601,7 +2602,7 @@ fn ATExecAddColumn<'mcx>(
         // ATParseTransformCmd (tablecmds.c:5738-5745): serial/identity
         // CreateSeqStmts run before the subcommand; the AlterSeqStmts wait
         // in tab->afterStmts until the end of phase 3 (tablecmds.c:6103).
-        run_seq_stmts(mcx, &cxt.blist)?;
+        run_seq_stmts(mcx, &cxt.blist, query_string)?;
         for s in cxt.alist.iter() {
             wqueue[tabidx].after_stmts.lappend(mcx, s)?;
         }
@@ -3569,7 +3570,7 @@ fn ATExecDropExpression<'mcx>(
 // CreateSeqStmt (blist) / AlterSeqStmt (alist) for identity columns, so the
 // fallback stays loud; sequence depends on tablecmds, so execution rides
 // sequence_seams.
-fn run_seq_stmts<'mcx>(mcx: Mcx<'mcx>, stmts: &NodeList<'mcx>) -> PgResult<()> {
+fn run_seq_stmts<'mcx>(mcx: Mcx<'mcx>, stmts: &NodeList<'mcx>, query_string: &str) -> PgResult<()> {
     for s in stmts.iter() {
         // ProcessUtilityForAlterTable: the enclosing ALTER TABLE package
         // closes before each sub-statement collects and reopens after
@@ -3589,7 +3590,7 @@ fn run_seq_stmts<'mcx>(mcx: Mcx<'mcx>, stmts: &NodeList<'mcx>) -> PgResult<()> {
             let relid = AlterTableLookupRelation(mcx, at, lockmode)?;
             event_trigger::EventTriggerAlterTableStart(tag);
             event_trigger::EventTriggerAlterTableRelid(relid);
-            let res = AlterTable(mcx, relid, lockmode, at, "", tag);
+            let res = AlterTable(mcx, relid, lockmode, at, query_string, tag);
             event_trigger::EventTriggerAlterTableEnd();
             res?;
             if let Some((t, relid)) = saved {
@@ -3602,12 +3603,12 @@ fn run_seq_stmts<'mcx>(mcx: Mcx<'mcx>, stmts: &NodeList<'mcx>) -> PgResult<()> {
         let (seqoid, tag) = if let Some(cs) = s.as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
         {
             (
-                sequence_seams::define_sequence::call(mcx, cs)?,
+                sequence_seams::define_sequence::call(mcx, cs, query_string)?,
                 types_core::CommandTag::CREATE_SEQUENCE,
             )
         } else if let Some(alt) = s.as_variant::<types_nodes::AlterSeqStmt>() {
             (
-                sequence_seams::alter_sequence::call(mcx, alt)?,
+                sequence_seams::alter_sequence::call(mcx, alt, query_string)?,
                 types_core::CommandTag::ALTER_SEQUENCE,
             )
         } else {
