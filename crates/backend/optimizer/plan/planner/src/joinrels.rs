@@ -1376,6 +1376,8 @@ fn compute_partition_bounds<'mcx>(
                            b: &types_pathnodes::DatumImage<'mcx>|
              -> PgResult<i32> {
                 let mut fcinfo = types_fmgr::LocalFcinfo::<2>::new(collations[keycol]);
+                // SAFETY: the planner mcx outlives this call.
+                unsafe { fcinfo.set_result_mcx(mcx) };
                 fcinfo.set_arg(0, image_datum(a));
                 fcinfo.set_arg(1, image_datum(b));
                 let r = supfuncs[keycol].invoke(&mut fcinfo)?;

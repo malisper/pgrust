@@ -744,11 +744,27 @@ pub fn preprocess_function_rtes<'mcx>(
         if rte.rtekind != RTEKind::RTE_FUNCTION {
             continue;
         }
+        let bound_params = run.glob.bound_params;
+        let mut type_deps: Vec<types_core::Oid> = Vec::new();
+        let mut func_deps: Vec<types_core::Oid> = Vec::new();
         if let Some(l) = map_rtfunctions(mcx, &rte.functions, &mut |n| {
-            clauses::eval_const_expressions_with_params(mcx, n, run.glob.bound_params).map(Some)
+            clauses::fold::eval_const_expressions_planner(
+                mcx,
+                n,
+                bound_params,
+                &mut type_deps,
+                &mut func_deps,
+            )
+            .map(Some)
         })? {
             // SAFETY: pre-seal Query owned by this planner invocation.
             unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.functions = l) };
+        }
+        for typid in type_deps {
+            crate::setrefs::record_plan_type_dependency(run, typid)?;
+        }
+        for funcid in func_deps {
+            crate::setrefs::record_plan_function_dependency(run, funcid)?;
         }
         if let Some(funcquery) = clauses::inline_set_returning_function(mcx, rte_node)? {
             let rte = rte_node.as_range_tbl_entry().expect("rtable cell");

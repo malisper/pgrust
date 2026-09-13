@@ -1,0 +1,224 @@
+-- Differential fixture for the 2026-09-13 audit bug batch 30
+-- (backend/optimizer: partitionwise-join bound merge, partition pruning over
+-- a packed array Const, MIN/MAX HAVING qual order, parameterized
+-- NamedTuplestoreScan quals, inlined-function plan invalidation, whole-row
+-- join expansion with a NULL Const alias). Run via
+-- scripts/bugs-batch30-e2e.sh against the frozen expected captured from
+-- C PostgreSQL 18.6.
+\set VERBOSITY verbose
+\pset pager off
+-- fp-partitioning-partbounds-p1#1: list-partition bound merge over a by-ref
+-- range key (planner comparator frame armed with a result context)
+CREATE TABLE b30_pa (k int4range) PARTITION BY LIST (k);
+CREATE TABLE b30_pa1 PARTITION OF b30_pa FOR VALUES IN ('[1,3)');
+CREATE TABLE b30_pa2 PARTITION OF b30_pa FOR VALUES IN ('[5,7)');
+CREATE TABLE b30_pb (k int4range) PARTITION BY LIST (k);
+CREATE TABLE b30_pb1 PARTITION OF b30_pb FOR VALUES IN ('[2,4)');
+CREATE TABLE b30_pb2 PARTITION OF b30_pb FOR VALUES IN ('[5,7)');
+INSERT INTO b30_pa VALUES ('[1,3)'), ('[5,7)');
+INSERT INTO b30_pb VALUES ('[2,4)'), ('[5,7)');
+SET enable_partitionwise_join = on;
+SELECT * FROM b30_pa JOIN b30_pb USING (k) ORDER BY k;
+   k   
+-------
+ [5,7)
+(1 row)
+
+SELECT * FROM b30_pa LEFT JOIN b30_pb USING (k) ORDER BY k;
+   k   
+-------
+ [1,3)
+ [5,7)
+(2 rows)
+
+RESET enable_partitionwise_join;
+DROP TABLE b30_pa, b30_pb;
+-- fp-partitioning-partprune-p1#1: ANY(array) over a partition key where the
+-- array Const keeps a stored short header (custom-plan parameter binding)
+CREATE TABLE b30_p (k int) PARTITION BY LIST (k);
+CREATE TABLE b30_p1 PARTITION OF b30_p FOR VALUES IN (1);
+CREATE TABLE b30_p2 PARTITION OF b30_p FOR VALUES IN (2);
+CREATE TABLE b30_p3 PARTITION OF b30_p FOR VALUES IN (3);
+INSERT INTO b30_p VALUES (1), (2), (3);
+CREATE TABLE b30_args (a int[]);
+INSERT INTO b30_args VALUES (ARRAY[1,2]), (ARRAY[3]), (ARRAY[]::int[]);
+CREATE FUNCTION b30_count_p(int[]) RETURNS bigint LANGUAGE sql VOLATILE
+  AS 'SELECT count(*) FROM b30_p WHERE k = ANY($1)';
+SET plan_cache_mode = force_custom_plan;
+SELECT a, b30_count_p(a) FROM b30_args ORDER BY a;
+   a   | b30_count_p 
+-------+-------------
+ {}    |           0
+ {1,2} |           2
+ {3}   |           1
+(3 rows)
+
+RESET plan_cache_mode;
+DROP FUNCTION b30_count_p(int[]);
+DROP TABLE b30_p, b30_args;
+-- fp-plan-createplan-p2#1: MIN/MAX optimization keeps the HAVING predicates
+-- in their written order (C passes the quals straight to the Result node)
+CREATE TABLE b30_mm (a int PRIMARY KEY);
+INSERT INTO b30_mm SELECT generate_series(1, 1000);
+ANALYZE b30_mm;
+CREATE SEQUENCE b30_mm_seq;
+CREATE FUNCTION b30_mm_first(int) RETURNS boolean LANGUAGE plpgsql VOLATILE COST 1000
+  AS $$BEGIN RETURN nextval('b30_mm_seq') = 1; END$$;
+CREATE FUNCTION b30_mm_second(int) RETURNS boolean LANGUAGE plpgsql VOLATILE COST 1
+  AS $$BEGIN RETURN nextval('b30_mm_seq') = 2; END$$;
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF)
+SELECT min(a) FROM b30_mm HAVING b30_mm_first(min(a)) AND b30_mm_second(min(a));
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Result
+   One-Time Filter: (b30_mm_first((InitPlan 1).col1) AND b30_mm_second((InitPlan 1).col1))
+   InitPlan 1
+     ->  Limit
+           ->  Index Only Scan using b30_mm_pkey on b30_mm
+(5 rows)
+
+SELECT min(a) FROM b30_mm HAVING b30_mm_first(min(a)) AND b30_mm_second(min(a));
+ min 
+-----
+   1
+(1 row)
+
+SELECT last_value FROM b30_mm_seq;
+ last_value 
+------------
+          2
+(1 row)
+
+RESET enable_seqscan;
+DROP FUNCTION b30_mm_first(int), b30_mm_second(int);
+DROP SEQUENCE b30_mm_seq;
+DROP TABLE b30_mm;
+-- fp-plan-createplan-p2#2: parameterized NamedTuplestoreScan quals get
+-- their outer Vars replaced by nestloop Params
+CREATE TABLE b30_outer (x int);
+INSERT INTO b30_outer VALUES (1), (2), (3);
+CREATE TABLE b30_src (x int);
+CREATE TABLE b30_counts (n bigint);
+CREATE FUNCTION b30_src_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO b30_counts
+    SELECT count(s.v)
+    FROM b30_outer o
+    LEFT JOIN LATERAL (SELECT nt.x, o.x + 0 AS v FROM new_rows nt WHERE nt.x = o.x) s ON true;
+  RETURN NULL;
+END$$;
+CREATE TRIGGER b30_src_ai AFTER INSERT ON b30_src
+  REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION b30_src_trg();
+INSERT INTO b30_src VALUES (1), (2);
+INSERT INTO b30_src VALUES (3);
+SELECT * FROM b30_counts ORDER BY n;
+ n 
+---
+ 1
+ 2
+(2 rows)
+
+DROP TABLE b30_src, b30_counts, b30_outer;
+DROP FUNCTION b30_src_trg();
+-- fp-util-clauses-p2#1: functions inlined while preprocessing a function RTE
+-- are recorded as plan dependencies, so redefining one invalidates the
+-- cached generic plan
+CREATE FUNCTION b30_g() RETURNS integer LANGUAGE sql STABLE AS 'SELECT 1';
+CREATE FUNCTION b30_f() RETURNS integer LANGUAGE sql STABLE AS 'SELECT b30_g()';
+SET plan_cache_mode = force_generic_plan;
+PREPARE b30_p AS SELECT * FROM b30_f();
+EXECUTE b30_p;
+ b30_f 
+-------
+     1
+(1 row)
+
+CREATE OR REPLACE FUNCTION b30_g() RETURNS integer LANGUAGE sql STABLE AS 'SELECT 2';
+EXECUTE b30_p;
+ b30_f 
+-------
+     2
+(1 row)
+
+CREATE OR REPLACE FUNCTION b30_f() RETURNS integer LANGUAGE sql STABLE AS 'SELECT b30_g() + 10';
+EXECUTE b30_p;
+ b30_f 
+-------
+    12
+(1 row)
+
+DEALLOCATE b30_p;
+RESET plan_cache_mode;
+DROP FUNCTION b30_f();
+DROP FUNCTION b30_g();
+-- fp-util-var#1: a NULL Const substituted into a join alias by subquery
+-- pull-up stays a whole-row field; only dropped columns are skipped
+CREATE TABLE b30_t (x integer);
+INSERT INTO b30_t VALUES (1);
+SELECT j::text FROM ((SELECT NULL::integer AS a FROM b30_t) s CROSS JOIN (SELECT 2 AS b FROM b30_t) u) j;
+  j   
+------
+ (,2)
+(1 row)
+
+SELECT row_to_json(j) FROM ((SELECT NULL::integer AS a FROM b30_t) s CROSS JOIN (SELECT 2 AS b FROM b30_t) u) j;
+   row_to_json    
+------------------
+ {"a":null,"b":2}
+(1 row)
+
+SELECT (j).a, (j).b FROM ((SELECT NULL::integer AS a FROM b30_t) s CROSS JOIN (SELECT 2 AS b FROM b30_t) u) j;
+ a | b 
+---+---
+   | 2
+(1 row)
+
+CREATE TABLE b30_dj1 (a int, b int);
+CREATE TABLE b30_dj2 (c int, d int);
+INSERT INTO b30_dj1 VALUES (1, 2);
+INSERT INTO b30_dj2 VALUES (1, 4);
+CREATE VIEW b30_djv AS SELECT j.a, j.d FROM (b30_dj1 JOIN b30_dj2 ON a = c) j;
+CREATE VIEW b30_djv2 AS SELECT count(*) FROM (b30_dj1 JOIN b30_dj2 ON a = c) j WHERE j.c = 1;
+ALTER TABLE b30_dj1 DROP COLUMN b;
+SELECT * FROM b30_djv;
+ a | d 
+---+---
+ 1 | 4
+(1 row)
+
+SELECT * FROM b30_djv2;
+ count 
+-------
+     1
+(1 row)
+
+SELECT pg_get_viewdef('b30_djv'::regclass);
+                   pg_get_viewdef                   
+----------------------------------------------------
+  SELECT j.a,                                      +
+     j.d                                           +
+    FROM (b30_dj1                                  +
+      JOIN b30_dj2 ON ((b30_dj1.a = b30_dj2.c))) j;
+(1 row)
+
+SELECT j::text FROM (b30_dj1 JOIN b30_dj2 ON a = c) j;
+    j    
+---------
+ (1,1,4)
+(1 row)
+
+SELECT row_to_json(j) FROM (b30_dj1 JOIN b30_dj2 ON a = c) j;
+     row_to_json     
+---------------------
+ {"a":1,"c":1,"d":4}
+(1 row)
+
+SELECT j::text FROM ((SELECT NULL::int AS z FROM b30_dj1) s CROSS JOIN b30_dj2) j;
+   j    
+--------
+ (,1,4)
+(1 row)
+
+DROP VIEW b30_djv, b30_djv2;
+DROP TABLE b30_dj1, b30_dj2, b30_t;

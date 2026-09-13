@@ -1252,15 +1252,27 @@ fn match_clause_to_partition_key<'mcx>(
                 return Ok(PartClauseMatchStatus::MatchContradict);
             }
             let p = arr.constvalue.as_usize() as *const u8;
-            // SAFETY: array Consts are 4B-header inline images (parser and
-            // eval_const_expressions both produce untoasted arrays).
-            let img = unsafe {
+            // DatumGetArrayTypeP (partprune.c:2334): a bound-parameter or
+            // stored array Const may carry a short, compressed or external
+            // image; unpack it as C's PG_DETOAST_DATUM does.
+            // SAFETY: by-ref varlena datum, readable for the size its header
+            // declares (VARSIZE_ANY).
+            let img: &[u8] = unsafe {
                 let b0 = *p;
-                assert!(b0 != 0x01 && b0 & 0x03 == 0, "toasted/packed array const");
-                core::slice::from_raw_parts(
-                    p,
-                    arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)),
-                )
+                let len = if b0 == 0x01 {
+                    types_tuple::varatt::VARHDRSZ_EXTERNAL
+                        + types_tuple::varatt::vartag_size(*p.add(1))
+                } else if b0 & 0x01 == 0x01 {
+                    ((b0 >> 1) & 0x7F) as usize
+                } else {
+                    (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize
+                };
+                let raw = core::slice::from_raw_parts(p, len);
+                if b0 & 0x03 == 0 {
+                    raw
+                } else {
+                    detoast::detoast_attr(mcx, raw)?.leak()
+                }
             };
             let elemtype = arrayfuncs::arr_elemtype(img);
             let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;

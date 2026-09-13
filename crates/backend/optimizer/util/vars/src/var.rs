@@ -592,10 +592,10 @@ fn fjav_mutate<'mcx>(
                 let mut colnames = NodeList::nil();
                 for (av, cn) in rte.joinaliasvars.iter().zip(eref.colnames.iter()) {
                     // C var.c: a dropped join column is a NULL joinaliasvars
-                    // cell (skipped here). This port marks it with a null Const
-                    // sentinel (AcquireRewriteLocks); ignore it exactly like
-                    // C's `if (newvar == NULL) continue;`.
-                    if matches!(av.as_const(), Some(c) if c.constisnull) {
+                    // cell (skipped here). This port marks it with an
+                    // InvalidOid-typed null Const sentinel (AcquireRewriteLocks);
+                    // a real NULL Const (subquery pull-up) stays a row field.
+                    if matches!(av.as_const(), Some(c) if c.constisnull && c.consttype == types_core::InvalidOid) {
                         continue;
                     }
                     let newvar = fjav_shift_copy(ctx, av, v.location)?;
@@ -617,7 +617,7 @@ fn fjav_mutate<'mcx>(
             debug_assert!(v.varattno > 0);
             let aliasvar = rte.joinaliasvars.nth(v.varattno as usize - 1);
             debug_assert!(
-                !matches!(aliasvar.as_const(), Some(c) if c.constisnull),
+                !matches!(aliasvar.as_const(), Some(c) if c.constisnull && c.consttype == types_core::InvalidOid),
                 "flatten_join_alias_vars: reference to a dropped join column"
             );
             let newvar = fjav_shift_copy(ctx, aliasvar, v.location)?;

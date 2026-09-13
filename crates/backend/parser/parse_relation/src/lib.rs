@@ -2287,7 +2287,7 @@ fn expandJoin<'mcx>(
         // marks it with a null Const (AcquireRewriteLocks). Omit dropped columns
         // (the include_dropped=false behavior used by "join.*" expansion) rather
         // than mis-emitting a merged-USING-column Var for the sentinel.
-        if matches!(avar.as_const(), Some(c) if c.constisnull) {
+        if matches!(avar.as_const(), Some(c) if c.constisnull && c.consttype == InvalidOid) {
             continue;
         }
         colnames.lappend(mcx, colname)?;

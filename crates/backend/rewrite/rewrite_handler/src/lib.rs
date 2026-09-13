@@ -3036,10 +3036,12 @@ pub fn AcquireRewriteLocks<'mcx>(
                             v.varattno,
                         )? {
                             // C: aliasitem = NULL. Port: a null Const sentinel
-                            // (the claimed type doesn't matter, cf. makeNullConst).
+                            // with consttype InvalidOid, so a real NULL Const
+                            // substituted by subquery pull-up is not mistaken
+                            // for a dropped column.
                             item = types_nodes::Node::mk_const(
                                 mcx,
-                                types_core::catalog::INT4OID,
+                                InvalidOid,
                                 -1,
                                 InvalidOid,
                                 4,
@@ -3147,10 +3149,10 @@ fn get_rte_attribute_is_dropped<'mcx>(
                 return Err(internal_error(&format!("invalid varattno {attnum}")));
             }
             // C: a dropped join column is a NULL joinaliasvars cell. This port
-            // marks it with a null Const sentinel (AcquireRewriteLocks), so a
-            // dropped column is a null Const at that position.
+            // marks it with an InvalidOid-typed null Const sentinel
+            // (AcquireRewriteLocks) at that position.
             let aliasvar = rte.joinaliasvars.nth(attnum as usize - 1);
-            Ok(matches!(aliasvar.as_const(), Some(c) if c.constisnull))
+            Ok(matches!(aliasvar.as_const(), Some(c) if c.constisnull && c.consttype == InvalidOid))
         }
         RTEKind::RTE_FUNCTION => {
             let mut atts_done: i16 = 0;

@@ -1324,8 +1324,7 @@ fn create_ctescan_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_namedtuplestorescan_plan (createplan.c); param_info empty on this
-// lane (asserted at costing), so no nestloop-param replacement.
+// create_namedtuplestorescan_plan (createplan.c).
 fn create_namedtuplestorescan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -1341,7 +1340,11 @@ fn create_namedtuplestorescan_plan<'mcx>(
     let enrname = rte.enrname;
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+    }
 
     let mut plan = Node::build::<types_nodes::plannodes::NamedTuplestoreScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;
@@ -2748,7 +2751,10 @@ fn create_minmaxagg_plan<'mcx>(
     }
 
     let tlist = build_path_tlist(run, target_id, path_id)?;
-    let qual_list = order_bare_qual_clauses(run, &qual_ids)?;
+    let mut qual_list = NodeList::nil();
+    for &q in qual_ids.iter() {
+        qual_list.lappend(mcx, *run.root.expr_node(q))?;
+    }
 
     let mut plan = Node::build::<ResultPlan>(mcx)?;
     plan.plan.targetlist = tlist;
