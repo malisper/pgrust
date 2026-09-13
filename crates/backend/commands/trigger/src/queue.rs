@@ -668,6 +668,7 @@ pub fn AfterTriggerEndQuery(mut instr: Option<&mut (dyn AfterTriggerInstrSink + 
     debug_assert!(depth >= 0, "AfterTriggerEndQuery outside a query");
     let d = depth as usize;
     if QUERY_STACK.with(|s| s.borrow().len()) <= d {
+        free_tables_at_depth(d);
         QUERY_DEPTH.with(|c| c.set(depth - 1));
         return Ok(());
     }

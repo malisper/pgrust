@@ -1248,9 +1248,12 @@ fn pull_up_simple_subquery<'mcx>(
         // perform_pullup_replace_vars (prepjointree.c), appendrel arm: the
         // only upper reference to a UNION ALL member is its AppendRelInfo's
         // translated_vars (REPLACE_WRAP_NONE — no outer join between).
+        let save_wrap = phc.wrap_option.get();
+        phc.wrap_option.set(WRAP_NONE);
         replace_appinfo_translated_vars(run, ai, &mut |n| {
             replace_var_expr(mcx, n, varno, &off_tlist, lateral, Some(&phc))
         })?;
+        phc.wrap_option.set(save_wrap);
         // fix_append_rel_relids: is_safe_append_member guaranteed a single
         // base RTE (or the RESULT RTE built above), so the child relid is it.
         let mut node = off_fromlist.nth(0);

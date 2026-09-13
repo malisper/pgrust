@@ -74,6 +74,7 @@ impl Glob<'_> {
 pub struct SubrootState<'mcx> {
     pub root: PlannerInfo<'mcx>,
     pub processed_tlist: Option<&'mcx NodeList<'mcx>>,
+    pub gset_data: Option<GroupingSetsData<'mcx>>,
 }
 
 
@@ -200,7 +201,7 @@ mcx::forget_safe_struct!(
         finalrowmarks, subplans, rewind_plan_ids, result_relations,
         append_relations, part_prune_infos, relation_oids, inval_items,
         param_exec_types, all_relids, has_alternative_subplans, prunable_relids },
-    SubrootState<'_> { root, processed_tlist },
+    SubrootState<'_> { root, processed_tlist, gset_data },
     SubPathKeyMember<'_> { expr, datatype },
     SubPathKeyDesc<'_> { has_volatile, sortref, members, opfamilies,
         collation, pk_opfamily, pk_cmptype, pk_nulls_first },
@@ -269,7 +270,8 @@ impl<'mcx> PlannerRun<'mcx> {
         new_root.outer_params = outer;
         let old = core::mem::replace(&mut self.root, new_root);
         let processed_tlist = self.processed_tlist.take();
-        self.suspended_roots.push(SubrootState { root: old, processed_tlist });
+        let gset_data = self.gset_data.take();
+        self.suspended_roots.push(SubrootState { root: old, processed_tlist, gset_data });
         let aw = core::mem::replace(&mut self.active_windows, PgVec::new_in(self.mcx));
         self.suspended_active_windows.push(aw);
         Ok(())
@@ -284,7 +286,8 @@ impl<'mcx> PlannerRun<'mcx> {
         new_root.outer_params = outer;
         let old = core::mem::replace(&mut self.root, new_root);
         let processed_tlist = self.processed_tlist.take();
-        self.suspended_roots.push(SubrootState { root: old, processed_tlist });
+        let gset_data = self.gset_data.take();
+        self.suspended_roots.push(SubrootState { root: old, processed_tlist, gset_data });
         let aw = core::mem::replace(&mut self.active_windows, PgVec::new_in(self.mcx));
         self.suspended_active_windows.push(aw);
         Ok(())
@@ -296,9 +299,10 @@ impl<'mcx> PlannerRun<'mcx> {
         let parent = self.suspended_roots.pop().expect("pop_root_to_minmax_subroot without push");
         let sub = core::mem::replace(&mut self.root, parent.root);
         let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
+        self.gset_data = parent.gset_data;
         self.active_windows =
             self.suspended_active_windows.pop().expect("pop without active-windows push");
-        self.minmax_subroots.push(Some(SubrootState { root: sub, processed_tlist: sub_tlist }));
+        self.minmax_subroots.push(Some(SubrootState { root: sub, processed_tlist: sub_tlist, gset_data: None }));
         self.minmax_subroots.len() - 1
     }
 
@@ -325,9 +329,10 @@ impl<'mcx> PlannerRun<'mcx> {
             sub.outer_params = outer;
         }
         let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
+        self.gset_data = parent.gset_data;
         self.active_windows =
             self.suspended_active_windows.pop().expect("pop without active-windows push");
-        self.subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist });
+        self.subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist, gset_data: None });
         self.subroots.len() - 1
     }
 
@@ -353,9 +358,10 @@ impl<'mcx> PlannerRun<'mcx> {
             sub.outer_params = outer;
         }
         let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
+        self.gset_data = parent.gset_data;
         self.active_windows =
             self.suspended_active_windows.pop().expect("pop without active-windows push");
-        self.rel_subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist });
+        self.rel_subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist, gset_data: None });
         self.rel_subroots.len() - 1
     }
 
@@ -365,6 +371,7 @@ impl<'mcx> PlannerRun<'mcx> {
         let s = &mut self.rel_subroots[idx];
         core::mem::swap(&mut self.root, &mut s.root);
         core::mem::swap(&mut self.processed_tlist, &mut s.processed_tlist);
+        core::mem::swap(&mut self.gset_data, &mut s.gset_data);
     }
 
     /// Abandon the current child level without registering it (C's
@@ -374,6 +381,7 @@ impl<'mcx> PlannerRun<'mcx> {
         let parent = self.suspended_roots.pop().expect("pop_root_discard without push");
         self.root = parent.root;
         self.processed_tlist = parent.processed_tlist;
+        self.gset_data = parent.gset_data;
         // The matching push (push_root/push_minmax_root) parked the parent
         // level's active_windows alongside its root; a discard must restore it
         // too, or suspended_roots and suspended_active_windows desynchronize

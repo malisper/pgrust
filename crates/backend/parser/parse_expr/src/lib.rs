@@ -189,6 +189,18 @@ fn transformCurrentOfExpr<'mcx>(
                 }
             }
         }
+        if cursor_param == 0 {
+            let fields = [Node::mk_string(mcx, name)?];
+            if let Some(node) = sql_fn_post_column_ref(mcx, pstate, &fields, -1)? {
+                if let Some(p) = node.as_param() {
+                    if p.paramkind == types_nodes::ParamKind::PARAM_EXTERN
+                        && p.paramtype == REFCURSOROID
+                    {
+                        cursor_param = p.paramid;
+                    }
+                }
+            }
+        }
     }
     // SAFETY: freshly built raw-parse node; single mutator, tag matches.
     unsafe {
@@ -2572,7 +2584,13 @@ fn transformColumnRef<'mcx>(
                 None => None,
                 Some(nsitem) => {
                     if field2.node_tag() == NodeTag::T_A_Star {
-                        return transformWholeRowRef(mcx, pstate, nsitem, levels_up, cref.location);
+                        break 'resolve Some(transformWholeRowRef(
+                            mcx,
+                            pstate,
+                            nsitem,
+                            levels_up,
+                            cref.location,
+                        )?);
                     }
                     let name = field_str(*field2).expect("column field is a String");
                     colname = Some(name);

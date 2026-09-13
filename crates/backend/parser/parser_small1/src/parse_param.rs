@@ -372,7 +372,10 @@ pub fn plpgsql_resolve_column_ref<'mcx>(
         return Ok(None);
     }
     let key = fields.join(".");
-    if fields.len() >= 2 {
+    // A whole-row reference reports the record's declared type instead
+    // (pl_exec.c exec_get_datum_type_info, REC arm); the 55000 waits for the
+    // execution-time fetch.
+    if fields.len() >= 2 && fields[fields.len() - 1] != "*" {
         let prefix = fields[..fields.len() - 1].join(".");
         if parstate.valueless_recs.iter().any(|r| *r == prefix) {
             let recname = fields[fields.len() - 2];

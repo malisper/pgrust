@@ -781,7 +781,7 @@ fn add_fk_recurse_referencing<'mcx>(
         let pd = partdesc::RelationGetPartitionDesc(rel, true)?;
         for i in 0..pd.nparts {
             let partition = table::table_open(mcx, pd.oids[i], lockmode)?;
-            catalog_heap::CheckTableNotInUse(&partition, "ALTER TABLE")?;
+            crate::alter::CheckAlterTableIsSafe(&partition)?;
 
             let attmap = tupdesc::build_attrmap_by_name(mcx, &partition.rd_att, &rel.rd_att)?;
             let mut mapped_fkattnum = [0i16; INDEX_MAX_KEYS as usize];
@@ -2850,7 +2850,7 @@ pub(crate) fn ATExecAlterConstraint<'mcx>(
     // drops triggers (adjusting deferrability on the way); an explicit
     // deferrability change patches the existing triggers instead.
     let mut otherrelids: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
-    if cmdcon.alterEnforceability {
+    let enforceability_changed = cmdcon.alterEnforceability && {
         let (form, _) = read_fk_constraint(mcx, con.oid)?;
         alter_constr_enforceability(
             mcx,
@@ -2864,8 +2864,9 @@ pub(crate) fn ATExecAlterConstraint<'mcx>(
             InvalidOid,
             InvalidOid,
             InvalidOid,
-        )?;
-    } else if cmdcon.alterDeferrability {
+        )?
+    };
+    if !enforceability_changed && cmdcon.alterDeferrability {
         let (form, _) = read_fk_constraint(mcx, con.oid)?;
         if alter_constr_deferrability(
             mcx,

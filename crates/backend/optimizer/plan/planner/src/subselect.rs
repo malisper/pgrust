@@ -882,6 +882,14 @@ fn offset_and_pull_down<'mcx>(
             }
             return Ok(Some(Node::mk(mcx, nv)?));
         }
+        if node.as_aggref().is_some_and(|a| a.agglevelsup > 0)
+            || node.as_grouping_func().is_some_and(|g| g.agglevelsup > 0)
+        {
+            let copy = rewrite_manip::copy_node(mcx, node)?;
+            rewrite_manip::OffsetVarNodes(mcx, copy, rtoffset, 0)?;
+            rewrite_manip::IncrementVarSublevelsUp(copy, -1, 1)?;
+            return Ok(Some(copy));
+        }
         debug_assert!(node.node_tag() != NodeTag::T_SubLink);
         clauses::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n, rtoffset))
     }

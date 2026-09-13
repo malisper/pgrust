@@ -2741,7 +2741,7 @@ fn create_minmaxagg_plan<'mcx>(
         let sub_tlist = core::mem::replace(&mut run.processed_tlist, saved_tlist);
         crate::subselect::ss_make_initplan_from_plan(
             run,
-            crate::run::SubrootState { root: sub_root, processed_tlist: sub_tlist },
+            crate::run::SubrootState { root: sub_root, processed_tlist: sub_tlist, gset_data: None },
             limit_plan,
             mminfo.param,
         )?;

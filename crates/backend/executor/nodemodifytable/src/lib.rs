@@ -3183,7 +3183,8 @@ fn exec_merge_matched_scan<'mcx>(
                     .as_ref()
                     .is_some_and(|td| td.trig_update_before_row)
                 {
-                    match merge_tuple_for_trigger(mt, estate, tupleid)? {
+                    let lockmode = exec_update_lock_mode(mt, estate, None)?;
+                    match merge_tuple_for_trigger(mt, estate, tupleid, lockmode)? {
                         MergeTrigFetch::Fetched(trig_old) => {
                             if !br_row_triggers(
                                 mt,
@@ -3246,7 +3247,7 @@ fn exec_merge_matched_scan<'mcx>(
                     .as_ref()
                     .is_some_and(|td| td.trig_delete_before_row)
                 {
-                    match merge_tuple_for_trigger(mt, estate, tupleid)? {
+                    match merge_tuple_for_trigger(mt, estate, tupleid, LockTupleMode::LockTupleExclusive)? {
                         MergeTrigFetch::Fetched(trig_old) => {
                             if !br_row_triggers(
                                 mt,
@@ -4628,7 +4629,8 @@ fn exec_update<'mcx>(
         .as_ref()
         .is_some_and(|td| td.trig_update_before_row)
     {
-        let (old_slot, epq) = match get_tuple_for_trigger(mt, estate, tupleid, epq_eval)? {
+        let lockmode = exec_update_lock_mode(mt, estate, None)?;
+        let (old_slot, epq) = match get_tuple_for_trigger(mt, estate, tupleid, lockmode, epq_eval)? {
             TrigFetch::Skip => return Ok(UpdateResult::NotModified),
             TrigFetch::Proceed { old_slot, epq } => (old_slot, epq),
         };
@@ -5486,7 +5488,7 @@ fn exec_delete<'mcx>(
         let old_slot = if let Some(out) = merge_out.as_deref_mut() {
             // ExecBRDeleteTriggers(is_merge_delete=true): skip the EPQ
             // recheck, hand the concurrency status back to lmerge_matched.
-            match merge_tuple_for_trigger(mt, estate, tupleid)? {
+            match merge_tuple_for_trigger(mt, estate, tupleid, LockTupleMode::LockTupleExclusive)? {
                 MergeTrigFetch::Fetched(slot) => slot,
                 MergeTrigFetch::SelfModified(fd) => {
                     *out = (TM_Result::TM_SelfModified, fd);
@@ -5502,7 +5504,7 @@ fn exec_delete<'mcx>(
                 }
             }
         } else {
-            let (old_slot, epq) = match get_tuple_for_trigger(mt, estate, tupleid, epq_eval)? {
+            let (old_slot, epq) = match get_tuple_for_trigger(mt, estate, tupleid, LockTupleMode::LockTupleExclusive, epq_eval)? {
                 TrigFetch::Skip => return Ok(false),
                 TrigFetch::Proceed { old_slot, epq } => (old_slot, epq),
             };
@@ -6469,6 +6471,7 @@ fn merge_tuple_for_trigger<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     tupleid: &ItemPointerData,
+    lockmode: LockTupleMode,
 ) -> PgResult<MergeTrigFetch> {
     let slot_id = ensure_trig_old_slot(mt, estate);
     let output_cid = estate.es_output_cid;
@@ -6497,7 +6500,7 @@ fn merge_tuple_for_trigger<'mcx>(
             snapshot,
             &mut es_tupleTable[slot_id.0 as usize],
             output_cid,
-            LockTupleMode::LockTupleExclusive,
+            lockmode,
             LockWaitPolicy::LockWaitBlock,
             flags,
             &mut tmfd,
@@ -6542,6 +6545,7 @@ fn get_tuple_for_trigger<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     tupleid: &mut ItemPointerData,
+    lockmode: LockTupleMode,
     epq_eval: &mut impl FnMut(
         &mut Option<executils::EpqSubs<'mcx>>,
         &mut EStateData<'mcx>,
@@ -6576,7 +6580,7 @@ fn get_tuple_for_trigger<'mcx>(
             snapshot,
             &mut es_tupleTable[slot_id.0 as usize],
             output_cid,
-            LockTupleMode::LockTupleExclusive,
+            lockmode,
             LockWaitPolicy::LockWaitBlock,
             flags,
             &mut tmfd,

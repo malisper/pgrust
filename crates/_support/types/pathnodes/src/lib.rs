@@ -2041,6 +2041,7 @@ impl<'mcx> PlannerInfo<'mcx> {
         sub.hasJoinRTEs = self.hasJoinRTEs;
         sub.hasLateralRTEs = self.hasLateralRTEs;
         sub.hasPseudoConstantQuals = self.hasPseudoConstantQuals;
+        sub.hasAlternativeSubPlans = self.hasAlternativeSubPlans;
         sub.placeholdersFrozen = self.placeholdersFrozen;
         sub.group_rtindex = self.group_rtindex;
         sub.wt_param_id = self.wt_param_id;

@@ -625,7 +625,7 @@ fn ATSimpleRecursion<'mcx>(
             continue;
         }
         let childrel = table::table_open(mcx, childrelid, NoLock)?;
-        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        CheckAlterTableIsSafe(&childrel)?;
         ATPrepCmd(
             mcx,
             wqueue,
@@ -650,7 +650,7 @@ fn ATCheckPartitionsNotInUse<'mcx>(
         let inh = pg_inherits::find_all_inheritors(mcx, rel.rd_id, lockmode)?;
         for &childoid in inh.iter().skip(1) {
             let childrel = table::table_open(mcx, childoid, NoLock)?;
-            catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+            CheckAlterTableIsSafe(&childrel)?;
             childrel.close(NoLock)?;
         }
     }
@@ -2827,7 +2827,7 @@ fn ATExecAddColumn<'mcx>(
     };
     for &childrelid in children.iter() {
         let childrel = table::table_open(mcx, childrelid, NoLock)?;
-        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        CheckAlterTableIsSafe(&childrel)?;
         let childtabidx = ATGetQueueEntry(mcx, wqueue, &childrel);
         ATExecAddColumn(
             mcx,
@@ -3136,7 +3136,7 @@ fn ATExecDropColumn<'mcx>(
         }
         for &childrelid in children.iter() {
             let childrel = table::table_open(mcx, childrelid, NoLock)?;
-            catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+            CheckAlterTableIsSafe(&childrel)?;
             let Some((childattnum, childinhcount)) =
                 attname_lookup(mcx, childrelid, col_name, false)?
             else {
@@ -4715,7 +4715,7 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
     }
     for &childrelid in children.iter() {
         let childrel = table::table_open(mcx, childrelid, NoLock)?;
-        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        CheckAlterTableIsSafe(&childrel)?;
         let childtabidx = ATGetQueueEntry(mcx, wqueue, &childrel);
         ATAddCheckNNConstraint(
             mcx,
@@ -4916,7 +4916,7 @@ fn dropconstraint_internal<'mcx>(
     };
     for &childrelid in children.iter() {
         let childrel = table::table_open(mcx, childrelid, NoLock)?;
-        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        CheckAlterTableIsSafe(&childrel)?;
         let childcon = if con.contype == pg_constraint::CONSTRAINT_NOTNULL {
             let col = colname
                 .as_deref()
@@ -5883,7 +5883,7 @@ fn ATPrepAlterColumnType<'mcx>(
             }
             let numparents = child_numparents[i];
             let childrel = relation_seams::relation_open::call(mcx, childrelid, NoLock)?;
-            catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+            CheckAlterTableIsSafe(&childrel)?;
             let Some((_, childinhcount)) = attname_lookup(mcx, childrelid, col_name, false)? else {
                 return Err(undefined_column(col_name, &childrel.name().to_string()));
             };

@@ -3141,7 +3141,8 @@ impl<'a> Estate<'a> {
         // C's plan prepare resolves the recfield target via make_datum_param
         // -> exec_get_datum_type, which errors positionless under the SPI
         // context callback; mirror that before planning.
-        if let PlDatum::RecField(f) = &self.func.datums[target as usize] {
+        let planned = EXPR_PLANS.with(|t| t.borrow().contains_key(&expr.expr_id));
+        if let (false, PlDatum::RecField(f)) = (planned, &self.func.datums[target as usize]) {
             if self.recfield_type(f)?.is_none() {
                 let recname = match &self.func.datums[f.recparentno as usize] {
                     PlDatum::Rec(r) => r.refname.clone(),
