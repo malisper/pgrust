@@ -55,6 +55,30 @@ fn float8in_basic_and_specials() {
     assert_eq!(float4in("-Infinity", None).unwrap(), f32::NEG_INFINITY);
 }
 
+// strtod's nan(n-char-sequence) payload lands in the mantissa (glibc:
+// strtoull base 0); float8send/float4send expose the bits.
+#[test]
+fn nan_payload_bits_follow_strtod() {
+    for (lit, bits8, bits4) in [
+        ("NaN", 0x7ff8_0000_0000_0000u64, 0x7fc0_0000u32),
+        ("NaN(1)", 0x7ff8_0000_0000_0001, 0x7fc0_0001),
+        ("nan(0x10)", 0x7ff8_0000_0000_0010, 0x7fc0_0010),
+        ("nan(07)", 0x7ff8_0000_0000_0007, 0x7fc0_0007),
+        ("NaN(123456789)", 0x7ff8_0000_075b_cd15, 0x7fdb_cd15),
+        ("-NaN(2)", 0xfff8_0000_0000_0002, 0xffc0_0002),
+        ("NaN(4294967295)", 0x7ff8_0000_ffff_ffff, 0x7fff_ffff),
+        ("NaN(8388608)", 0x7ff8_0000_0080_0000, 0x7fc0_0000),
+        ("NaN(abc)", 0x7ff8_0000_0000_0000, 0x7fc0_0000),
+        ("NaN(0xg)", 0x7ff8_0000_0000_0000, 0x7fc0_0000),
+        ("NaN()", 0x7ff8_0000_0000_0000, 0x7fc0_0000),
+        (" NaN(5) ", 0x7ff8_0000_0000_0005, 0x7fc0_0005),
+    ] {
+        assert_eq!(float8in(lit, None).unwrap().to_bits(), bits8, "float8 {lit}");
+        assert_eq!(float4in(lit, None).unwrap().to_bits(), bits4, "float4 {lit}");
+    }
+    assert!(float8in("NaN(1)x", None).is_err());
+}
+
 #[test]
 fn float8in_error_surface_matches_live_pg() {
     let err = float8in("1e400", None).unwrap_err();

@@ -56,7 +56,7 @@ fn row_safe(row: &EnumSortedRow) -> PgResult<()> {
 }
 
 pub fn enum_in(
-    name: &str,
+    name: &[u8],
     enumtypoid: Oid,
     escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<Oid>> {
@@ -64,7 +64,11 @@ pub fn enum_in(
     if name.len() >= NAMEDATALEN as usize {
         return ereturn(escontext, None, *invalid_input(enumtypoid, name)?);
     }
-    let Some(en) = syscache_seams::lookup_pg_enum_by_typid_label::call(enumtypoid, name)? else {
+    // Catalog labels are valid UTF-8, so bytes that are not cannot match one.
+    let Ok(label) = core::str::from_utf8(name) else {
+        return ereturn(escontext, None, *invalid_input(enumtypoid, name)?);
+    };
+    let Some(en) = syscache_seams::lookup_pg_enum_by_typid_label::call(enumtypoid, label)? else {
         return ereturn(escontext, None, *invalid_input(enumtypoid, name)?);
     };
     shape_safe(&en)?;
@@ -210,12 +214,18 @@ pub fn init_seams() {}
 
 #[cold]
 #[inline(never)]
-fn invalid_input(enumtypoid: Oid, name: &str) -> PgResult<Box<PgError>> {
+fn invalid_input(enumtypoid: Oid, name: &[u8]) -> PgResult<Box<PgError>> {
     let ty = format_type::format_type_be(enumtypoid)?;
-    Ok(Box::new(
-        PgError::new(ERROR, format!("invalid input value for enum {ty}: \"{name}\""))
-            .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
-    ))
+    let e = match core::str::from_utf8(name) {
+        Ok(name) => PgError::new(ERROR, format!("invalid input value for enum {ty}: \"{name}\"")),
+        Err(_) => {
+            let mut msg = format!("invalid input value for enum {ty}: \"").into_bytes();
+            msg.extend_from_slice(name);
+            msg.push(b'"');
+            PgError::error_raw_message(msg)
+        }
+    };
+    Ok(Box::new(e.with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)))
 }
 
 #[track_caller]
@@ -290,6 +300,42 @@ mod tests {
     // ("call family ... not ported"); C's get_call_expr_argtype returns
     // InvalidOid for a non-call node, so enum_first raises the clean
     // "could not determine actual enum type" error (fmgr.c + enum.c).
+    // enum.c enum_in looks the label bytes up as-is; a label that is not
+    // valid in the (UTF-8) catalog encoding can match nothing, so it is the
+    // 22P02 error with the raw bytes in the message — never the empty label.
+    #[test]
+    fn non_utf8_label_is_invalid_input_not_empty_label() {
+        use types_core::catalog::INT4OID;
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            Ok((typid == INT4OID).then(|| syscache_seams::PgTypeTypcacheShape {
+                typname: Default::default(),
+                typlen: 4,
+                typbyval: true,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typtype: b'b' as i8,
+                typisdefined: true,
+                typrelid: InvalidOid,
+                typsubscript: InvalidOid,
+                typelem: InvalidOid,
+                typarray: InvalidOid,
+                typcollation: InvalidOid,
+            }))
+        });
+        syscache_seams::lookup_pg_enum_by_typid_label::set(|_, label| {
+            panic!("catalog consulted for non-UTF-8 label {label:?}")
+        });
+        let mut esc = types_error::SoftErrorContext::new(true);
+        assert_eq!(enum_in(b"\xff", INT4OID, Some(&mut esc)).unwrap(), None);
+        assert!(esc.error_occurred());
+        let err = enum_in(b"\xff", INT4OID, None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(
+            err.message_raw.as_deref(),
+            Some(&b"invalid input value for enum integer: \"\xff\""[..])
+        );
+    }
+
     #[test]
     fn unhandled_call_family_is_invalid_oid_not_panic() {
         let ctx = MemoryContext::new("adt_enum-test");

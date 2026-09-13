@@ -214,6 +214,8 @@ pub fn numeric_to_char<'mcx>(
         });
         sc.digits.clear();
 
+        // C numeric_round clamps the scale to NUMERIC_DSCALE_MAX.
+        let post = num.post.min(::numeric::NUMERIC_DSCALE_MAX);
         let special = if let Some(s) = special_orgnum(value) {
             sc.digits.extend_from_slice(s);
             sc.digits.push(0);
@@ -226,11 +228,11 @@ pub fn numeric_to_char<'mcx>(
             let rscale = value.view().dscale + xpow.dscale;
             let mut prod = NumericVar::new();
             mul_var(value.view(), xpow.view(), &mut prod, rscale);
-            prod.round(num.post);
+            prod.round(post);
             render_var_into(&prod, sc)?
         } else {
             let mut x = NumericVar::from_view(value.view());
-            x.round(num.post);
+            x.round(post);
             render_var_into(&x, sc)?
         };
 
@@ -239,8 +241,8 @@ pub fn numeric_to_char<'mcx>(
         // get_str_from_var emits exactly dscale decimals); specials carry no
         // dot — C's strchr/strlen without the scan.
         let strlen = stripped.len() as i32 - 1;
-        let numstr_pre_len = if !special && num.post > 0 {
-            strlen - num.post - 1
+        let numstr_pre_len = if !special && post > 0 {
+            strlen - post - 1
         } else {
             strlen
         };
@@ -595,6 +597,8 @@ pub fn numeric_to_number<'mcx>(
 
 #[cfg(test)]
 mod tests {
+
+    const EEEE_400_1E_300: &str = " 1.0000000000000000250590918352087596856961468077037052499253423199004660431840514846763028121819501008949623062702782541489103114649988041308122460916061901827194266279345842755104147827870150702226392606037936139243597750940301438661414791255135908825910173416922229212204049186218220291556195418594185258832620409283163178720501540199698661694898041100000000000000000000000000000000000000000000000000e-300";
     use super::*;
 
     fn ctx() -> ::mcx::MemoryContext {
@@ -613,6 +617,38 @@ mod tests {
         assert_eq!(as_text(&int4_to_char(c.mcx(), 485, b"999").unwrap()), " 485");
         // RN is right-justified in a 15-wide field, no sign space.
         assert_eq!(as_text(&int4_to_char(c.mcx(), 485, b"RN").unwrap()), "        CDLXXXV");
+    }
+
+    // C numeric_round clamps the scale to NUMERIC_DSCALE_MAX (16383); a
+    // picture asking for more decimals still formats (padding zeroes).
+    #[test]
+    fn numeric_post_beyond_dscale_max_clamps_like_numeric_round() {
+        let c = ctx();
+        let mut fmt = b"9.".to_vec();
+        fmt.extend(core::iter::repeat_n(b'9', 16384));
+        let v = ::numeric::numeric_in("1", -1, None).unwrap().unwrap();
+        let out = as_text(&numeric_to_char(c.mcx(), v.num(), &fmt).unwrap());
+        assert_eq!(out.len(), 16386);
+        assert!(out.starts_with(" 1.00000"));
+        assert!(out[3..].bytes().all(|b| b == b'0'));
+        let v = ::numeric::numeric_in("-123.456", -1, None).unwrap().unwrap();
+        let mut fmt = b"999.".to_vec();
+        fmt.extend(core::iter::repeat_n(b'9', 16384));
+        let out = as_text(&numeric_to_char(c.mcx(), v.num(), &fmt).unwrap());
+        assert!(out.starts_with("-123.4560"));
+        assert!(out[8..].bytes().all(|b| b == b'0'));
+    }
+
+    // snprintf.c fmtfloat caps the conversion precision at 350 and pads the
+    // rest with zeroes before the exponent (C 18.6 output captured).
+    #[test]
+    fn eeee_precision_beyond_350_is_zero_padded() {
+        let c = ctx();
+        let mut fmt = b"9.".to_vec();
+        fmt.extend(core::iter::repeat_n(b'9', 400));
+        fmt.extend_from_slice(b"EEEE");
+        let out = as_text(&float8_to_char(c.mcx(), 1e-300, &fmt).unwrap());
+        assert_eq!(out, EEEE_400_1E_300);
     }
 
     #[test]

@@ -288,16 +288,22 @@ pub(crate) fn path_encode(delim: PathDelim, pts: &impl Pts, out: &mut Vec<u8>) -
 }
 
 // C computes base_size/size as 32-bit int; the guard relies on that wraparound.
-pub fn check_points_overflow(npts: i32, header: usize) -> PgResult<()> {
+pub fn check_points_overflow(
+    npts: i32,
+    header: usize,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<()> {
     let base_size = (POINT_SIZE as i64 * npts as i64) as i32;
     let size = (header as i64 + base_size as i64) as i32;
     if base_size / npts != POINT_SIZE as i32 || size <= base_size {
-        return Err(Box::new(
-            PgError::error("too many points requested")
-                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-        ));
+        return ereturn(
+            escontext,
+            (),
+            PgError::error("too many points requested").with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+        );
     }
-    Ok(())
+    // C pallocs the whole path/polygon here, before decoding any point.
+    ::mcx::check_alloc_size(size as usize)
 }
 
 pub fn point_in(str: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<Point> {
@@ -562,7 +568,10 @@ pub fn path_in<'m>(
         e?;
         return empty_path_image(mcx);
     }
-    check_points_overflow(npts, PATH_HEADER_SIZE)?;
+    check_points_overflow(npts, PATH_HEADER_SIZE, escontext.as_deref_mut())?;
+    if soft_occurred(&escontext) {
+        return empty_path_image(mcx);
+    }
     let npts = npts as usize;
 
     let mut cur = Cursor::new(str);
@@ -630,7 +639,10 @@ pub fn poly_in<'m>(
         e?;
         return empty_poly_image(mcx);
     }
-    check_points_overflow(npts, POLYGON_HEADER_SIZE)?;
+    check_points_overflow(npts, POLYGON_HEADER_SIZE, escontext.as_deref_mut())?;
+    if soft_occurred(&escontext) {
+        return empty_poly_image(mcx);
+    }
     let npts = npts as usize;
 
     let mut points: PgVec<'m, Point> = ::mcx::vec_with_capacity_in(mcx, npts)?;

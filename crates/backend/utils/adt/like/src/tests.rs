@@ -264,6 +264,15 @@ fn fc_wrappers_and_oids() {
     let d = builtins::fc_like_escape(Some(&mut flinfo), &mut fcinfo).unwrap();
     let out = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
     assert_eq!(out.data(), b"50\\%");
+    // C pallocs per call: a second call through the same FmgrInfo leaves
+    // the first result intact.
+    let pat2 = text(b"7#_");
+    fcinfo.set_arg(0, datum::Datum::from_usize(pat2.as_ptr() as usize));
+    let d2 = builtins::fc_like_escape(Some(&mut flinfo), &mut fcinfo).unwrap();
+    let out2 = unsafe { types_fmgr::PackedVarlena::from_ptr(d2.as_usize() as *const u8) };
+    assert_eq!(out2.data(), b"7\\_");
+    let out = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
+    assert_eq!(out.data(), b"50\\%");
 
     // pg_proc.dat parity: OID-keyed spot checks + table shape.
     let by_oid = |oid: Oid| {

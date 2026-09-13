@@ -54,6 +54,9 @@ fn domain_state_setup(domainType: Oid, binary: bool) -> PgResult<DomainIOData> {
         lsyscache::getTypeInputInfo(baseType)?
     };
     let proc = fmgr_seams::fmgr_info::call(typiofunc)?;
+    if typcache_seams::domain_prepare_constraints::is_installed() {
+        typcache_seams::domain_prepare_constraints::call(domainType)?;
+    }
     Ok(DomainIOData { domain_type: domainType, typioparam, typtypmod, proc })
 }
 

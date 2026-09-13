@@ -301,3 +301,52 @@ fn parser_depth_guard_below_threshold_round_trips() {
     }
 }
 
+
+// jsonpath.c checks for interrupts per parsed item (makeItemType), per
+// flattened item and per printed item; a pending cancel surfaces as 57014
+// from input conversion and from output rendering.
+#[test]
+fn parse_flatten_and_print_poll_for_interrupts() {
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+    use types_error::{PgError, ERRCODE_QUERY_CANCELED};
+
+    // The mock only cancels threads that armed themselves, so parallel
+    // tests in this binary never observe another test's cancel.
+    static ARMED: Mutex<Vec<ThreadId>> = Mutex::new(Vec::new());
+    static INSTALL: Once = Once::new();
+    fn process_interrupts() -> types_error::PgResult<()> {
+        let me = std::thread::current().id();
+        let mut armed = ARMED.lock().unwrap();
+        if let Some(i) = armed.iter().position(|t| *t == me) {
+            armed.swap_remove(i);
+            init_small::globals::SetInterruptPending(false);
+            return Err(PgError::error("canceling statement due to user request")
+                .with_sqlstate(ERRCODE_QUERY_CANCELED)
+                .into());
+        }
+        Ok(())
+    }
+    fn arm() {
+        ARMED.lock().unwrap().push(std::thread::current().id());
+        init_small::globals::SetInterruptPending(true);
+    }
+
+    setup();
+    INSTALL.call_once(|| {
+        if !postgres_seams::check_for_interrupts::is_installed() {
+            postgres_seams::check_for_interrupts::set(process_interrupts);
+        }
+    });
+    let cx = MemoryContext::new("jsonpath cfi");
+    let image = jsonpath_in(cx.mcx(), b"$.a.b", None).unwrap().unwrap();
+
+    arm();
+    let err = jsonpath_in(cx.mcx(), b"$.a.b", None).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_QUERY_CANCELED);
+
+    arm();
+    let err = jsonpath_out(cx.mcx(), &image).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_QUERY_CANCELED);
+    assert!(ARMED.lock().unwrap().is_empty());
+}

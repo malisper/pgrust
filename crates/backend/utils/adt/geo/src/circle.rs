@@ -200,7 +200,7 @@ pub fn circle_poly_checks(npts: i32, circle: &CIRCLE) -> PgResult<()> {
                 .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
         ));
     }
-    crate::io::check_points_overflow(npts, ::types_core::geo::POLYGON_HEADER_SIZE)
+    crate::io::check_points_overflow(npts, ::types_core::geo::POLYGON_HEADER_SIZE, None)
 }
 
 pub fn circle_poly_vertex(circle: &CIRCLE, anglestep: f64, i: i32) -> PgResult<Point> {

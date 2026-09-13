@@ -13,11 +13,13 @@ adt_formatting = { path = "../formatting" }
 adt_json = { path = "../json" }
 adt_numeric = { path = "../numeric" }
 datum = { path = "../../../../_support/types/datum" }
+init_small = { path = "../../init/init_small" }
 mbutils = { path = "../../mb/mbutils" }
 mcx = { path = "../../../../_support/mcx" }
 numutils = { path = "../numutils" }
 pgstrcasecmp = { path = "../../../../port/pgstrcasecmp" }
 pqformat = { path = "../../../libpq/pqformat" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 regex_core = { path = "../../../regex/regex_core" }
 stack_depth = { path = "../../misc/stack_depth" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }

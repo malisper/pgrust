@@ -13,3 +13,12 @@ mod tests;
 mod vectors;
 
 pub fn init_seams() {}
+
+// CHECK_FOR_INTERRUPTS(): the InterruptPending pre-check keeps seamless
+// contexts (unit tests) off the tcop seam.
+pub(crate) fn check_for_interrupts() -> types_error::PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        return postgres_seams::check_for_interrupts::call();
+    }
+    Ok(())
+}

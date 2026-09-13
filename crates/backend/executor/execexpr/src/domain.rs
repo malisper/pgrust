@@ -140,13 +140,12 @@ fn rebuild_memo(memo: &mut DomainMemo, mcx: Mcx<'static>) -> PgResult<()> {
     Ok(())
 }
 
-/// typcache_seams::domain_check_input target (domains.c domain_check_input).
-pub fn domain_check_input(
-    value: Datum,
-    isnull: bool,
-    domain_type: Oid,
-    escontext: Option<&mut ::types_error::SoftErrorContext>,
-) -> PgResult<()> {
+/// typcache_seams::domain_prepare_constraints target.
+pub fn domain_prepare_constraints(domain_type: Oid) -> PgResult<()> {
+    ensure_memo(domain_type)
+}
+
+fn ensure_memo(domain_type: Oid) -> PgResult<()> {
     let present = with_state(|st| st.memos.contains_key(&domain_type));
     if !present {
         let cref = typcache::DomainConstraintRef::init(domain_type)?;
@@ -170,6 +169,17 @@ pub fn domain_check_input(
             with_state(|st| st.memos.insert(domain_type, memo));
         }
     }
+    Ok(())
+}
+
+/// typcache_seams::domain_check_input target (domains.c domain_check_input).
+pub fn domain_check_input(
+    value: Datum,
+    isnull: bool,
+    domain_type: Oid,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
+) -> PgResult<()> {
+    ensure_memo(domain_type)?;
 
     // Evaluate with the memo temporarily out of the map: a CHECK expression
     // may re-enter this engine for a different domain (map growth would move

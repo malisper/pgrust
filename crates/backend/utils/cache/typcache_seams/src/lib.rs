@@ -96,6 +96,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // domain_state_setup's InitDomainConstraintRef(need_exprstate=true):
+    // compile the domain's CHECKs (init-time checks such as function ACLs
+    // fire here) before the base type's input function runs.
+    pub fn domain_prepare_constraints(domain_type: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
     // compare_values_of_enum (typcache.c) keyed by the enum type OID — the
     // enum.c odd-OID comparison fallback consumer.
     pub fn compare_values_of_enum(type_id: Oid, arg1: Oid, arg2: Oid) -> PgResult<i32>

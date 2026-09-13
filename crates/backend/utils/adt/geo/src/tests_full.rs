@@ -353,3 +353,22 @@ fn path_poly_out_over_ceiling_raise_stringinfo_error() {
     let mut out = Vec::new();
     expect_ceiling(io::path_out(&pr, &mut out));
 }
+
+// path_in/poly_in report point-count overflow through ereturn (soft) and
+// palloc the whole datum, header included, before decoding (hard XX000).
+#[test]
+fn point_count_overflow_is_soft_and_full_size_is_admitted_first() {
+    let ctx = MemoryContext::new("geo-npts");
+    let s = ",".repeat(268_435_455);
+    for f in [io::path_in, io::poly_in] {
+        let mut esc = ::types_error::SoftErrorContext::new(true);
+        f(ctx.mcx(), &s, Some(&mut esc)).unwrap();
+        assert!(esc.error_occurred());
+        let err = f(ctx.mcx(), &s, None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    }
+    let s = ",".repeat(134_217_723);
+    let mut esc = ::types_error::SoftErrorContext::new(true);
+    let err = io::poly_in(ctx.mcx(), &s, Some(&mut esc)).unwrap_err();
+    assert_eq!(err.message(), "invalid memory alloc request size 1073741832");
+}

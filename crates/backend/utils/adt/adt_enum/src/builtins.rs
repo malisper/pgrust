@@ -5,8 +5,7 @@ use types_fmgr::{varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData
 
 pub fn fc_enum_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of enum_in is cstring (typlen -2).
-    let name = unsafe { fcinfo.arg_cstring(0) };
-    let name = core::str::from_utf8(name.to_bytes()).unwrap_or("");
+    let name = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
     let [_, typoid] = fcinfo.args_n::<2>();
     // SAFETY: context, if set, rides per the ErrorSaveNode contract.
     let esc = unsafe { fcinfo.soft_error_context() };
@@ -28,9 +27,8 @@ pub fn fc_enum_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     let mcx = fcinfo.result_mcx();
     let rawbytes = buf.len().saturating_sub(buf.cursor);
     let name = pqformat::pq_getmsgtext(mcx, buf, rawbytes)?;
-    let name = core::str::from_utf8(&name).unwrap_or("");
     // Hard error either way here (no ereturn in the C).
-    match crate::enum_in(name, typoid.value.as_oid(), None)? {
+    match crate::enum_in(&name, typoid.value.as_oid(), None)? {
         Some(oid) => Ok(Datum::from_oid(oid)),
         None => unreachable!("enum_in without escontext returned soft error"),
     }

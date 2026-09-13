@@ -134,4 +134,5 @@ pub fn evaluate_expr<'mcx>(
 pub fn init_seams() {
     clauses_seams::evaluate_expr::set(evaluate_expr);
     typcache_seams::domain_check_input::set(domain::domain_check_input);
+    typcache_seams::domain_prepare_constraints::set(domain::domain_prepare_constraints);
 }

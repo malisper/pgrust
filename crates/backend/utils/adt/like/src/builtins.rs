@@ -1,11 +1,11 @@
 //! fmgr wrappers (`fc_*`) + `LIKE_BUILTINS` for fmgr-core. like_support.c's
 //! prosupport rows answer NULL except the index-condition leg (loud).
 
-use datum::varlena::{set_varsize_4b, VARHDRSZ};
+use datum::varlena::VARHDRSZ;
 use datum::Datum;
 use types_core::Oid;
 use types_error::PgResult;
-use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use types_fmgr::{varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
 use crate::IcScratch;
 
@@ -105,33 +105,25 @@ fc_iclike! {
     fc_nameicnlike: nameicnlike / arg_name;
 }
 
-// Result varlena lives in the resolved FmgrInfo's retained scratch (the
-// varlena textin precedent; C pallocs per call).
-struct OutBuf(Vec<u8>);
-
+// C pallocs a fresh result per call; earlier results stay valid.
 fn escape_out(
-    flinfo: Option<&mut FmgrInfo>,
+    _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
-    name: &'static str,
+    _name: &'static str,
     bytea: bool,
 ) -> PgResult<Datum> {
-    let Some(flinfo) = flinfo else { no_flinfo(name) };
-    if !flinfo.has_fn_extra() {
-        flinfo.set_fn_extra(OutBuf(Vec::new()));
-    }
     // SAFETY: catalog args are non-null text/bytea varlenas (strict fn).
     let (pat, esc) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    let buf = &mut flinfo.fn_extra_mut::<OutBuf>().unwrap().0;
-    buf.clear();
+    let mut buf = Vec::new();
     buf.extend_from_slice(&[0; VARHDRSZ]);
     if bytea {
-        crate::like_escape_bytea_into(pat.data(), esc.data(), buf)?;
+        crate::like_escape_bytea_into(pat.data(), esc.data(), &mut buf)?;
     } else {
-        crate::like_escape_into(pat.data(), esc.data(), buf)?;
+        crate::like_escape_into(pat.data(), esc.data(), &mut buf)?;
     }
-    let total = buf.len();
-    buf[..VARHDRSZ].copy_from_slice(&set_varsize_4b(total));
-    Ok(Datum::from_usize(buf.as_ptr() as usize))
+    let mut image: ::mcx::PgVec<'_, u8> = ::mcx::vec_with_capacity_in(fcinfo.result_mcx(), buf.len())?;
+    image.extend_from_slice(&buf);
+    Ok(varlena_result(datum::Varlena::from_image(image)))
 }
 
 pub fn fc_like_escape(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

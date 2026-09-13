@@ -186,8 +186,9 @@ pub fn parse_format(
 ) -> PgResult<Vec<FormatNode>> {
     // formatting.c parse_format: palloc((len + 1) * sizeof(FormatNode)),
     // admitted under MaxAllocSize before any node is built.
+    const C_FORMAT_NODE_SIZE: usize = 16;
     let n = str.len().saturating_add(1);
-    let bytes = n.saturating_mul(core::mem::size_of::<FormatNode>());
+    let bytes = n.saturating_mul(C_FORMAT_NODE_SIZE);
     ::mcx::check_alloc_size(bytes)?;
     let mut nodes: Vec<FormatNode> = Vec::new();
     nodes.try_reserve_exact(n).map_err(|_| ::mcx::oom_named("parse_format", bytes))?;
@@ -319,4 +320,22 @@ pub fn parse_format(
 #[inline]
 pub fn is_c_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tables::*;
+
+    // C admits the picture workspace as (len + 1) * sizeof(FormatNode) with
+    // its 16-byte node, so a 68,000,000-byte picture fails the MaxAllocSize
+    // check before any parsing.
+    #[test]
+    fn picture_workspace_admitted_at_c_node_size() {
+        let pic = vec![b'"'; 68_000_000];
+        let err = parse_format(&pic, DCH_KEYWORDS, DCH_SUFF, &DCH_INDEX, DCH_FLAG, None)
+            .err()
+            .expect("oversized picture must be rejected");
+        assert_eq!(err.message(), "invalid memory alloc request size 1088000016");
+    }
 }

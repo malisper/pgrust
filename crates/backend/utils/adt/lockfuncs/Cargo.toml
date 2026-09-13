@@ -12,6 +12,8 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 funcapi = { path = "../../fmgr/funcapi" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+typcache_seams = { path = "../../cache/typcache_seams" }
 varlena = { path = "../varlena" }
 init_small = { path = "../../init/init_small" }
 lock = { path = "../../../storage/lmgr/lock" }

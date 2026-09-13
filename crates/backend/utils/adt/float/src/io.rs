@@ -658,27 +658,63 @@ pub fn float4in_internal(
 }
 
 // strtod also consumes an optional nan(n-char-seq) payload; PG inherits it.
-fn nan_payload_len(s: &[u8]) -> usize {
+// glibc reads the sequence with strtoull(base 0) into the mantissa bits and
+// keeps the default NaN unless the whole sequence is a number.
+fn nan_payload(s: &[u8]) -> (u64, usize) {
     if s.len() > 3 && s[3] == b'(' {
         let mut i = 4;
         while i < s.len() && (s[i].is_ascii_alphanumeric() || s[i] == b'_') {
             i += 1;
         }
         if i < s.len() && s[i] == b')' {
-            return i + 1;
+            return (strtoull_base0(&s[4..i]).unwrap_or(0), i + 1);
         }
     }
-    3
+    (0, 3)
+}
+
+// strtoull(seq, &end, 0) requiring end == seq end; ULLONG_MAX on overflow.
+fn strtoull_base0(seq: &[u8]) -> Option<u64> {
+    let (digits, radix) =
+        if seq.len() > 2 && seq[0] == b'0' && (seq[1] == b'x' || seq[1] == b'X') {
+            (&seq[2..], 16u32)
+        } else if seq.len() > 1 && seq[0] == b'0' {
+            (&seq[1..], 8)
+        } else {
+            (seq, 10)
+        };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut acc: u64 = 0;
+    for &b in digits {
+        let d = (b as char).to_digit(radix)?;
+        acc = acc
+            .checked_mul(radix as u64)
+            .and_then(|v| v.checked_add(d as u64))
+            .unwrap_or(u64::MAX);
+    }
+    Some(acc)
+}
+
+fn nan8(payload: u64) -> f64 {
+    f64::from_bits(get_float8_nan().to_bits() | (payload & 0x000f_ffff_ffff_ffff))
+}
+
+fn nan4(payload: u64) -> f32 {
+    f32::from_bits(get_float4_nan().to_bits() | (payload as u32 & 0x007f_ffff))
 }
 
 // Order matters: "Infinity" before "inf". strtod also accepts a signed NaN.
 pub fn special_float8(s: &[u8]) -> Option<(f64, usize)> {
     if strncasecmp_eq(s, b"NaN") {
-        Some((get_float8_nan(), nan_payload_len(s)))
+        let (p, n) = nan_payload(s);
+        Some((nan8(p), n))
     } else if (s.first() == Some(&b'+') || s.first() == Some(&b'-')) && strncasecmp_eq(&s[1..], b"NaN")
     {
-        let v = if s[0] == b'-' { -get_float8_nan() } else { get_float8_nan() };
-        Some((v, 1 + nan_payload_len(&s[1..])))
+        let (p, n) = nan_payload(&s[1..]);
+        let v = if s[0] == b'-' { -nan8(p) } else { nan8(p) };
+        Some((v, 1 + n))
     } else if strncasecmp_eq(s, b"Infinity") {
         Some((get_float8_infinity(), 8))
     } else if strncasecmp_eq(s, b"+Infinity") {
@@ -698,11 +734,13 @@ pub fn special_float8(s: &[u8]) -> Option<(f64, usize)> {
 
 fn special_float4(s: &[u8]) -> Option<(f32, usize)> {
     if strncasecmp_eq(s, b"NaN") {
-        Some((get_float4_nan(), nan_payload_len(s)))
+        let (p, n) = nan_payload(s);
+        Some((nan4(p), n))
     } else if (s.first() == Some(&b'+') || s.first() == Some(&b'-')) && strncasecmp_eq(&s[1..], b"NaN")
     {
-        let v = if s[0] == b'-' { -get_float4_nan() } else { get_float4_nan() };
-        Some((v, 1 + nan_payload_len(&s[1..])))
+        let (p, n) = nan_payload(&s[1..]);
+        let v = if s[0] == b'-' { -nan4(p) } else { nan4(p) };
+        Some((v, 1 + n))
     } else if strncasecmp_eq(s, b"Infinity") {
         Some((get_float4_infinity(), 8))
     } else if strncasecmp_eq(s, b"+Infinity") {

@@ -72,6 +72,7 @@ fn make_item<'mcx>(
     typ: ItemType,
     value: ParseValue<'mcx>,
 ) -> PgResult<Item<'mcx>> {
+    crate::check_for_interrupts()?;
     Ok(leak_in(alloc_in(
         mcx,
         ParseItem { typ, next: Cell::new(None), value },

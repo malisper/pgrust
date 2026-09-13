@@ -186,6 +186,7 @@ fn flatten_item(
     inside_array_subscript: bool,
 ) -> PgResult<Option<i32>> {
     check_stack_depth()?;
+    crate::check_for_interrupts()?;
 
     let pos = buf.len() as i32 - JSONPATH_HDRSZ as i32;
     #[allow(unused_assignments)] // Rust-structural: definite-init boilerplate (C: jsonpath.c:245 declares uninitialized; every arm assigns)
@@ -834,6 +835,7 @@ fn print_item(
     print_brackets: bool,
 ) -> PgResult<()> {
     check_stack_depth()?;
+    crate::check_for_interrupts()?;
 
     match v.typ {
         ItemType::Null => buf.append_bytes(b"null")?,

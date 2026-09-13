@@ -1083,8 +1083,15 @@ pub(crate) fn fmt_plus_e(prec: usize, val: f64) -> String {
         };
     }
     let neg = val.is_sign_negative();
-    let s = format!("{:.*e}", prec, val.abs());
-    let s = normalize_exponent(&s);
+    // snprintf.c fmtfloat: conversion precision is capped at 350 and the
+    // remainder is zero padding injected before the exponent.
+    let conv = prec.min(350);
+    let s = format!("{:.*e}", conv, val.abs());
+    let mut s = normalize_exponent(&s);
+    if prec > conv {
+        let epos = s.rfind('e').expect("exponent present");
+        s.insert_str(epos, &"0".repeat(prec - conv));
+    }
     if neg {
         format!("-{s}")
     } else {

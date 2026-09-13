@@ -4,9 +4,10 @@
 use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::{Oid, INT4OID};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_fmgr::{
-    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+    byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction,
 };
 use ::types_storage::lock::{
     ExclusiveLock, LockInstanceData, NoLock, ShareLock, LOCKACQUIRE_NOT_AVAIL, LOCKBIT_ON,
@@ -78,7 +79,7 @@ fn int4_array_datum(mcx: Mcx<'_>, vals: &[i32]) -> PgResult<Datum> {
 }
 
 fn lock_status_row(
-    srf: &mut funcapi::MaterializedSRF<'_>,
+    put: &mut dyn FnMut(&[Datum], &[bool]) -> PgResult<()>,
     mcx: Mcx<'_>,
     instance: &LockInstanceData,
     mode: LOCKMODE,
@@ -179,26 +180,43 @@ fn lock_status_row(
         nulls[15] = true;
     }
 
-    srf.putvalues(&values, &nulls)
+    put(&values, &nulls)
 }
 
-pub fn fc_pg_lock_status(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let flinfo = flinfo.expect("pg_lock_status: resolved FmgrInfo required");
-    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
-    let mcx = unsafe { fcinfo.result_mcx_detached() };
-    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
-    debug_assert_eq!(srf.tupdesc.natts as usize, NUM_LOCK_STATUS_COLUMNS);
+// C pg_lock_status is value-per-call (SRF_RETURN_NEXT over data gathered at
+// the first call), so a target-list caller with LIMIT stops early and no
+// tuplestore is involved.
+struct LockRows {
+    tuples: Vec<Vec<u8>>,
+}
+
+fn collect_lock_rows(mcx: Mcx<'_>, flinfo: &FmgrInfo) -> PgResult<LockRows> {
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(Box::new(PgError::error("return type must be a row type")));
+    }
+    let mut desc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
+    debug_assert_eq!(desc.natts as usize, NUM_LOCK_STATUS_COLUMNS);
+    // C: BlessTupleDesc.
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
+
+    let mut tuples = Vec::new();
+    let mut put = |values: &[Datum], nulls: &[bool]| -> PgResult<()> {
+        let tuple = heaptuple::heap_form_tuple(mcx, &desc, values, nulls)?;
+        tuples.push(tuple.image().to_vec());
+        Ok(())
+    };
 
     for instance in lock::GetLockStatusData()? {
         if instance.holdMask != 0 {
             for mode in 0..MAX_LOCKMODES as LOCKMODE {
                 if instance.holdMask & LOCKBIT_ON(mode) != 0 {
-                    lock_status_row(&mut srf, mcx, &instance, mode, true)?;
+                    lock_status_row(&mut put, mcx, &instance, mode, true)?;
                 }
             }
         }
         if instance.waitLockMode != NoLock {
-            lock_status_row(&mut srf, mcx, &instance, instance.waitLockMode, false)?;
+            lock_status_row(&mut put, mcx, &instance, instance.waitLockMode, false)?;
         }
     }
 
@@ -235,10 +253,34 @@ pub fn fc_pg_lock_status(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
         values[14] = Datum::from_bool(false);
         nulls[15] = true;
 
-        srf.putvalues(&values, &nulls)?;
+        put(&values, &nulls)?;
     }
 
-    Ok(srf.finish(fcinfo))
+    Ok(LockRows { tuples })
+}
+
+pub fn fc_pg_lock_status(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_lock_status: resolved FmgrInfo required");
+    if !flinfo.has_fn_extra() {
+        let rows = collect_lock_rows(fcinfo.result_mcx(), flinfo)?;
+        let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(Box::new(rows));
+    }
+    let fctx = funcapi::per_MultiFuncCall(flinfo);
+    let idx = fctx.call_cntr as usize;
+    let rows = fctx
+        .user_fctx
+        .as_ref()
+        .expect("pg_lock_status: rows set at first call")
+        .downcast_ref::<LockRows>()
+        .expect("pg_lock_status: user_fctx is LockRows");
+    match rows.tuples.get(idx) {
+        Some(img) => {
+            let d = byref_result(fcinfo.result_mcx(), img)?;
+            Ok(funcapi::srf_return_next(flinfo, fcinfo, d))
+        }
+        None => Ok(funcapi::srf_return_done(flinfo, fcinfo)),
+    }
 }
 
 pub fn blocking_pids(blocked_pid: i32) -> PgResult<Vec<i32>> {
