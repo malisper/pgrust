@@ -59,6 +59,7 @@ mbutils = { path = "../../../utils/mb/mbutils" }
 latch = { path = "../../../storage/ipc/latch" }
 init_small = { path = "../../../utils/init/init_small" }
 types_storage = { path = "../../../../_support/types/types_storage" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
 copy_cmd = { path = "../../../commands/copy", package = "copy_cmd" }
 table = { path = "../../../access/table/table" }
 tablecmds = { path = "../../../commands/tablecmds" }

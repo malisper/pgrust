@@ -464,3 +464,46 @@ fn stream_abort_roundtrip_with_and_without_abort_info() {
     let a2 = logicalrep_read_stream_abort(&mut r2, true).unwrap();
     assert_eq!((a2.xid, a2.subxid, a2.abort_lsn, a2.abort_time), (756, 757, 0x99, 555));
 }
+
+// pq_sendstring / pq_sendcountedtext (pqformat.c:191/71) convert to the
+// client encoding; the length prefix counts the converted bytes. The fake
+// converter maps UTF-8 "é" (c3 a9) to LATIN1 e9 and is the identity
+// otherwise, so every other test's strings pass through unchanged.
+#[test]
+fn text_payloads_convert_to_client_encoding() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        mbutils_seams::server_to_client_conversion_needed::set(|| true);
+        mbutils_seams::pg_server_to_client::set(|mcx, s| {
+            if !s.windows(2).any(|w| w == [0xc3, 0xa9]) {
+                return Ok(None);
+            }
+            let mut v: Vec<u8> = Vec::new();
+            let mut i = 0;
+            while i < s.len() {
+                if s[i] == 0xc3 && i + 1 < s.len() && s[i + 1] == 0xa9 {
+                    v.push(0xe9);
+                    i += 2;
+                } else {
+                    v.push(s[i]);
+                    i += 1;
+                }
+            }
+            Ok(Some(mcx::slice_in(mcx, &v)?))
+        });
+    });
+
+    let mut out = Vec::new();
+    logicalrep_write_origin(&mut out, "cafe", 7);
+    assert_eq!(&out[9..], b"cafe\0");
+    let mut out = Vec::new();
+    send_countedtext(&mut out, b"cafe");
+    assert_eq!(out, b"\0\0\0\x04cafe");
+
+    let mut out = Vec::new();
+    logicalrep_write_origin(&mut out, "caf\u{e9}", 7);
+    assert_eq!(&out[9..], b"caf\xe9\0");
+    let mut out = Vec::new();
+    send_countedtext(&mut out, "caf\u{e9}".as_bytes());
+    assert_eq!(out, b"\0\0\0\x04caf\xe9");
+}

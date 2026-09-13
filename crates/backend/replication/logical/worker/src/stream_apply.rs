@@ -402,7 +402,7 @@ pub(crate) fn apply_handle_stream_start(mcx: Mcx<'static>, buf: &[u8]) -> PgResu
 // file, and commit the per-stream transaction.
 fn stream_stop_internal(mcx: Mcx<'static>, xid: TransactionId) -> PgResult<()> {
     subxact_info_write(mcx, subid(), xid)?;
-    stream_close_file();
+    stream_close_file()?;
     debug_assert!(xact::IsTransactionState());
     xact::CommitTransactionCommand()
 }
@@ -632,7 +632,7 @@ pub(crate) fn apply_handle_stream_abort(mcx: Mcx<'static>, buf: &[u8]) -> PgResu
         ParallelApply => {
             // Applying spooled messages: close the file before aborting.
             if toplevel_xact && STREAM_FD.with(|f| f.borrow().is_some()) {
-                stream_close_file();
+                stream_close_file()?;
             }
             pa_stream_abort(&abort)?;
             // Wait for the next set of changes after a subxact rollback.
@@ -787,7 +787,7 @@ pub(crate) fn apply_spooled_messages(
     }
 
     if STREAM_FD.with(|f| f.borrow().is_some()) {
-        stream_close_file();
+        stream_close_file()?;
     }
 
     let _ = elog::elog(
@@ -868,7 +868,7 @@ pub(crate) fn apply_handle_stream_commit(
         ParallelApply => {
             // Applying spooled messages: close the file before committing.
             if STREAM_FD.with(|f| f.borrow().is_some()) {
-                stream_close_file();
+                stream_close_file()?;
             }
             crate::apply::apply_handle_commit_internal(mcx, &commit_data)?;
             pa_set_last_commit_end(transam_xlog_seams::xact_last_commit_end::call());
@@ -984,7 +984,7 @@ pub(crate) fn apply_handle_stream_prepare(
         ParallelApply => {
             // Applying spooled messages: close the file before preparing.
             if STREAM_FD.with(|f| f.borrow().is_some()) {
-                stream_close_file();
+                stream_close_file()?;
             }
             begin_replication_step(mcx)?;
             crate::apply::apply_handle_prepare_internal(&prepare_data)?;
@@ -1064,10 +1064,10 @@ fn stream_open_file(
 }
 
 // stream_close_file (worker.c:4373).
-fn stream_close_file() {
+fn stream_close_file() -> PgResult<()> {
     let fd = STREAM_FD.with(|f| f.borrow_mut().take()).expect("stream file open");
     // The spool must be durable across chunks; close flushes the buffer.
-    fd.file.close().expect("closing streamed-changes spool file");
+    fd.file.close()
 }
 
 // stream_write_change (worker.c:4391): [len][action][payload]. For the serial

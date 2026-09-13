@@ -474,3 +474,41 @@ fn apply_error_context_attaches_to_a_propagating_apply_error() {
     drop(frame);
     super::reset_apply_error_context_info();
 }
+
+// quote_literal_cstr (quote.c:103): a backslash forces the E'' form so a
+// publisher with standard_conforming_strings = off reads the same bytes.
+#[test]
+fn tablesync_quote_literal_cstr_matches_c() {
+    assert_eq!(super::tablesync::quote_literal_cstr("pub"), "'pub'");
+    assert_eq!(super::tablesync::quote_literal_cstr("it's"), "'it''s'");
+    assert_eq!(super::tablesync::quote_literal_cstr("p\\n0"), "E'p\\\\n0'");
+}
+
+// libpqrcv_startstreaming (libpqwalreceiver.c:630): binary needs a >= 14
+// publisher, two_phase >= 15, origin >= 16; older publishers never see them.
+#[test]
+fn start_replication_gates_options_on_publisher_version() {
+    let pubs = vec!["p".to_string(), "q\"r".to_string()];
+    let cmd = |v: i32| {
+        super::start_replication_command(v, "s", 0x1_0000_0010, &pubs, true, "none", None, true)
+    };
+    assert_eq!(
+        cmd(180006),
+        "START_REPLICATION SLOT \"s\" LOGICAL 1/10 (proto_version '4', two_phase 'on', \
+         origin 'none', publication_names '\"p\",\"q\"\"r\"', binary 'true')"
+    );
+    let c15 = cmd(150005);
+    assert!(c15.contains(", two_phase 'on'") && c15.contains(", binary 'true'"));
+    assert!(!c15.contains("origin"));
+    let c14 = cmd(140010);
+    assert!(c14.contains(", binary 'true'"));
+    assert!(!c14.contains("two_phase") && !c14.contains("origin"));
+    let c13 = cmd(130000);
+    assert!(!c13.contains("binary") && !c13.contains("two_phase") && !c13.contains("origin"));
+    assert!(c13.ends_with(", publication_names '\"p\",\"q\"\"r\"')"));
+    let streamed = super::start_replication_command(
+        160000, "s", 0, &pubs, false, "any", Some("parallel"), false,
+    );
+    assert!(streamed.contains("(proto_version '4', streaming 'parallel', publication_names"));
+    assert!(!streamed.contains("origin") && !streamed.contains("two_phase"));
+}

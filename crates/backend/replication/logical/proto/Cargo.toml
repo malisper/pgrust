@@ -15,6 +15,7 @@ types_rel = { path = "../../../../_support/types/rel" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
+mbutils_seams = { path = "../../../utils/mb/mbutils_seams" }
 elog = { path = "../../../utils/error/elog" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }

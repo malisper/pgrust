@@ -889,6 +889,49 @@ pub(crate) fn logicalrep_streaming_str(
     }
 }
 
+// libpqrcv_startstreaming (libpqwalreceiver.c:630): the logical option list.
+// binary, two_phase and origin are version-gated (>= 14, >= 15, >= 16) —
+// an older publisher rejects options it does not know.
+#[allow(clippy::too_many_arguments)]
+fn start_replication_command(
+    server_version: i32,
+    slot: &str,
+    startpos: XLogRecPtr,
+    publications: &[String],
+    binary: bool,
+    origin_opt: &str,
+    streaming_str: Option<&str>,
+    two_phase: bool,
+) -> String {
+    let proto_version = logicalrep_proto_version(server_version);
+    let pubnames = publications
+        .iter()
+        .map(|p| format!("\"{}\"", p.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut cmd = format!(
+        "START_REPLICATION SLOT \"{}\" LOGICAL {:X}/{:X} (proto_version '{proto_version}'",
+        slot.replace('"', "\"\""),
+        (startpos >> 32) as u32,
+        startpos as u32
+    );
+    if let Some(streaming) = streaming_str {
+        cmd.push_str(&format!(", streaming '{streaming}'"));
+    }
+    if two_phase && server_version >= 150000 {
+        cmd.push_str(", two_phase 'on'");
+    }
+    if origin_opt != "any" && server_version >= 160000 {
+        cmd.push_str(&format!(", origin '{}'", origin_opt.replace('\'', "''")));
+    }
+    cmd.push_str(&format!(", publication_names '{}'", pubnames.replace('\'', "''")));
+    if binary && server_version >= 140000 {
+        cmd.push_str(", binary 'true'");
+    }
+    cmd.push(')');
+    cmd
+}
+
 fn start_logical_streaming_opts(
     conn: &mut PgConn,
     slotname: &str,
@@ -914,36 +957,18 @@ fn start_logical_streaming_opts(
     // START_REPLICATION. two_phase is requested only by run_apply_worker's
     // PENDING->ENABLED transition.
     let server_version = conn.server_version();
-    let proto_version = logicalrep_proto_version(server_version);
     let streaming_str = logicalrep_streaming_str(server_version, stream_mode);
-    let parallel = streaming_str == Some("parallel");
-    launcher::my_worker_set_parallel_apply(parallel);
-    let pubnames = publications
-        .iter()
-        .map(|p| format!("\"{}\"", p.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(",");
-    let pubnames_literal = format!("'{}'", pubnames.replace('\'', "''"));
-    let mut cmd = format!(
-        "START_REPLICATION SLOT \"{}\" LOGICAL {:X}/{:X} (proto_version '{proto_version}'",
-        slot.replace('"', "\"\""),
-        (startpos >> 32) as u32,
-        startpos as u32
+    launcher::my_worker_set_parallel_apply(streaming_str == Some("parallel"));
+    let cmd = start_replication_command(
+        server_version,
+        &slot,
+        startpos,
+        &publications,
+        binary,
+        &origin_opt,
+        streaming_str,
+        two_phase,
     );
-    if origin_opt != "any" {
-        cmd.push_str(&format!(", origin '{}'", origin_opt.replace('\'', "''")));
-    }
-    cmd.push_str(&format!(", publication_names {pubnames_literal}"));
-    if binary {
-        cmd.push_str(", binary 'true'");
-    }
-    if let Some(streaming) = streaming_str {
-        cmd.push_str(&format!(", streaming '{streaming}'"));
-    }
-    if two_phase {
-        cmd.push_str(", two_phase 'on'");
-    }
-    cmd.push(')');
 
     let res = conn.exec(&cmd)?;
     if res.status != walreceiver::client::ExecStatus::CopyBoth {
@@ -1053,6 +1078,15 @@ pub(crate) fn initialize_logrep_worker(
 
     // Database connection + subscription load.
     bgworker::BackgroundWorkerInitializeConnectionByOid(w.dbid, w.userid, 0)?;
+
+    // worker.c:4691: always-secure search path, so malicious users can't
+    // redirect user code (e.g. pg_index.indexprs).
+    guc::SetConfigOption(
+        "search_path",
+        Some(""),
+        types_guc::GucContext::PGC_SUSET,
+        types_guc::GucSource::PGC_S_OVERRIDE,
+    )?;
 
     inval::invalidate::CacheRegisterSyscacheCallback(
         cache_syscache::cacheinfo::SUBSCRIPTIONOID,

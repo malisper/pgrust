@@ -14,6 +14,7 @@
 // - The DirtySnapshot lookup snapshot is GetLatestSnapshot + C's
 //   table_tuple_lock retry protocol.
 use std::ffi::CString;
+use std::rc::Rc;
 
 use datum::Datum;
 use elog::ereport;
@@ -23,7 +24,7 @@ use logicalproto::{
 };
 use logicalrelation::LogicalRepRelMapEntry;
 use mcx::Mcx;
-use types_core::{InvalidOid, Oid};
+use types_core::{InvalidOid, InvalidTransactionId, Oid, TransactionId};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION,
@@ -741,6 +742,7 @@ fn slot_fill_defaults<'mcx>(
         return Ok(keep_alive);
     }
 
+    let mut defmap = Vec::new();
     for i in 0..natts {
         let att = rel.rd_att.attr(i);
         let remote = entry.attrmap.get(i).copied().unwrap_or(-1);
@@ -755,14 +757,16 @@ fn slot_fill_defaults<'mcx>(
         let mut state = execexpr::exec_init_expr(mcx, Some(defexpr), execexpr::ParamBind::NONE)?
             .expect("column default expression");
         state.arm_result_mcx(mcx);
+        keep_alive.push(state);
+        defmap.push(i);
+    }
 
+    for (state, &i) in keep_alive.iter_mut().zip(defmap.iter()) {
         let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
-        let r = execexpr::exec_eval_expr(&mut state, &mut slots)?;
+        let r = execexpr::exec_eval_expr(state, &mut slots)?;
         let base = slot.base_mut();
         base.tts_values[i] = r.value;
         base.tts_isnull[i] = r.isnull;
-
-        keep_alive.push(state);
     }
     Ok(keep_alive)
 }
@@ -1015,10 +1019,11 @@ fn check_relation_updatable(
 }
 
 // tuples_equal (execReplication.c:282).
-fn tuples_equal(
-    slot1: &mut SlotData<'_>,
-    slot2: &mut SlotData<'_>,
-    rel: &Relation<'_>,
+fn tuples_equal<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot1: &mut SlotData<'mcx>,
+    slot2: &mut SlotData<'mcx>,
+    rel: &Relation<'mcx>,
 ) -> PgResult<bool> {
     exectuples::slot_getallattrs(slot1);
     exectuples::slot_getallattrs(slot2);
@@ -1058,7 +1063,7 @@ fn tuples_equal(
                 .finish(loc("tuples_equal"))?;
             unreachable!();
         }
-        let eq = fmgr::fcinfo::function_call2_coll(&mut finfo, att.attcollation, v1, v2)?;
+        let eq = fmgr::fcinfo::function_call2_coll_in(&mut finfo, att.attcollation, mcx, v1, v2)?;
         if !eq.as_bool() {
             return Ok(false);
         }
@@ -1123,8 +1128,7 @@ fn build_replindex_scan_key(
     Ok(keys)
 }
 
-// RelationFindReplTupleByIndex (execReplication.c:179): latest-snapshot +
-// tuple-lock-retry rendering of the DirtySnapshot protocol.
+// RelationFindReplTupleByIndex (execReplication.c:179).
 fn find_repl_tuple_by_index<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -1138,13 +1142,13 @@ fn find_repl_tuple_by_index<'mcx>(
     let is_idx_safe_to_skip_duplicates =
         logicalrelation::get_relation_identity_or_pk(mcx, rel)? == idxoid;
 
+    // InitDirtySnapshot (execReplication.c:199): an in-progress match
+    // surfaces through dirty_xmin/dirty_xmax and is waited out, then the
+    // scan is retried.
+    let snap = Rc::new(types_snapshot::SnapshotData::sentinel(mcx, types_snapshot::SNAPSHOT_DIRTY));
     let keys = build_replindex_scan_key(&idxrel, rel, searchslot)?;
 
     let found = loop {
-        // The scan snapshot must be registered (heapam visibility asserts
-        // regd_count/active_count; C's index_beginscan requires the same).
-        let snap = snapmgr::RegisterSnapshot(Some(&snapmgr::GetLatestSnapshot()?))?
-            .expect("registered snapshot");
         let mut scan =
             indexam::index_beginscan(mcx, rel, &idxrel, snap.clone(), keys.len() as i32, 0)?;
         let mut kv = mcx::PgVec::new_in(mcx);
@@ -1154,6 +1158,7 @@ fn find_repl_tuple_by_index<'mcx>(
         indexam::index_rescan(&mut scan, Some(&kv), None)?;
 
         let mut found = false;
+        let mut xwait = InvalidTransactionId;
         while indexam::index_getnext_slot(
             mcx,
             &mut scan,
@@ -1162,16 +1167,25 @@ fn find_repl_tuple_by_index<'mcx>(
         )? {
             // Avoid the expensive equality check if the index is the primary
             // key or replica identity index (execReplication.c:222).
-            if !is_idx_safe_to_skip_duplicates && !tuples_equal(outslot, searchslot, rel)? {
+            if !is_idx_safe_to_skip_duplicates && !tuples_equal(mcx, outslot, searchslot, rel)? {
                 continue;
             }
             // ExecMaterializeSlot (execReplication.c:228): own the tuple
             // before the scan's pin goes away.
             exectuples::exec_materialize_slot(outslot, mcx)?;
+            xwait = dirty_xwait(&snap);
+            if xwait != InvalidTransactionId {
+                break;
+            }
             found = true;
             break;
         }
 
+        if xwait != InvalidTransactionId {
+            indexam::index_endscan(scan)?;
+            lmgr::XactLockTableWait(xwait, None, None, types_storage::lock::XLTW_Oper::None)?;
+            continue;
+        }
         if found {
             // Lock the found tuple; on concurrent update/delete retry the scan
             // (should_refetch_tuple protocol).
@@ -1179,26 +1193,29 @@ fn find_repl_tuple_by_index<'mcx>(
             snapmgr::PushActiveSnapshot(&snapmgr::GetLatestSnapshot()?)?;
             let lockres = tableam::table_tuple_lock_for_repl(mcx, rel, &tid, outslot);
             snapmgr::PopActiveSnapshot()?;
+            indexam::index_endscan(scan)?;
             match lockres? {
-                LockOutcome::Ok => {
-                    indexam::index_endscan(scan)?;
-                    snapmgr::UnregisterSnapshot(Some(&snap));
-                    break true;
-                }
-                LockOutcome::Retry => {
-                    indexam::index_endscan(scan)?;
-                    snapmgr::UnregisterSnapshot(Some(&snap));
-                    continue;
-                }
+                LockOutcome::Ok => break true,
+                LockOutcome::Retry => continue,
             }
         }
         indexam::index_endscan(scan)?;
-        snapmgr::UnregisterSnapshot(Some(&snap));
         break false;
     };
 
     indexam::index_close(idxrel, types_rel::NoLock)?;
     Ok(found)
+}
+
+// execReplication.c:232: the in-progress inserter (xmin) or locker/deleter
+// (xmax) the dirty scan saw on the matched tuple.
+fn dirty_xwait(snap: &types_snapshot::SnapshotData<'_>) -> TransactionId {
+    let xmin = snap.dirty_xmin.get();
+    if xmin != InvalidTransactionId {
+        xmin
+    } else {
+        snap.dirty_xmax.get()
+    }
 }
 
 #[derive(Debug)]
@@ -1302,30 +1319,26 @@ fn find_repl_tuple_seq<'mcx>(
     searchslot: &mut SlotData<'mcx>,
     outslot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
+    // InitDirtySnapshot (see the by-index variant).
+    let snap = Rc::new(types_snapshot::SnapshotData::sentinel(mcx, types_snapshot::SNAPSHOT_DIRTY));
     let found = loop {
-        // Registered for the scan's lifetime (see the by-index variant).
-        let snap = snapmgr::RegisterSnapshot(Some(&snapmgr::GetLatestSnapshot()?))?
-            .expect("registered snapshot");
         let mut scan =
             tableam_real::table_beginscan(mcx, rel, Some(snap.clone()), 0, mcx::PgVec::new_in(mcx))?;
         let mut scanslot = tableam_real::table_slot_create(mcx, rel)?;
 
         let mut found = false;
+        let mut xwait = InvalidTransactionId;
         while tableam_real::table_scan_getnextslot(
             mcx,
             &mut scan,
             types_scan::sdir::ScanDirection::ForwardScanDirection,
             &mut scanslot,
         )? {
-            if !tuples_equal(&mut scanslot, searchslot, rel)? {
+            if !tuples_equal(mcx, &mut scanslot, searchslot, rel)? {
                 continue;
             }
-            found = true;
-            break;
-        }
-
-        if found {
-            // Copy the match out, then lock it (retry on concurrent change).
+            // ExecCopySlot is a DEEP copy in C: materialize now, while the
+            // datums still point into scanslot's pinned buffer.
             let natts = rel.rd_att.natts as usize;
             exectuples::exec_clear_tuple(outslot, mcx);
             exectuples::slot_getallattrs(&mut scanslot);
@@ -1340,27 +1353,40 @@ fn find_repl_tuple_seq<'mcx>(
             }
             outslot.base_mut().tts_tid = scanslot.base().tts_tid;
             exectuples::exec_store_virtual_tuple(outslot);
-            // ExecCopySlot is a DEEP copy in C: materialize now, while the
-            // datums still point into scanslot's pinned buffer.
             exectuples::exec_materialize_slot(outslot, mcx)?;
+            xwait = dirty_xwait(&snap);
+            if xwait != InvalidTransactionId {
+                break;
+            }
+            found = true;
+            break;
+        }
+        // ExecDropSingleTupleTableSlot (execReplication.c:430): the scan
+        // slot's own buffer pin goes with it.
+        exectuples::exec_clear_tuple(&mut scanslot, mcx);
 
+        if xwait != InvalidTransactionId {
+            tableam_real::table_endscan(scan)?;
+            lmgr::XactLockTableWait(xwait, None, None, types_storage::lock::XLTW_Oper::None)?;
+            continue;
+        }
+        if found {
             let tid = outslot.base().tts_tid;
             snapmgr::PushActiveSnapshot(&snapmgr::GetLatestSnapshot()?)?;
             let lockres = tableam::table_tuple_lock_for_repl(mcx, rel, &tid, outslot);
             snapmgr::PopActiveSnapshot()?;
             tableam_real::table_endscan(scan)?;
-            snapmgr::UnregisterSnapshot(Some(&snap));
             match lockres? {
                 LockOutcome::Ok => break true,
                 LockOutcome::Retry => continue,
             }
         }
         tableam_real::table_endscan(scan)?;
-        snapmgr::UnregisterSnapshot(Some(&snap));
         break false;
     };
     Ok(found)
 }
+
 
 // FindReplTupleInLocalRel (worker.c:2915).
 // TargetPrivilegesCheck (worker.c:2356): the subscription owner must hold the
@@ -1557,13 +1583,32 @@ fn do_update<'mcx>(
     execreplication::CheckCmdReplicaIdentity(mcx, rel, types_nodes::nodes_enums::CmdType::CMD_UPDATE)?;
 
     let mut trig = apply_trig(rel)?;
+    // ExecGetAllUpdatedCols: the remote-changed columns (worker.c:2606-2626)
+    // plus the generated columns ExecInitGenerated(CMD_UPDATE) recomputes;
+    // the trigger legs, the generated-column evaluation and the index
+    // maintenance all read this one set in C.
+    let mut all_updated_cols = match modified_cols {
+        Some(c) => c.clone_in(mcx)?,
+        None => types_nodes::Bitmapset::empty(),
+    };
+    nodemodifytable::add_generated_extra_updated_cols(
+        mcx,
+        rel,
+        trig.as_ref().is_some_and(|t| t.td.trig_update_before_row),
+        &mut all_updated_cols,
+    )?;
+    let all_updated_cols = &all_updated_cols;
     // BEFORE ROW UPDATE triggers (execReplication.c:685); a NULL return means
     // "do nothing" for this row. The old row is the locked tuple already
     // fetched into searchslot (C GetTupleForTrigger by its tid).
     if let Some(t) = trig.as_mut() {
         if t.td.trig_update_before_row {
             let td = t.td.clone();
-            let mut when = trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols };
+            let mut when = trigger::TriggerWhenEval {
+                mcx,
+                cache: &mut t.when,
+                modified_cols: Some(all_updated_cols),
+            };
             if !trigger::ExecBRUpdateTriggers(
                 mcx,
                 rel,
@@ -1572,8 +1617,9 @@ fn do_update<'mcx>(
                 &mut when,
                 searchslot,
                 slot,
-                modified_cols,
+                Some(all_updated_cols),
             )? {
+                exectuples::exec_clear_tuple(searchslot, mcx);
                 return Ok(());
             }
         }
@@ -1632,25 +1678,14 @@ fn do_update<'mcx>(
         if index_state.num_indices() > 0 {
             let eval_cx = mcx::MemoryContext::new("ApplyIndexEval");
             // ExecSimpleRelationUpdate (execReplication.c:720): update = true
-            // with ExecGetAllUpdatedCols = the remote-changed columns
-            // (worker.c:2606-2626) plus the generated-column extras.
-            let mut all_updated_cols = match modified_cols {
-                Some(c) => c.clone_in(mcx)?,
-                None => types_nodes::Bitmapset::empty(),
-            };
-            nodemodifytable::add_generated_extra_updated_cols(
-                mcx,
-                rel,
-                trig.as_ref().is_some_and(|t| t.td.trig_update_before_row),
-                &mut all_updated_cols,
-            )?;
+            // with ExecGetAllUpdatedCols.
             let r = execindexing::ExecInsertIndexTuples(
                 mcx,
                 eval_cx.mcx(),
                 &mut index_state,
                 rel,
                 slot,
-                Some(&all_updated_cols),
+                Some(all_updated_cols),
                 !conflict_indexes.is_empty(),
                 Some(&mut conflict),
                 &conflict_indexes,
@@ -1678,7 +1713,11 @@ fn do_update<'mcx>(
     if let Some(t) = trig.as_mut() {
         let td = t.td.clone();
         let new_tid = slot.base().tts_tid;
-        let mut when = trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols };
+        let mut when = trigger::TriggerWhenEval {
+            mcx,
+            cache: &mut t.when,
+            modified_cols: Some(all_updated_cols),
+        };
         trigger::ExecARUpdateTriggers(
             mcx,
             rel,
@@ -1693,9 +1732,13 @@ fn do_update<'mcx>(
             false,
             None,
             None,
-            modified_cols,
+            Some(all_updated_cols),
         )?;
     }
+    // ExecDropSingleTupleTableSlot(localslot) in the callers (worker.c:2760):
+    // release the locked tuple's buffer pin now rather than at end of
+    // transaction.
+    exectuples::exec_clear_tuple(searchslot, mcx);
     Ok(())
 }
 
@@ -1717,6 +1760,7 @@ fn do_delete<'mcx>(
             let mut when =
                 trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols: None };
             if !trigger::ExecBRDeleteTriggers(mcx, rel, &td, &mut t.fmgr, &mut when, searchslot)? {
+                exectuples::exec_clear_tuple(searchslot, mcx);
                 return Ok(());
             }
         }
@@ -1741,6 +1785,7 @@ fn do_delete<'mcx>(
             None,
         )?;
     }
+    exectuples::exec_clear_tuple(searchslot, mcx);
     Ok(())
 }
 

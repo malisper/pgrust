@@ -336,6 +336,25 @@ fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
+// quote_literal_cstr (quote.c:103 -> quote_literal_internal:47): a backslash
+// anywhere forces the E'' form with backslashes doubled, so a publisher
+// running standard_conforming_strings = off decodes the value correctly.
+pub(crate) fn quote_literal_cstr(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() * 2 + 3);
+    if raw.contains('\\') {
+        out.push('E');
+    }
+    out.push('\'');
+    for ch in raw.chars() {
+        if ch == '\'' || ch == '\\' {
+            out.push(ch);
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
 // fetch_remote_table_info (tablesync.c:825). Also returns the relation's
 // row-filter quals to be OR'ed into the COPY command (tablesync.c:1094-1131):
 // a NULL qual for any subscribed publication means the whole table is copied,
@@ -349,7 +368,7 @@ fn fetch_remote_table_info(
     fn text(r: &[Option<Vec<u8>>], i: usize) -> String {
         r.get(i).and_then(|c| c.as_ref()).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
     }
-    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let lit = quote_literal_cstr;
 
     // Relation info.
     let cmd = format!(

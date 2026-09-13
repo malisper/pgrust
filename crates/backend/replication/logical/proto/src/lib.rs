@@ -140,15 +140,37 @@ fn send_int32(out: &mut Vec<u8>, v: u32) {
 fn send_int64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_be_bytes());
 }
+// pq_sendstring / pq_sendcountedtext convert server text to client_encoding
+// before it goes on the wire (pqformat.c:191, pqformat.c:71). Identity when
+// the encodings match; harnesses without the mbutils seams send bytes as-is.
+fn to_client_encoding(out: &mut Vec<u8>, s: &[u8]) {
+    let needed = mbutils_seams::server_to_client_conversion_needed::is_installed()
+        && mbutils_seams::server_to_client_conversion_needed::call();
+    if needed {
+        let cx = mcx::MemoryContext::new("LogicalProtoClientEncoding");
+        let converted = match mbutils_seams::pg_server_to_client::call(cx.mcx(), s) {
+            Ok(Some(v)) => Some(v.to_vec()),
+            _ => None,
+        };
+        if let Some(v) = converted {
+            out.extend_from_slice(&v);
+            return;
+        }
+    }
+    out.extend_from_slice(s);
+}
 // pq_sendstring: bytes + NUL terminator.
 fn send_string(out: &mut Vec<u8>, s: &str) {
-    out.extend_from_slice(s.as_bytes());
+    to_client_encoding(out, s.as_bytes());
     out.push(0);
 }
 // pq_sendcountedtext: int32 length + bytes (no NUL).
 fn send_countedtext(out: &mut Vec<u8>, s: &[u8]) {
-    send_int32(out, s.len() as u32);
-    out.extend_from_slice(s);
+    let start = out.len();
+    send_int32(out, 0);
+    to_client_encoding(out, s);
+    let len = (out.len() - start - 4) as u32;
+    out[start..start + 4].copy_from_slice(&len.to_be_bytes());
 }
 
 /// The read cursor over a received logical replication message body
