@@ -512,6 +512,27 @@ fn row_expr_record_builds_blessed_tupdesc() {
 }
 
 #[test]
+fn agg_carrier_reports_variadic() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut flinfo = flinfo_for(F_POLY);
+    static CARRIER_ARGS: [Oid; 1] = [INT4OID];
+    assert!(!get_fn_expr_variadic(Some(&flinfo)));
+    for variadic in [false, true] {
+        let carrier = ::mcx::alloc_leak_in(
+            mcx,
+            types_core::fmgr::AggFnArgTypes { rettype: INT4OID, argtypes: &CARRIER_ARGS, variadic },
+        )
+        .unwrap();
+        // SAFETY: carrier is arena-backed and outlives the flinfo below.
+        flinfo.fn_expr =
+            Some(unsafe { types_core::fmgr::FnExprErased::from_node_ref(carrier) });
+        assert_eq!(get_fn_expr_variadic(Some(&flinfo)), variadic);
+    }
+}
+
+#[test]
 fn polymorphic_rettype_resolves_via_agg_carrier() {
     install_seams();
     let ctx = MemoryContext::new("t");
@@ -520,7 +541,7 @@ fn polymorphic_rettype_resolves_via_agg_carrier() {
     static CARRIER_ARGS: [Oid; 1] = [INT4OID];
     let carrier = ::mcx::alloc_leak_in(
         mcx,
-        types_core::fmgr::AggFnArgTypes { rettype: INT4OID, argtypes: &CARRIER_ARGS },
+        types_core::fmgr::AggFnArgTypes { rettype: INT4OID, argtypes: &CARRIER_ARGS, variadic: false },
     )
     .unwrap();
     // SAFETY: carrier is arena-backed and outlives the flinfo below.

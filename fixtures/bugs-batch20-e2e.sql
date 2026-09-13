@@ -1,0 +1,95 @@
+-- Two-binary differential corpus for the 2026-09-13 bug-inventory batch
+-- batch-20-backend-executor-execexpr (C 18.6 oracle vs pgrust). Each leg is
+-- one row of the batch (execExpr.c / execExprInterp.c and their callees).
+\set VERBOSITY verbose
+CREATE DATABASE b20e2e TEMPLATE template0 ENCODING 'UTF8';
+\c b20e2e
+\set VERBOSITY verbose
+-- fp-executor-execExprInterp-p2#1: FieldStore re-forms through HeapTupleGetDatum (external TOAST flattened)
+CREATE TYPE b20_comp AS (f text);
+CREATE TABLE b20_src(t text);
+ALTER TABLE b20_src ALTER COLUMN t SET STORAGE EXTERNAL;
+INSERT INTO b20_src VALUES (repeat('x', 10000));
+CREATE TABLE b20_dst(c b20_comp);
+INSERT INTO b20_dst VALUES (ROW(NULL)::b20_comp);
+UPDATE b20_dst SET c.f = b20_src.t FROM b20_src;
+DROP TABLE b20_src;
+SELECT length((c).f), md5((c).f) FROM b20_dst;
+DROP TABLE b20_dst;
+DROP TYPE b20_comp;
+-- fp-adt-arrayfuncs-p1#2: slices of fixed-length arrays error before the datum is read as varlena
+SELECT ('(1.0000000000000002,2)'::point)[0:1];
+SELECT ('(1,2)'::point)[0:1];
+-- fp-executor-execExpr-p1#1 / -p2#1 / execExprInterp-p1#1: DISTINCT and NULLIF over a tracked function
+CREATE SCHEMA b20s;
+CREATE FUNCTION b20s.eq(integer, integer) RETURNS boolean LANGUAGE SQL VOLATILE AS 'SELECT $1 OPERATOR(pg_catalog.=) $2';
+CREATE OPERATOR b20s.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = b20s.eq);
+CREATE TABLE b20s.t(a integer);
+INSERT INTO b20s.t VALUES (1);
+SET search_path = b20s, pg_catalog;
+SET track_functions = 'all';
+SELECT a IS DISTINCT FROM a, a IS NOT DISTINCT FROM a, NULLIF(a, a) FROM t;
+SELECT NULLIF(x, 2), x IS DISTINCT FROM 2 FROM (VALUES (1), (2)) v(x) ORDER BY x;
+RESET search_path;
+RESET track_functions;
+DROP SCHEMA b20s CASCADE;
+-- fp-executor-execExpr-p1#2: SQL/JSON constructors keep the full argument count
+DO $$
+DECLARE n int; l int;
+BEGIN
+  EXECUTE 'SELECT json_array_length(JSON_ARRAY(' || repeat('1,', 65535) || '1))' INTO n;
+  EXECUTE 'SELECT length(JSON_OBJECT(' || repeat('''k'':1,', 65535) || '''k'':1)::text)' INTO l;
+  RAISE NOTICE 'json_array_length=% json_object_length=%', n, l;
+END $$;
+-- fp-executor-execExpr-p2#2 / execExprInterp-p3#1 / nodeAgg-p1#2: SubPlans in DISTINCT / ORDER BY aggregate arguments
+CREATE TABLE b20_t(x integer);
+INSERT INTO b20_t VALUES (1), (2);
+SET enable_presorted_aggregate = off;
+SELECT sum(DISTINCT (SELECT t.x)) FROM b20_t t;
+SELECT count(DISTINCT (SELECT b.x FROM (VALUES (1), (2)) AS b(x) WHERE b.x = a.x)) FROM (VALUES (1), (2)) AS a(x);
+SELECT array_agg((SELECT t.x OFFSET 0) ORDER BY t.x) FROM (VALUES (2), (1)) AS t(x);
+RESET enable_presorted_aggregate;
+DROP TABLE b20_t;
+-- fp-executor-execExprInterp-p1#2: IS [NOT] NULL on a named composite refreshes after ALTER TYPE
+CREATE TYPE b20_pair AS (a int, b int);
+CREATE FUNCTION b20_f(i int) RETURNS text LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+  IF i = 1 THEN RETURN '(1,)'; END IF;
+  EXECUTE 'ALTER TYPE b20_pair DROP ATTRIBUTE b';
+  RETURN '(1)';
+END $$;
+SELECT g, b20_f(g)::b20_pair IS NOT NULL FROM generate_series(1, 2) g;
+DROP FUNCTION b20_f(int);
+DROP TYPE b20_pair;
+-- fp-nodes-nodeFuncs-p1#1: anonymous RowExpr fields carry the length-coercion typmod
+CREATE TABLE b20_typmod(s text);
+INSERT INTO b20_typmod VALUES ('abc');
+CREATE FUNCTION b20_probe(r record) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN r.f1 := 'abcdef'; RETURN r.f1;
+EXCEPTION WHEN string_data_right_truncation THEN RETURN SQLSTATE;
+END $$;
+SELECT b20_probe(ROW(s::varchar(3))), b20_probe(ROW(s::varchar(10))) FROM b20_typmod;
+DROP FUNCTION b20_probe(record);
+DROP TABLE b20_typmod;
+-- fp-parser-parse_agg#1: the transition FuncExpr keeps agg_variadic
+CREATE AGGREGATE b20_agg_ws(VARIADIC "any") (SFUNC = concat_ws, STYPE = text, INITCOND = ',');
+SELECT b20_agg_ws(VARIADIC ARRAY['a', 'b']);
+SELECT b20_agg_ws(VARIADIC ARRAY['a', 'b']) FROM generate_series(1, 2);
+SELECT b20_agg_ws(VARIADIC ARRAY['a', 'b'] ORDER BY 1) FROM generate_series(1, 2);
+SELECT b20_agg_ws('a', 'b');
+DROP AGGREGATE b20_agg_ws(VARIADIC "any");
+-- fp-common-b1#1: ConvertRowtypeExpr converts (not relabels) when the input has fast-default columns
+CREATE TABLE b20_p(a int);
+CREATE TABLE b20_c(a int);
+DO $$
+DECLARE v b20_c; x int;
+BEGIN
+  v := ROW(1)::b20_c;
+  EXECUTE 'ALTER TABLE b20_c ADD COLUMN b int DEFAULT 7';
+  EXECUTE 'ALTER TABLE b20_p ADD COLUMN b int DEFAULT 5';
+  EXECUTE 'ALTER TABLE b20_c INHERIT b20_p';
+  EXECUTE 'SELECT (($1)::b20_p).b' INTO x USING v;
+  RAISE NOTICE 'converted b=%', x;
+END $$;
+DROP TABLE b20_c;
+DROP TABLE b20_p;

@@ -676,7 +676,7 @@ fn erased_agg_argtypes<'mcx>(
     // plan they serve (execexpr's ExecBuildAggTrans precedent).
     let leaked: &'static [Oid] = unsafe { core::mem::transmute(argtypes.leak()) };
     let carrier =
-        ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes { rettype, argtypes: leaked })?;
+        ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes { rettype, argtypes: leaked, variadic: false })?;
     // SAFETY: as above.
     Ok(unsafe { ::types_core::fmgr::FnExprErased::from_node_ref(carrier) })
 }
@@ -1059,6 +1059,7 @@ pub fn exec_init_window_agg<'mcx>(
                 inputcollid: trans_collid[aggno],
                 init_value_is_null: trans_init[aggno].isnull,
                 arg_types: trans_argtypes[aggno],
+                variadic: false,
                 args: &agg_specs_args[aggno],
                 aggfilter: agg_specs_filter[aggno],
                 pergroup: pg,

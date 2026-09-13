@@ -64,12 +64,14 @@ pub struct FmgrInfo {
 // get_fn_expr_rettype/get_call_result_type): `rettype` is the fake FuncExpr's
 // funcresulttype (the transtype for transfns, the aggregate result type for
 // finalfns); `argtypes` slot 0 is the transition type, slots 1.. the
-// aggregate input types. The slice is arena-backed with the lifetime
+// aggregate input types; `variadic` is the fake FuncExpr's funcvariadic
+// (agg_variadic for transfns). The slice is arena-backed with the lifetime
 // forgotten (from_node_ref's contract); Copy, so FmgrInfo stays drop-free.
 #[derive(Clone, Copy)]
 pub struct AggFnArgTypes {
     pub rettype: crate::primitive::Oid,
     pub argtypes: &'static [crate::primitive::Oid],
+    pub variadic: bool,
 }
 
 // Erased `fn_expr` carrier: the node is a `types-nodes` `Expr` this crate

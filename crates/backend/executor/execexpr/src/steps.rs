@@ -892,7 +892,7 @@ pub struct JsonConstructorState {
     pub is_jsonb: bool,
     pub absent_on_null: bool,
     pub unique: bool,
-    pub nargs: u16,
+    pub nargs: u32,
     pub slots: NonNull<NullableDatum>,
     pub values: NonNull<Datum>,
     pub nulls: NonNull<bool>,
@@ -909,6 +909,10 @@ pub struct RowNullState {
     pub tup_typmod: i32,
     pub desc: Option<NonNull<::types_tuple::TupleDescData<'static>>>,
     pub mcx: Mcx<'static>,
+    // Named-composite leg (C rowcache.cacheptr/tupdesc_id): the typcache
+    // descriptor pin, refreshed when its tupDesc_identifier changes.
+    pub named: Option<std::rc::Rc<::types_tuple::TupleDescData<'static>>>,
+    pub tupdesc_id: u64,
 }
 
 // C ExprEvalStep d.wholerow minus var: first-eval compat state. The

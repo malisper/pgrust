@@ -620,6 +620,7 @@ pub(crate) fn init_finalize_merge<'mcx>(
             ::types_core::fmgr::AggFnArgTypes {
                 rettype: aggref.aggtranstype,
                 argtypes: fnexpr_types,
+                variadic: false,
             },
         )?;
         // SAFETY: carrier is arena-backed for the query, see above.

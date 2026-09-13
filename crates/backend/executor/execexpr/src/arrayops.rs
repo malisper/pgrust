@@ -375,7 +375,13 @@ pub fn sbsref_fetch(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<Nullab
 pub fn sbsref_fetch_slice(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<NullableDatum> {
     debug_assert!(!cur.isnull);
     let mcx = res_mcx(&st.resmcx);
-    let arr = datum_array_image(cur.value, &st.resmcx)?;
+    let arr = if st.refattrlength > 0 {
+        let p = cur.value.as_usize() as *const u8;
+        // SAFETY: fixed-length by-ref datum addresses refattrlength bytes.
+        unsafe { core::slice::from_raw_parts(p, st.refattrlength as usize) }
+    } else {
+        datum_array_image(cur.value, &st.resmcx)?
+    };
     let img = arrayfuncs::array_get_slice(
         mcx,
         arr,

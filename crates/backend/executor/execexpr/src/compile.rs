@@ -40,6 +40,7 @@ pub struct AggTransSpec<'a, 'mcx> {
     pub init_value_is_null: bool,
     // C build_aggregate_transfn_expr's arg types: [transtype, input types..].
     pub arg_types: &'a [Oid],
+    pub variadic: bool,
     pub args: &'a NodeList<'mcx>,
     pub aggfilter: Option<Node<'mcx>>,
     pub pergroup: NonNull<AggPerGroup>,
@@ -838,6 +839,7 @@ fn build_agg_trans_masked<'mcx>(
                     .copied()
                     .unwrap_or(::types_core::InvalidOid),
                 argtypes,
+                variadic: spec.variadic,
             },
         )?;
         // SAFETY: agg_argtypes is arena-backed for the query, see above.
@@ -1196,7 +1198,7 @@ fn build_agg_trans_ordered<'mcx>(
         });
         // SAFETY: argno < the nodeagg-owned num-inputs scratch array length.
         let out = OutRef(unsafe { NonNull::new_unchecked(ord.scratch.as_ptr().add(argno)) });
-        init_expr_rec(tle.expr, state, mcx, out, None, params, None)?;
+        init_expr_rec(tle.expr, state, mcx, out, None, params, sub)?;
     }
     let mut bailout: Option<usize> = None;
     if fn_strict && ord.num_trans_inputs > 0 {
@@ -2520,7 +2522,9 @@ pub(crate) fn init_expr_rec<'mcx>(
                     Step::FuncExpr { call, .. }
                     | Step::FuncExprStrict1 { call, .. }
                     | Step::FuncExprStrict2 { call, .. }
-                    | Step::FuncExprStrict { call, .. } => call,
+                    | Step::FuncExprStrict { call, .. }
+                    | Step::FuncExprFusage { call, .. }
+                    | Step::FuncExprStrictFusage { call, .. } => call,
                     _ => unreachable!("init_func returns a FuncExpr step"),
                 };
                 push_step(state, mcx, Step::Distinct { call, out })
@@ -2545,7 +2549,9 @@ pub(crate) fn init_expr_rec<'mcx>(
                     Step::FuncExpr { call, .. }
                     | Step::FuncExprStrict1 { call, .. }
                     | Step::FuncExprStrict2 { call, .. }
-                    | Step::FuncExprStrict { call, .. } => call,
+                    | Step::FuncExprStrict { call, .. }
+                    | Step::FuncExprFusage { call, .. }
+                    | Step::FuncExprStrictFusage { call, .. } => call,
                     _ => unreachable!("init_func returns a FuncExpr step"),
                 };
                 push_step(state, mcx, Step::NullIf { call, out })
@@ -2839,6 +2845,8 @@ pub(crate) fn init_expr_rec<'mcx>(
                             tup_typmod: -1,
                             desc: None,
                             mcx: core::mem::transmute::<Mcx<'mcx>, Mcx<'static>>(mcx),
+                            named: None,
+                            tupdesc_id: 0,
                         })
                     };
                     let frame_ix = state.frames.len() as u32;
@@ -4017,14 +4025,7 @@ fn init_field_store<'mcx>(
 
 // exprTypmod (nodeFuncs.c) over the families RowExpr args carry.
 fn expr_typmod_closed(node: Node<'_>) -> i32 {
-    match node.node_tag() {
-        NodeTag::T_Var => node.as_var().unwrap().vartypmod,
-        NodeTag::T_Const => node.as_const().unwrap().consttypmod,
-        NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
-        NodeTag::T_CoerceViaIO => -1,
-        _ => -1,
-    }
+    ::nodes_core::node_funcs::expr_typmod(node)
 }
 
 // C T_RowCompareExpr: per-column BTORDER procs resolve here.
@@ -4347,7 +4348,7 @@ fn init_json_constructor<'mcx>(
                 is_jsonb,
                 absent_on_null: ctor.absent_on_null,
                 unique: ctor.unique,
-                nargs: nargs as u16,
+                nargs: nargs as u32,
                 slots,
                 values,
                 nulls,
@@ -5539,10 +5540,13 @@ fn build_attrmap_by_name<'mcx>(
     // tuple converts by header relabel alone.
     if innatts == outnatts {
         let identity = (0..outnatts).all(|i| {
+            let inatt = &indesc.attrs[i];
+            if inatt.atthasmissing {
+                return false;
+            }
             if map[i] == (i + 1) as i16 {
                 return true;
             }
-            let inatt = &indesc.attrs[i];
             let outatt = &outdesc.attrs[i];
             map[i] == 0
                 && inatt.attisdropped

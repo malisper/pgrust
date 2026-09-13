@@ -1194,6 +1194,7 @@ fn agg_trans_and_aggref_eval_steps() {
                 combine: false,
                 deserialfn_oid: 0,
                 arg_types: &[],
+                variadic: false,
                 transtype_byval: true,
                 transtype_len: 8,
                 transfn_oid: 1219,
@@ -1210,6 +1211,7 @@ fn agg_trans_and_aggref_eval_steps() {
                 combine: false,
                 deserialfn_oid: 0,
                 arg_types: &[],
+                variadic: false,
                 transtype_byval: true,
                 transtype_len: 8,
                 transfn_oid: 1841,
@@ -1314,6 +1316,7 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 combine: false,
                 deserialfn_oid: 0,
                 arg_types: &[],
+                variadic: false,
                 transtype_byval: true,
                 transtype_len: 8,
                 transfn_oid: 2804,
@@ -1330,6 +1333,7 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 combine: false,
                 deserialfn_oid: 0,
                 arg_types: &[],
+                variadic: false,
                 transtype_byval: true,
                 transtype_len: 8,
                 transfn_oid: 1841,
@@ -2593,6 +2597,7 @@ fn thin_agg_count_star_kernel() {
             combine: false,
             deserialfn_oid: 0,
             arg_types: &[],
+            variadic: false,
             transtype_byval: true,
             transtype_len: 8,
             transfn_oid: 1219,
@@ -4834,7 +4839,7 @@ fn desc_typed<'mcx>(mcx: Mcx<'mcx>, cols: &[(u32, i16)]) -> Rc<TupleDescData<'mc
             attnum: (i + 1) as i16,
             atttypid: typid,
             attlen: len,
-            attbyval: true,
+            attbyval: len > 0,
             attalign: match len {
                 2 => b's' as i8,
                 8 => b'd' as i8,
@@ -6008,6 +6013,64 @@ mod rem_b028 {
             .unwrap();
         state.arm_result_mcx(mcx);
         state
+    }
+
+    // ExecEvalFieldSelect (execExprInterp.c:3737): the detoasted composite
+    // stays alive in the per-eval context because the returned by-reference
+    // field borrows it. A short-header composite forces the detoast copy; an
+    // AllocSet result context recycles a freed chunk of the same size class,
+    // so a dropped copy shows up as a scribbled field.
+    #[test]
+    fn field_select_detoasted_composite_outlives_borrowed_field() {
+        use ::mcx::Allocator;
+        use ::types_tuple::varatt;
+        with_mcx(|mcx| {
+            let var = Node::mk_var(mcx, 1, 0, RECORDOID, -1, 0, 0).unwrap();
+            let mut state = exec_init_expr(mcx, Some(var), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
+            state.arm_result_mcx(mcx);
+            let payload = b"borrowed-field-payload";
+            let mut scan =
+                virtual_slot_typed(mcx, &[(TEXTOID_T, -1, Some(text_datum_4b(payload)))]);
+            let mut slots = scan_slots(&mut scan);
+            let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+            assert!(!r.isnull);
+            let p = r.value.as_usize() as *const u8;
+            // SAFETY: the eval returns a flattened 4B-header composite datum.
+            let (total, typmod) = unsafe {
+                assert!(varatt::varatt_is_4b_u(p));
+                let td = &*(p as *const ::types_tuple::HeapTupleHeaderData);
+                (varatt::varsize_any(p), td.typmod())
+            };
+            let short_len = total - 3;
+            assert!(short_len <= 0x7f);
+            let mut short = vec![0u8; short_len];
+            short[0] = ((short_len as u8) << 1) | 1;
+            // SAFETY: total readable bytes at p.
+            short[1..].copy_from_slice(unsafe { core::slice::from_raw_parts(p.add(4), total - 4) });
+            let rec = Datum::from_usize(Box::leak(short.into_boxed_slice()).as_ptr() as usize);
+
+            let ctx = MemoryContext::new("field-select-result");
+            let mut fs = field_select(mcx, rec, typmod, 1, TEXTOID_T);
+            // SAFETY: ctx outlives every eval of fs below.
+            unsafe { fs.arm_result_mcx_raw(ctx.mcx()) };
+            let out = exec_eval_expr(&mut fs, &mut EvalSlots::default()).unwrap();
+            assert!(!out.isnull);
+            let layout = core::alloc::Layout::from_size_align(total, 8).unwrap();
+            for _ in 0..4 {
+                let chunk = ctx.mcx().allocate(layout).unwrap();
+                // SAFETY: fresh exclusive allocation of `total` bytes.
+                unsafe { core::ptr::write_bytes(chunk.as_ptr().cast::<u8>(), 0xff, total) };
+            }
+            let q = out.value.as_usize() as *const u8;
+            // SAFETY: the field datum is a live 4B text image per the contract.
+            let got = unsafe {
+                assert!(varatt::varatt_is_4b_u(q), "field datum header was scribbled");
+                core::slice::from_raw_parts(q.add(4), varatt::varsize_any(q) - 4)
+            };
+            assert_eq!(got, payload);
+        });
     }
 
     // ExecEvalFieldSelect (execExprInterp.c:3787): the wrong-type error

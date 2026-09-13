@@ -3164,7 +3164,15 @@ fn eval_field_select(
     let total = unsafe { ::types_tuple::varatt::varsize_any(p) };
     // SAFETY: `total` readable bytes at p, per the datum contract.
     let raw = unsafe { core::slice::from_raw_parts(p, total) };
-    let rec = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+    // C PG_DETOAST_DATUM: a plain 4B image is used in place; a detoasted copy
+    // stays in the per-eval context because the returned field may borrow it.
+    // C PG_DETOAST_DATUM: a plain 4B image is used in place; a detoasted copy
+    // stays in the per-eval context because the returned field may borrow it.
+    let rec: &[u8] = if unsafe { ::types_tuple::varatt::varatt_is_4b_u(p) } {
+        raw
+    } else {
+        ::detoast_seams::detoast_attr::call(mcx, raw)?.leak()
+    };
     // SAFETY: detoasted composite image; header prefix is in bounds.
     let hdr = unsafe { &*(rec.as_ptr() as *const HeapTupleHeaderData) };
     let tupdesc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, hdr.type_id(), hdr.typmod())?;
@@ -3378,6 +3386,9 @@ fn eval_field_store_form(
     // SAFETY: compile-time blessed tupdesc, plan-mcx-lived.
     let desc = unsafe { st.desc.as_ref() };
     let tuple = ::heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+    if tuple.has_external() {
+        return ::detoast_seams::toast_flatten_tuple_to_datum::call(mcx, &tuple, desc);
+    }
     let d = Datum::from_usize(tuple.image().as_ptr() as usize);
     core::mem::forget(tuple);
     Ok(d)
@@ -3890,6 +3901,23 @@ fn eval_row_null(
     let tup_typmod = hdr.typmod();
     // SAFETY: compile-allocated state, single-threaded interpreter.
     let rn = unsafe { &mut *rn.as_ptr() };
+    if tup_type != ::types_core::catalog::RECORDOID {
+        let e = ::typcache::lookup_type_cache(tup_type, ::typcache::TYPECACHE_TUPDESC)?;
+        if rn.named.is_none() || rn.tup_type != tup_type || rn.tupdesc_id != e.tupdesc_identifier()
+        {
+            let Some(td) = e.tupdesc() else {
+                let name = format_type::format_type_be(tup_type).unwrap_or_else(|_| format!("{tup_type}"));
+                return Err(::types_error::PgError::error(format!("type {name} is not composite"))
+                    .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .into());
+            };
+            rn.tupdesc_id = e.tupdesc_identifier();
+            rn.named = Some(td);
+            rn.tup_type = tup_type;
+        }
+        let desc = rn.named.as_deref().expect("refreshed above");
+        return row_null_test_scan(rec, hdr, desc, checkisnull);
+    }
     if rn.desc.is_none() || rn.tup_type != tup_type || rn.tup_typmod != tup_typmod {
         use ::mcx::Allocator;
         let desc = typcache::lookup_rowtype_tupdesc_copy(rn.mcx, tup_type, tup_typmod)?;
@@ -3913,6 +3941,15 @@ fn eval_row_null(
     }
     // SAFETY: rn.mcx-allocated tupdesc, live for the plan.
     let desc = unsafe { rn.desc.expect("refreshed above").as_ref() };
+    row_null_test_scan(rec, hdr, desc, checkisnull)
+}
+
+fn row_null_test_scan(
+    rec: &[u8],
+    hdr: &::types_tuple::HeapTupleHeaderData,
+    desc: &::types_tuple::TupleDescData<'_>,
+    checkisnull: bool,
+) -> PgResult<bool> {
     // SAFETY: detoasted MAXALIGN'd image of datum_length() bytes.
     let tuple = unsafe {
         ::types_tuple::HeapTupleData::from_raw_parts(

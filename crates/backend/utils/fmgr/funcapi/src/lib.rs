@@ -320,6 +320,9 @@ pub fn get_fn_expr_variadic(flinfo: Option<&FmgrInfo>) -> bool {
     let Some(e) = flinfo.and_then(|f| f.fn_expr.as_ref()) else {
         return false;
     };
+    if let Some(agg) = e.downcast_ref::<types_core::fmgr::AggFnArgTypes>() {
+        return agg.variadic;
+    }
     let Some(node) = e.downcast_ref::<Node<'static>>() else {
         return false;
     };

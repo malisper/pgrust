@@ -354,7 +354,11 @@ fn init_pertrans_sort<'mcx>(
     // transition type (carrier slot 0).
     let carrier = ::mcx::alloc_leak_in(
         mcx,
-        ::types_core::fmgr::AggFnArgTypes { rettype: aggref.aggtranstype, argtypes: fnexpr_types },
+        ::types_core::fmgr::AggFnArgTypes {
+            rettype: aggref.aggtranstype,
+            argtypes: fnexpr_types,
+            variadic: aggref.aggvariadic,
+        },
     )?;
     // SAFETY: carrier is arena-backed for the query, see above.
     transfn.fn_expr = Some(unsafe { ::types_core::fmgr::FnExprErased::from_node_ref(carrier) });
@@ -1257,6 +1261,7 @@ pub fn exec_init_agg<'mcx>(
                 ::types_core::fmgr::AggFnArgTypes {
                     rettype: aggref.aggtype,
                     argtypes: fnexpr_types,
+                    variadic: false,
                 },
             )?;
             // SAFETY: carrier is arena-backed for the query, see above.
@@ -1446,6 +1451,7 @@ pub fn exec_init_agg<'mcx>(
             inputcollid: aggref.inputcollid,
             init_value_is_null: trans_init[transno].isnull,
             arg_types: arg_types.leak(),
+            variadic: aggref.aggvariadic,
             args: &aggref.args,
             aggfilter: aggref.aggfilter,
             pergroup: pg,
