@@ -943,6 +943,19 @@ pub fn DefineRelation<'mcx>(
                 partition_raw_defaults.push((attnum, raw, restdef.generated));
             }
         }
+        // BuildDescForRelation (tablecmds.c:1425): USAGE on every column type.
+        for i in 0..descriptor.natts as usize {
+            let atttypid = descriptor.attr(i).atttypid;
+            let aclresult = aclchk::object_aclcheck(
+                types_core::TYPE_RELATION_ID,
+                atttypid,
+                miscinit::GetUserId(),
+                adt_acl::ACL_USAGE,
+            )?;
+            if aclresult != aclchk::ACLCHECK_OK {
+                aclcheck_error_type(aclresult, atttypid)?;
+            }
+        }
     }
 
     // DefineRelation's rawDefaults/cookedDefaults split (tablecmds.c:988-1025).

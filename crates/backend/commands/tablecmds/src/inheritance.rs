@@ -1434,9 +1434,10 @@ fn collect_con_rows<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Vec<
             // decompile_conbin: DirectFunctionCall2(pg_get_expr); the result
             // text lives in flinfo's fn_extra scratch — copy out before drop.
             let mut flinfo = fmgr_seams::fmgr_info::call(1716)?;
-            let text = fmgr_core::function_call2_coll(
+            let text = fmgr_core::function_call2_coll_in(
                 &mut flinfo,
                 types_core::InvalidOid,
+                mcx,
                 val,
                 datum::Datum::from_oid(rel.rd_id),
             )?;

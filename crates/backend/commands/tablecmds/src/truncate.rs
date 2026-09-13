@@ -444,8 +444,7 @@ fn truncate_check_rel(
                 .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
         ));
     }
-    // C exempts pg_largeobject during pg_upgrade (relfilenode carryover);
-    // object-access hooks (InvokeObjectTruncateHook) are elided repo-wide.
+    // C exempts pg_largeobject during pg_upgrade (relfilenode carryover).
     let is_system = catalog::IsCatalogRelationOid(relid) || catalog::IsToastNamespace(relnamespace);
     if is_system
         && !init_small::globals::allowSystemTableMods()
@@ -459,7 +458,7 @@ fn truncate_check_rel(
             .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
         ));
     }
-    Ok(())
+    objectaccess::InvokeObjectTruncateHook(relid)
 }
 
 fn truncate_check_perms(relid: Oid, relkind: u8, relname: &str) -> PgResult<()> {
