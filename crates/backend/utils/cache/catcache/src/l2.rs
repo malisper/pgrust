@@ -40,13 +40,15 @@ impl AlignedBytes {
         core::alloc::Layout::from_size_align(len.max(1), 8).unwrap()
     }
 
-    pub fn new_zeroed(len: usize) -> AlignedBytes {
+    /// C palloc in CacheMemoryContext: allocation failure is the catchable
+    /// out-of-memory ERROR, never an abort.
+    pub fn new_zeroed(len: usize) -> PgResult<AlignedBytes> {
         // SAFETY: non-zero-size layout (len.max(1)).
         let p = unsafe { std::alloc::alloc_zeroed(Self::layout(len)) };
-        let Some(ptr) = NonNull::new(p) else {
-            std::alloc::handle_alloc_error(Self::layout(len));
-        };
-        AlignedBytes { ptr, len }
+        match NonNull::new(p) {
+            Some(ptr) => Ok(AlignedBytes { ptr, len }),
+            None => Err(Box::new(mcx::oom_named("CacheMemoryContext", len))),
+        }
     }
 
     #[inline]
@@ -138,7 +140,7 @@ pub(crate) fn build_positive(cache_id: i32, ntp: &HeapTupleData<'_>) -> PgResult
     let tupdesc = tupdesc.expect("catcache: entry created before phase-2 init");
 
     let t_len = ntp.t_len;
-    let buf = AlignedBytes::new_zeroed(IMG_PREFIX + t_len as usize);
+    let buf = AlignedBytes::new_zeroed(IMG_PREFIX + t_len as usize)?;
     // SAFETY: fresh IMG_PREFIX + t_len bytes; source image live for t_len.
     let image = unsafe {
         let p = buf.as_ptr();
@@ -176,7 +178,7 @@ pub(crate) fn build_positive(cache_id: i32, ntp: &HeapTupleData<'_>) -> PgResult
 }
 
 /// `CatalogCacheCreateEntry` (negative), L2 shape (`CatCacheCopyKeys`).
-pub(crate) fn build_negative(cache_id: i32, probes: &[CatCKey<'_>; 4]) -> Arc<CatL2Entry> {
+pub(crate) fn build_negative(cache_id: i32, probes: &[CatCKey<'_>; 4]) -> PgResult<Arc<CatL2Entry>> {
     let (nkeys, kinds) = with_state(|st| {
         let c = st.cache(cache_id);
         (c.cc_nkeys, c.cc_kind)
@@ -187,7 +189,7 @@ pub(crate) fn build_negative(cache_id: i32, probes: &[CatCKey<'_>; 4]) -> Arc<Ca
             byref_len += probes[i].bytes().len();
         }
     }
-    let buf = AlignedBytes::new_zeroed(byref_len);
+    let buf = AlignedBytes::new_zeroed(byref_len)?;
     let mut keys = [Datum::null(); CATCACHE_MAXKEYS];
     let mut off = 0usize;
     for i in 0..nkeys as usize {
@@ -205,12 +207,12 @@ pub(crate) fn build_negative(cache_id: i32, probes: &[CatCKey<'_>; 4]) -> Arc<Ca
             }
         };
     }
-    Arc::new(CatL2Entry {
+    Ok(Arc::new(CatL2Entry {
         keys,
         negative: true,
         t_len: 0,
         t_self: ItemPointerData::invalid(),
         t_tableoid: 0,
         payload: buf,
-    })
+    }))
 }

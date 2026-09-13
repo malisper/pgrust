@@ -748,7 +748,7 @@ impl RecordColumnCmp for FmgrRecordOps<'_, '_> {
     fn compare(&mut self, j: usize, collation: Oid, d1: Datum, d2: Datum) -> Result<i32, Self::Err> {
         let e =
             self.flinfo.fn_extra_ref::<RecordCompareData>().unwrap().columns[j].clone().unwrap();
-        let mut finfo = e.cmp_proc_finfo();
+        let mut finfo = e.cmp_proc_finfo().clone();
         let d = function_call2_coll_in_nullok(&mut finfo, collation, self.mcx, d1, d2)?;
         Ok(d.as_i32())
     }
@@ -776,7 +776,7 @@ impl RecordColumnEq for FmgrRecordOps<'_, '_> {
     fn equal(&mut self, j: usize, collation: Oid, d1: Datum, d2: Datum) -> Result<bool, Self::Err> {
         let e =
             self.flinfo.fn_extra_ref::<RecordCompareData>().unwrap().columns[j].clone().unwrap();
-        let mut finfo = e.eq_opr_finfo();
+        let mut finfo = e.eq_opr_finfo().clone();
         let d = function_call2_coll_in_nullok(&mut finfo, collation, self.mcx, d1, d2)?;
         Ok(d.as_bool())
     }

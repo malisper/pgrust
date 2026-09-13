@@ -1588,7 +1588,8 @@ fn push_proc_dep(items: &mut PgVec<'static, (i32, u32)>, funcid: Oid) -> PgResul
 // extract_query_dependencies_walker's per-node dependency logic (setrefs.c
 // fix_expr_common): a regclass Const is a relation dependency (ISREGCLASSCONST
 // accepts OIDOID because oideq-style folding coerces regclass Consts to it);
-// function-calling nodes are PROCOID invalItems, CoerceToDomain a TYPEOID one;
+// function-calling nodes are PROCOID invalItems (a retained CoerceToDomain
+// records nothing, as fix_expr_common; only folded-away ones do, via the plan);
 // a SubLink transfers attention to the contained analyzed Query.
 fn record_one_dep(
     node: types_nodes::Node<'static>,
@@ -1620,14 +1621,6 @@ fn record_one_dep(
         push_proc_dep(items, a.aggfnoid)?;
     } else if let Some(w) = node.as_window_func() {
         push_proc_dep(items, w.winfnoid)?;
-    } else if let Some(cd) = node.as_coerce_to_domain() {
-        if cd.resulttype >= FIRST_UNPINNED_OBJECT_ID {
-            let hash = syscache_oid_hash(TYPEOID, cd.resulttype)?;
-            items
-                .try_reserve(1)
-                .map_err(|_| Box::new(items.allocator().oom(core::mem::size_of::<(i32, u32)>())))?;
-            items.push((TYPEOID, hash));
-        }
     }
     Ok(())
 }

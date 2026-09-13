@@ -21,17 +21,22 @@ fn no_database() -> Box<PgError> {
     ))
 }
 
-// ScanPgRelation (relcache.c). force_non_historic toggles the non-historic
-// catalog snapshot in C; historic snapshots (logical decoding) are unported,
-// so the default catalog snapshot is already the non-historic one.
+// ScanPgRelation (relcache.c).
 pub(crate) fn scan_pg_relation(
     target_rel_id: Oid,
     index_ok: bool,
-    _force_non_historic: bool,
+    force_non_historic: bool,
 ) -> PgResult<Option<ScannedPgClass>> {
     if init_small::globals::MyDatabaseId() == InvalidOid {
         return Err(no_database());
     }
+    let snapshot = if force_non_historic {
+        snapmgr::RegisterSnapshot(Some(&snapmgr::GetNonHistoricCatalogSnapshot(
+            RELATION_RELATION_ID,
+        )?))?
+    } else {
+        None
+    };
     let cx = MemoryContext::new("ScanPgRelation");
     let mcx = cx.mcx();
     let rel = table::table_open(mcx, RELATION_RELATION_ID, AccessShareLock)?;
@@ -41,7 +46,7 @@ pub(crate) fn scan_pg_relation(
         &rel,
         CLASS_OID_INDEX_ID,
         index_ok && relcache::criticalRelcachesBuilt(),
-        None,
+        snapshot.clone(),
         &keys,
     )?;
     let decoded = match genam::systable_getnext(mcx, &mut scan)? {
@@ -50,6 +55,7 @@ pub(crate) fn scan_pg_relation(
     };
     genam::systable_endscan(mcx, scan)?;
     rel.close(AccessShareLock)?;
+    snapmgr::UnregisterSnapshot(snapshot.as_ref());
     Ok(decoded)
 }
 

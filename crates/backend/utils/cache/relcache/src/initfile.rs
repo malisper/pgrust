@@ -208,7 +208,7 @@ fn finish_relcache_entries() -> PgResult<()> {
             rd_opcoptions: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false, rd_hasrules: false,
+            rd_hastriggers: scanned.relhastriggers, rd_hasrules: scanned.relhasrules,
         });
         crate::build::RelationInitPhysicalAddr(&newrel)?;
         with_state(|st| {

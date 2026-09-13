@@ -447,7 +447,7 @@ fn scan_to_l2(
     }
     Ok(match built {
         Some(e) => e,
-        None => crate::l2::build_negative(cache_id, keys),
+        None => crate::l2::build_negative(cache_id, keys)?,
     })
 }
 

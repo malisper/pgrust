@@ -1000,3 +1000,42 @@ fn cached_plan_source_context_ident_is_the_query_string() {
     assert_eq!(ident.as_deref(), Some("SELECT 1 AS ident_probe"));
     DropCachedPlan(h);
 }
+
+// setrefs.c fix_expr_common records nothing for a retained CoerceToDomain;
+// only a folded-away domain reaches invalItems (record_plan_type_dependency,
+// through the plan). ALTER DOMAIN therefore must not re-analyze the source.
+#[test]
+fn retained_coerce_to_domain_is_not_a_query_dependency() {
+    let mcx = test_mcx();
+    let arg = Node::mk(
+        mcx,
+        Const {
+            consttype: INT4OID,
+            consttypmod: -1,
+            constcollid: types_core::InvalidOid,
+            constlen: 4,
+            constvalue: datum::Datum::from_i32(1),
+            constisnull: false,
+            constbyval: true,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let cd = Node::mk(
+        mcx,
+        types_nodes::primnodes::CoerceToDomain {
+            arg,
+            resulttype: 20000,
+            resulttypmod: -1,
+            resultcollid: types_core::InvalidOid,
+            coercionformat: Default::default(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let mut out = PgVec::new_in(mcx);
+    let mut items = PgVec::new_in(mcx);
+    record_expr_tree_deps(cd, &mut out, &mut items).unwrap();
+    assert!(items.is_empty(), "CoerceToDomain must not add a TYPEOID invalItem");
+    assert!(out.is_empty());
+}

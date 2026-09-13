@@ -161,7 +161,22 @@ fn build_list(
     };
     debug_assert!(!in_progress_dead, "list build retry loop exited dead");
 
-    let (slot, n_members) = with_state(|st| -> PgResult<(u32, i32)> {
+    let (slot, n_members) = adopt_members(cache_id, nkeys, l_hash, keys, &members, ordered)?;
+
+    Ok(CatCList { cache_id, slot, n_members, ordered })
+}
+
+/// The list's allocation + CatCacheCopyKeys + member adoption; on failure the
+/// members' temp refs are released (C's PG_CATCH) before the error propagates.
+pub(crate) fn adopt_members(
+    cache_id: i32,
+    nkeys: i32,
+    l_hash: u32,
+    keys: &[CatCKey<'_>; 4],
+    members: &[u32],
+    ordered: bool,
+) -> PgResult<(u32, i32)> {
+    let finalized = with_state(|st| -> PgResult<(u32, i32)> {
         let mcx = st.mcx;
         let cache = st.cache(cache_id);
         let kinds = cache.cc_kind;
@@ -193,7 +208,7 @@ fn build_list(
         }
 
         let mut member_vec = mcx::PgVec::new_in(mcx);
-        member_vec.extend_from_slice(&members);
+        member_vec.extend_from_slice(members);
 
         let n_members = members.len() as i32;
         let mut dead = false;
@@ -229,9 +244,24 @@ fn build_list(
         cache.cl_push_head(bi, slot);
         cache.cc_nlist += 1;
         Ok((slot, n_members))
-    })?;
+    });
+    if finalized.is_err() {
+        release_temp_member_refs(cache_id, members);
+    }
+    finalized
+}
 
-    Ok(CatCList { cache_id, slot, n_members, ordered })
+pub(crate) fn release_temp_member_refs(cache_id: i32, members: &[u32]) {
+    with_state(|st| {
+        for &m in members {
+            let ct = &mut st.cache_mut(cache_id).tuples[m as usize];
+            ct.refcount -= 1;
+            let (dead, refcount, c_list) = (ct.dead, ct.refcount, ct.c_list);
+            if dead && refcount == 0 && c_list == NONE {
+                remove_ct(st, cache_id, m);
+            }
+        }
+    });
 }
 
 /// The `do { scan } while (in_progress_ent.dead)` retry loop.
@@ -287,16 +317,7 @@ fn build_list_scan(
             !failed && with_state(|st| st.in_progress.last().expect("in-progress underflow").dead);
         if failed || retry {
             // PG_CATCH / stale retry: undo the temp member refs.
-            with_state(|st| {
-                for &m in members.iter() {
-                    let ct = &mut st.cache_mut(cache_id).tuples[m as usize];
-                    ct.refcount -= 1;
-                    let (dead, refcount, c_list) = (ct.dead, ct.refcount, ct.c_list);
-                    if dead && refcount == 0 && c_list == NONE {
-                        remove_ct(st, cache_id, m);
-                    }
-                }
-            });
+            release_temp_member_refs(cache_id, members);
             if let Some(e) = inner_err {
                 return Err(e);
             }

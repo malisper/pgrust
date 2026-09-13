@@ -14,7 +14,7 @@ use types_rel::{
 };
 use types_tuple::{NameData, TupleConstr};
 
-use crate::schemapg::BootstrapCatalog;
+use crate::schemapg::{BootstrapCatalog, CLASS_OID_INDEX_ID};
 use crate::{cache_mcx, store, with_state, InProgressEnt};
 
 pub const GLOBALTABLESPACE_OID: Oid = 1664;
@@ -123,7 +123,25 @@ pub(crate) fn RelationInitPhysicalAddr(data: &RelationData<'_>) -> PgResult<()> 
         init_small::globals::MyDatabaseId()
     };
     let rel_number = if data.rd_rel.relfilenode != InvalidRelFileNumber {
-        data.rd_rel.relfilenode
+        if snapmgr::HistoricSnapshotActive()
+            && relation_is_accessible_in_logical_decoding(data)
+            && xact_seams::is_transaction_state::call()
+        {
+            let phys = relcache_build_seams::scan_pg_relation::call(
+                data.rd_id,
+                data.rd_id != CLASS_OID_INDEX_ID,
+                true,
+            )?
+            .ok_or_else(|| {
+                Box::new(PgError::error(format!(
+                    "could not find pg_class entry for {}",
+                    data.rd_id
+                )))
+            })?;
+            phys.form.relfilenode
+        } else {
+            data.rd_rel.relfilenode
+        }
     } else {
         let n = relmapper_seams::relation_map_oid_to_filenumber::call(
             data.rd_id,
@@ -165,6 +183,16 @@ pub(crate) fn RelationInitPhysicalAddr(data: &RelationData<'_>) -> PgResult<()> 
         crate::store::eoxact_list_add(data.rd_id);
     }
     Ok(())
+}
+
+// RelationIsAccessibleInLogicalDecoding (rel.h) with RelationNeedsWAL inlined.
+fn relation_is_accessible_in_logical_decoding(rel: &RelationData<'_>) -> bool {
+    transam_xlog_seams::xlog_logical_info_active::call()
+        && rel.is_permanent()
+        && (transam_xlog_seams::xlog_standby_info_active::call()
+            || (rel.rd_createSubid.get() == types_core::InvalidSubTransactionId
+                && rel.rd_firstRelfilelocatorSubid.get() == types_core::InvalidSubTransactionId))
+        && (catalog_seams::is_catalog_relation::call(rel) || rel.is_used_as_catalog_table())
 }
 
 fn resolve_backend(form: &FormData_pg_class) -> PgResult<(ProcNumber, bool)> {

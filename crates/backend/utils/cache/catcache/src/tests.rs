@@ -371,7 +371,7 @@ fn l2_negative_build_match_and_install() {
 
     let keys = [CatCKey::Bytes(b"some_rel"), oid_key(2200), CatCKey::UNUSED, CatCKey::UNUSED];
     let other = [CatCKey::Bytes(b"other_rel"), oid_key(2200), CatCKey::UNUSED, CatCKey::UNUSED];
-    let ent = crate::l2::build_negative(id, &keys);
+    let ent = crate::l2::build_negative(id, &keys).unwrap();
     assert!(ent.negative);
 
     // Full logical-key matching against the shared body (byref + word keys).
@@ -404,7 +404,7 @@ fn l2_shared_entry_survives_l1_eviction_while_pinned_elsewhere() {
     let keys = [oid_key(777), CatCKey::UNUSED, CatCKey::UNUSED, CatCKey::UNUSED];
     let hash = compute_hash_value(&KINDS1, 1, &keys);
     let ent = {
-        let buf = crate::l2::AlignedBytes::new_zeroed(crate::IMG_PREFIX + img.len());
+        let buf = crate::l2::AlignedBytes::new_zeroed(crate::IMG_PREFIX + img.len()).unwrap();
         // SAFETY: fresh buffer of IMG_PREFIX + img.len() bytes.
         unsafe {
             core::ptr::write(buf.as_ptr().add(12).cast::<u32>(), img.len() as u32);
@@ -518,4 +518,39 @@ fn rehash_announces_at_debug1_like_c() {
         "catcache.c:1002 DEBUG1 line missing: {logs:?}"
     );
     with_state(|st| assert!(st.cache(id).cc_nbuckets > 2));
+}
+
+// catcache.c:2216 palloc in CacheMemoryContext: an unsatisfiable shared-entry
+// body request is the catchable out-of-memory ERROR, never a process abort.
+#[test]
+fn l2_body_alloc_failure_is_a_catchable_error() {
+    let Err(e) = crate::l2::AlignedBytes::new_zeroed(1usize << 62) else {
+        panic!("unsatisfiable request succeeded");
+    };
+    assert!(e.message().contains("out of memory"), "{}", e.message());
+}
+
+// SearchCatCacheList PG_CATCH: when the list's key-payload palloc fails after
+// the scan adopted its members, their temp refs are released instead of
+// pinning them for the session.
+#[test]
+fn list_finalization_failure_releases_temp_member_refs() {
+    let id = fresh_id();
+    let kinds = [CCFastKind::Name, CCFastKind::Int4, CCFastKind::Int4, CCFastKind::Int4];
+    testing::init_cache_bare(id, 1, kinds, 4, None);
+    let keys = [CatCKey::Str("pg_class"), CatCKey::UNUSED, CatCKey::UNUSED, CatCKey::UNUSED];
+    testing::insert_positive(id, &keys, &tiny_image());
+    let t = SearchCatCache1(id, CatCKey::Str("pg_class")).unwrap().expect("hit");
+    let slot = t.slot;
+    ReleaseCatCache(t);
+    with_state(|st| st.cache_mut(id).tuples[slot as usize].refcount += 1);
+    // The state is per test thread: the limited context stays installed.
+    let full = Box::leak(Box::new(mcx::MemoryContext::new("full").with_limit(1))).mcx();
+    with_state(|st| st.mcx = full);
+    let r = crate::list::adopt_members(id, 1, 7, &keys, &[slot], true);
+    assert!(r.is_err(), "the limited context must fail the key-payload alloc");
+    let (refcount, c_list) =
+        with_state(|st| (st.cache(id).tuples[slot as usize].refcount, st.cache(id).tuples[slot as usize].c_list));
+    assert_eq!(refcount, 0, "the scan's temp ref is released on the error path");
+    assert_eq!(c_list, NONE);
 }

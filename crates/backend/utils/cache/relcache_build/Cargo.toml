@@ -28,6 +28,7 @@ detoast = { path = "../../../access/common/detoast" }
 varlena = { path = "../../../utils/adt/varlena" }
 cache_syscache = { path = "../cache_syscache" }
 relcache = { path = "../relcache" }
+snapmgr = { path = "../../time/snapmgr" }
 relcache_build_seams = { path = "../relcache_build_seams" }
 typcache_seams = { path = "../typcache_seams" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }

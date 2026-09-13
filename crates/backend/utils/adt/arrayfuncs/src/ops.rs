@@ -207,7 +207,7 @@ pub fn array_eq_internal(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     let flinfo = flinfo.expect("array_eq: NULL flinfo");
     let memo = cached_typentry(flinfo, element_type, TcWant::Eq)?;
     let meta = memo.meta();
-    let mut eqfn = memo.entry.eq_opr_finfo();
+    let mut eqfn = memo.entry.eq_opr_finfo().clone();
     array_eq_loop(mcx, &array1, &array2, collation, meta, &mut eqfn)
 }
 
@@ -304,7 +304,7 @@ pub fn array_cmp(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
         }
     };
     let meta = memo.meta();
-    let mut cmpfn = memo.entry.cmp_proc_finfo();
+    let mut cmpfn = memo.entry.cmp_proc_finfo().clone();
     array_cmp_core(mcx, &array1, &array2, collation, meta, &mut cmpfn)
 }
 
@@ -488,7 +488,7 @@ fn contain_common(
     let flinfo = flinfo.expect("array_contain_compare: NULL flinfo");
     let memo = cached_typentry(flinfo, element_type, TcWant::Eq)?;
     let meta = memo.meta();
-    let mut eqfn = memo.entry.eq_opr_finfo();
+    let mut eqfn = memo.entry.eq_opr_finfo().clone();
     let r = contain_core(mcx, array1, array2, collation, matchall, meta, &mut eqfn)?;
     Ok(Datum::from_bool(r))
 }
@@ -662,7 +662,7 @@ fn replace_common(
     let flinfo = flinfo.expect("array_replace_internal: NULL flinfo");
     let memo = cached_typentry(flinfo, element_type, TcWant::Eq)?;
     let meta = memo.meta();
-    let mut eqfn = memo.entry.eq_opr_finfo();
+    let mut eqfn = memo.entry.eq_opr_finfo().clone();
     let out = replace_core(
         mcx,
         array,
