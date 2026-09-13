@@ -134,7 +134,7 @@ fn pgstattuple_approx_internal(
 ) -> PgResult<Datum> {
     // SAFETY: the arming context outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = composite_tupdesc(mcx, flinfo, fcinfo)?;
     if tupdesc.natts != 10 {
         return Err(Box::new(PgError::error("incorrect number of output arguments")));
     }

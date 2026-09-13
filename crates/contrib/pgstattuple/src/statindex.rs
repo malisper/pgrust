@@ -103,7 +103,7 @@ fn pgstatindex_impl(
 
     // SAFETY: the arming context outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = composite_tupdesc(mcx, flinfo, fcinfo)?;
 
     let index_size = (1 + stat.leaf_pages + stat.internal_pages + stat.deleted_pages
         + stat.empty_pages)
@@ -274,7 +274,7 @@ fn pgstatginindex_internal(
 
     rel.close(types_rel::AccessShareLock)?;
 
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = composite_tupdesc(mcx, flinfo, fcinfo)?;
     let values = [
         Datum::from_i32(version),
         Datum::from_i32(pending_pages as i32),
@@ -478,7 +478,7 @@ pub(crate) fn fc_pgstathashindex(
         100.0 * stats.free_space as f64 / total_space as f64
     };
 
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = composite_tupdesc(mcx, flinfo, fcinfo)?;
     let values = [
         Datum::from_i32(stats.version),
         Datum::from_i64(stats.bucket_pages as i64),

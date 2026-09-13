@@ -356,6 +356,24 @@ pub fn file_list_inherit(list: &FileList) {
     FILE_LIST.with(|s| {
         *s.borrow_mut() = FileListState { list: list.0.clone(), inherited: list.0.len() }
     });
+    let inits = BACKEND_INITS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for f in &list.0 {
+        if let Some((_, init)) = inits.iter().find(|(n, _)| *n == f.entry.name) {
+            let _ = init();
+        }
+    }
+}
+
+// A preloaded library whose _PG_init state is per-thread here (C's fork
+// hands the postmaster's copy to every child): re-run in each inheriting
+// backend by file_list_inherit.
+static BACKEND_INITS: Mutex<Vec<(&'static str, fn() -> PgResult<()>)>> = Mutex::new(Vec::new());
+
+pub fn register_backend_init(name: &'static str, init: fn() -> PgResult<()>) {
+    let mut v = BACKEND_INITS.lock().unwrap_or_else(|e| e.into_inner());
+    if !v.iter().any(|(n, _)| *n == name) {
+        v.push((name, init));
+    }
 }
 
 // A C parallel worker is a fresh fork: its file_list starts as the
@@ -612,6 +630,31 @@ mod tests {
             (m[0].module_name, m[0].library_path.as_str()),
             ("tlib", format!("{pkglib}/tlib{DLSUFFIX}").as_str())
         );
+    }
+
+    #[test]
+    fn inherited_file_list_runs_backend_init_in_the_child() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static INITS: AtomicUsize = AtomicUsize::new(0);
+        let pkglib = setup();
+        register_builtin_library(BuiltinLibraryEntry { name: "tbinit", lookup: |_| None, pg_init: None });
+        register_backend_init("tbinit", || {
+            INITS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        load_file("tbinit", false).unwrap();
+        assert_eq!(INITS.load(Ordering::SeqCst), 0);
+        let snapshot = file_list_snapshot();
+        std::thread::spawn(move || {
+            set_pkglib(&pkglib);
+            dynamic_library_path_set(Some("$libdir".to_owned()));
+            file_list_inherit(&snapshot);
+            assert_eq!(INITS.load(Ordering::SeqCst), 1);
+            load_file("tbinit", false).unwrap();
+            assert_eq!(INITS.load(Ordering::SeqCst), 1);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

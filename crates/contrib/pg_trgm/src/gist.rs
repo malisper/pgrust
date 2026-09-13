@@ -5,7 +5,7 @@
 
 use types_error::{PgError, PgResult};
 
-use crate::trgm::{cmp_trgm, trgm2int, trgm_contained_by, Trgm};
+use crate::trgm::{cmp_trgm, trgm_contained_by, Trgm};
 
 pub const ARRKEY: u8 = 0x01;
 pub const SIGNKEY: u8 = 0x02;
@@ -113,11 +113,18 @@ fn setbit(sign: &mut [u8], i: usize) {
     sign[i / BITBYTE] |= 0x01 << (i % BITBYTE);
 }
 
+// trgm_gist.c CPTRGM: the three trigram bytes copied into a zeroed native
+// int32, so the signature hash is byte-order dependent (unlike trgm2int).
+#[inline]
+fn cptrgm(t: &Trgm) -> u32 {
+    u32::from_ne_bytes([t[0], t[1], t[2], 0])
+}
+
 pub fn makesign(arr: &[Trgm], siglen: usize) -> Vec<u8> {
     let mut sign = vec![0u8; siglen];
     setbit(&mut sign, siglenbit(siglen));
     for t in arr {
-        setbit(&mut sign, hashval(trgm2int(t), siglen));
+        setbit(&mut sign, hashval(cptrgm(t), siglen));
     }
     sign
 }
@@ -132,7 +139,7 @@ fn hemdistsign(a: &[u8], b: &[u8], siglen: usize) -> i32 {
 
 fn cnt_sml_sign_common(qtrg: &[Trgm], sign: &[u8], siglen: usize) -> i32 {
     qtrg.iter()
-        .filter(|t| getbit(sign, hashval(trgm2int(t), siglen)))
+        .filter(|t| getbit(sign, hashval(cptrgm(t), siglen)))
         .count() as i32
 }
 
@@ -189,7 +196,7 @@ pub fn consistent(
                     TrgmKey::AllTrue => true,
                     TrgmKey::Sign(sign) => qtrg
                         .iter()
-                        .all(|t| getbit(sign, hashval(trgm2int(t), sign.len()))),
+                        .all(|t| getbit(sign, hashval(cptrgm(t), sign.len()))),
                     TrgmKey::Arr(_) => trgm_contained_by(qtrg, expect_arr(key)?),
                 }
             };
@@ -225,7 +232,7 @@ pub fn consistent_regexp(
             // negative.
             let check: Vec<bool> = qtrg
                 .iter()
-                .map(|t| getbit(sign, hashval(trgm2int(t), sign.len())))
+                .map(|t| getbit(sign, hashval(cptrgm(t), sign.len())))
                 .collect();
             graph.matches(&check)
         }
@@ -279,7 +286,7 @@ fn unionkey(sbase: &mut [u8], add: &TrgmKey, siglen: usize) -> bool {
         TrgmKey::AllTrue => true,
         TrgmKey::Arr(arr) => {
             for t in arr {
-                setbit(sbase, hashval(trgm2int(t), siglen));
+                setbit(sbase, hashval(cptrgm(t), siglen));
             }
             false
         }
@@ -508,4 +515,21 @@ pub fn picksplit(
     let ldatum = encode_signkey(datum_l_allistrue, &union_l);
     let rdatum = encode_signkey(datum_r_allistrue, &union_r);
     Ok((spl_left, spl_right, ldatum, rdatum))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // trgm_gist.c makesign on 'abc' (regress little-endian bit positions:
+    // CPTRGM native int % SIGLENBIT(12) for "bc ", "  a", " ab", "abc", plus
+    // the always-set last bit).
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn makesign_hashes_cptrgm_native_int() {
+        let sign = makesign(&[*b"  a", *b" ab", *b"abc", *b"bc "], 12);
+        let bits: Vec<usize> = (0..12 * BITBYTE).filter(|&i| getbit(&sign, i)).collect();
+        assert_eq!(bits, vec![9, 26, 27, 49, 95]);
+        assert_eq!(cptrgm(b"abc"), 0x636261);
+    }
 }

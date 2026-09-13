@@ -2,7 +2,7 @@
 //! Pure logic over byte buffers; backend services (pg_mblen / ISWORDCHR /
 //! str_tolower) thread in via TrgmEnv so the unit tests can stub them.
 
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 
 pub type Trgm = [u8; 3];
 
@@ -20,6 +20,12 @@ fn check_for_interrupts() -> PgResult<()> {
         return process_interrupts();
     }
     Ok(())
+}
+
+// init_trgm_array / enlarge_trgm_array (trgm_op.c:112): the MaxAllocSize
+// guard is ERRCODE_PROGRAM_LIMIT_EXCEEDED, without palloc's DETAIL.
+fn trgm_array_limit() -> PgError {
+    PgError::error("out of memory").with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
 }
 
 pub const LPADDING: usize = 2;
@@ -192,9 +198,10 @@ fn generate_trgm_only(
     let slen = s.len();
     let mut dst: Vec<Trgm> = Vec::new();
     // trgm_op.c: palloc((slen / 2 + 1) * 3 * sizeof(trgm)) under MaxAllocSize.
-    if ::mcx::check_alloc_size((slen + 1).saturating_mul(core::mem::size_of::<Trgm>())).is_err()
-        || dst.try_reserve_exact(slen + 1).is_err()
-    {
+    if ::mcx::check_alloc_size((slen + 1).saturating_mul(core::mem::size_of::<Trgm>())).is_err() {
+        std::panic::panic_any(trgm_array_limit());
+    }
+    if dst.try_reserve_exact(slen + 1).is_err() {
         std::panic::panic_any(::mcx::oom_named("pg_trgm", slen + 1));
     }
     let mut bounds: Option<Vec<u8>> = if want_bounds { Some(Vec::new()) } else { None };
@@ -341,9 +348,10 @@ pub fn generate_wildcard_trgm(
 ) -> Vec<Trgm> {
     let slen = s.len();
     let mut dst: Vec<Trgm> = Vec::new();
-    if ::mcx::check_alloc_size((slen + 1).saturating_mul(core::mem::size_of::<Trgm>())).is_err()
-        || dst.try_reserve_exact(slen + 1).is_err()
-    {
+    if ::mcx::check_alloc_size((slen + 1).saturating_mul(core::mem::size_of::<Trgm>())).is_err() {
+        std::panic::panic_any(trgm_array_limit());
+    }
+    if dst.try_reserve_exact(slen + 1).is_err() {
         std::panic::panic_any(::mcx::oom_named("pg_trgm", slen + 1));
     }
 
@@ -534,6 +542,12 @@ fn iterate_word_similarity(
     Ok(smlr_max)
 }
 
+// make_positional_trgm: palloc(sizeof(pos_trgm) * len) under MaxAllocSize.
+fn positional_trgm_array(len: usize) -> PgResult<Vec<PosTrgm>> {
+    ::mcx::check_alloc_size(len.saturating_mul(core::mem::size_of::<PosTrgm>()))?;
+    Ok(Vec::with_capacity(len))
+}
+
 pub fn calc_word_similarity(
     str1: &[u8],
     str2: &[u8],
@@ -551,7 +565,7 @@ pub fn calc_word_similarity(
     let len2 = trg2.len();
 
     let len = len1 + len2;
-    let mut ptrg: Vec<PosTrgm> = Vec::with_capacity(len);
+    let mut ptrg: Vec<PosTrgm> = positional_trgm_array(len)?;
     for t in &trg1 {
         ptrg.push(PosTrgm { trg: *t, index: -1 });
     }
@@ -616,6 +630,13 @@ mod tests {
 
     fn show(v: &[Trgm]) -> Vec<String> {
         v.iter().map(|t| String::from_utf8_lossy(t).into_owned()).collect()
+    }
+
+    #[test]
+    fn positional_trgm_array_is_bounded_by_max_alloc_size() {
+        assert!(positional_trgm_array(4).is_ok());
+        let msg = positional_trgm_array(134217728).err().map(|e| e.message().to_string());
+        assert_eq!(msg.as_deref(), Some("invalid memory alloc request size 1073741824"));
     }
 
     #[test]

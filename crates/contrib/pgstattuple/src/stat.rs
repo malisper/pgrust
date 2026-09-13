@@ -38,7 +38,7 @@ fn build_pgstattuple_type(
 
     // SAFETY: the arming context outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = composite_tupdesc(mcx, flinfo, fcinfo)?;
     let values: Vec<Option<String>> = vec![
         Some(format!("{}", stat.table_len)),
         Some(format!("{}", stat.tuple_count)),

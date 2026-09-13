@@ -2,17 +2,19 @@
 //! transactions, decoding the lock kind from each row header's infomask and
 //! expanding multixact lockers into per-member xid/mode/pid.
 //!
-//! C builds each row as C strings through BuildTupleFromCStrings; the same
-//! values are built here as typed datums (tid, xid, bool, xid[], text[],
-//! int4[]) — array_out re-quotes space-containing mode names identically.
+//! C builds each row as C strings through BuildTupleFromCStrings: the same
+//! strings go through the declared result columns' input functions here.
 
 #![allow(non_snake_case)]
 
 use datum::Datum;
 use mcx::Mcx;
-use types_core::{catalog, TransactionId, INT4OID, TEXTOID, XIDOID};
+use std::ffi::CString;
+
+use types_core::{catalog, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE};
-use types_fmgr::{byref_result, varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use types_tuple::tupdesc::TupleDescData;
 use types_rel::pg_class::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 use types_storage::multixact::{MultiXactMember, MultiXactStatus};
 use types_tuple::htup::{
@@ -20,7 +22,6 @@ use types_tuple::htup::{
     HEAP_XMAX_IS_EXCL_LOCKED, HEAP_XMAX_IS_KEYSHR_LOCKED, HEAP_XMAX_IS_MULTI,
     HEAP_XMAX_IS_SHR_LOCKED, HEAP_XMAX_LOCK_ONLY,
 };
-use types_tuple::itemptr::ItemPointerData;
 
 const LIBRARY: &str = "pgrowlocks";
 
@@ -61,37 +62,44 @@ fn mode_name(status: MultiXactStatus) -> &'static str {
     }
 }
 
-fn tid_datum(mcx: Mcx<'_>, ip: ItemPointerData) -> PgResult<Datum> {
-    let mut img = [0u8; 6];
-    img[0..2].copy_from_slice(&ip.ip_blkid.bi_hi.to_ne_bytes());
-    img[2..4].copy_from_slice(&ip.ip_blkid.bi_lo.to_ne_bytes());
-    img[4..6].copy_from_slice(&ip.ip_posid.to_ne_bytes());
-    byref_result(mcx, &img)
-}
-
-fn text_datum(mcx: Mcx<'_>, s: &str) -> PgResult<Datum> {
-    Ok(varlena_result(varlena::cstring_to_text(mcx, s.as_bytes())?))
-}
-
-fn xid_array(mcx: Mcx<'_>, xids: &[TransactionId]) -> PgResult<Datum> {
-    let elems: Vec<Datum> = xids.iter().map(|&x| Datum::from_transaction_id(x)).collect();
-    let image = datum::array_build::construct_array_image(mcx, &elems, XIDOID, 4, true, b'i')?;
-    byref_result(mcx, &image)
-}
-
-fn text_array(mcx: Mcx<'_>, texts: &[&str]) -> PgResult<Datum> {
-    let mut elems = Vec::with_capacity(texts.len());
-    for t in texts {
-        elems.push(text_datum(mcx, t)?);
+// TupleDescGetAttInMetadata: each declared column's input function, once;
+// a dropped column has none.
+fn att_in_metadata(tupdesc: &TupleDescData<'_>) -> PgResult<Vec<Option<(FmgrInfo, Oid, i32)>>> {
+    let natts = tupdesc.natts as usize;
+    let mut atts = Vec::with_capacity(natts);
+    for i in 0..natts {
+        let att = tupdesc.attr(i);
+        atts.push(if att.attisdropped {
+            None
+        } else {
+            let (infunc, typioparam) = lsyscache::getTypeInputInfo(att.atttypid)?;
+            Some((fmgr_core::fmgr_info(infunc)?, typioparam, att.atttypmod))
+        });
     }
-    let image = datum::array_build::construct_array_image(mcx, &elems, TEXTOID, -1, false, b'i')?;
-    byref_result(mcx, &image)
+    Ok(atts)
 }
 
-fn int4_array(mcx: Mcx<'_>, vals: &[i32]) -> PgResult<Datum> {
-    let elems: Vec<Datum> = vals.iter().map(|&v| Datum::from_i32(v)).collect();
-    let image = datum::array_build::construct_array_image(mcx, &elems, INT4OID, 4, true, b'i')?;
-    byref_result(mcx, &image)
+// BuildTupleFromCStrings: the strings through the columns' input functions;
+// dropped columns are NULL.
+fn build_tuple_from_cstrings(
+    mcx: Mcx<'_>,
+    attinmeta: &mut [Option<(FmgrInfo, Oid, i32)>],
+    values: &[String],
+) -> PgResult<(Vec<Datum>, Vec<bool>)> {
+    let n = attinmeta.len();
+    let mut datums = vec![Datum::null(); n];
+    let mut nulls = vec![false; n];
+    for (i, att) in attinmeta.iter_mut().enumerate() {
+        match (att, values.get(i)) {
+            (Some((flinfo, typioparam, typmod)), Some(s)) => {
+                let cstr = CString::new(s.as_str()).expect("pgrowlocks: interior NUL");
+                datums[i] =
+                    types_fmgr::input_function_call(flinfo, Some(&cstr), *typioparam, *typmod, mcx)?;
+            }
+            _ => nulls[i] = true,
+        }
+    }
+    Ok((datums, nulls))
 }
 
 // textToQualifiedNameList + makeRangeVarFromNameList + relation_openrv.
@@ -153,6 +161,7 @@ fn fc_pgrowlocks(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     let mcx = unsafe { fcinfo.result_mcx_detached() };
 
     let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    let mut attinmeta = att_in_metadata(&srf.tupdesc)?;
 
     let rel = relation_open_by_text_arg(mcx, fcinfo, 0, types_rel::AccessShareLock)?;
 
@@ -226,49 +235,50 @@ fn fc_pgrowlocks(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
             continue;
         }
 
-        let locked_row = tid_datum(mcx, t_self)?;
-        let locker = Datum::from_transaction_id(xmax);
+        let blkno = ((t_self.ip_blkid.bi_hi as u32) << 16) | t_self.ip_blkid.bi_lo as u32;
         let is_multi = infomask & HEAP_XMAX_IS_MULTI != 0;
 
-        let (xids_d, modes_d, pids_d) = if is_multi {
+        let (xids_s, modes_s, pids_s) = if is_multi {
             let allow_old = HEAP_LOCKED_UPGRADED(infomask);
             let mut members: Vec<MultiXactMember> = Vec::new();
             let nmembers = multixact::GetMultiXactIdMembers(xmax, allow_old, false, &mut |m| {
                 members.extend_from_slice(m)
             })?;
             if nmembers == -1 {
-                (
-                    xid_array(mcx, &[0])?,
-                    text_array(mcx, &["transient upgrade status"])?,
-                    int4_array(mcx, &[0])?,
-                )
+                ("{0}".to_string(), "{transient upgrade status}".to_string(), "{0}".to_string())
             } else {
-                let xids: Vec<TransactionId> = members.iter().map(|m| m.xid).collect();
+                let xids: Vec<String> = members.iter().map(|m| m.xid.to_string()).collect();
                 let modes: Vec<&str> = members.iter().map(|m| mode_name(m.status)).collect();
-                let pids: Vec<i32> =
-                    members.iter().map(|m| procarray::BackendXidGetPid(m.xid)).collect();
-                (xid_array(mcx, &xids)?, text_array(mcx, &modes)?, int4_array(mcx, &pids)?)
+                let pids: Vec<String> = members
+                    .iter()
+                    .map(|m| procarray::BackendXidGetPid(m.xid).to_string())
+                    .collect();
+                (
+                    format!("{{{}}}", xids.join(",")),
+                    format!("{{{}}}", modes.join(",")),
+                    format!("{{{}}}", pids.join(",")),
+                )
             }
         } else {
-            let mode = single_locker_mode(infomask, infomask2);
             (
-                xid_array(mcx, &[xmax])?,
-                text_array(mcx, &[mode])?,
-                int4_array(mcx, &[procarray::BackendXidGetPid(xmax)])?,
+                format!("{{{xmax}}}"),
+                format!("{{{}}}", single_locker_mode(infomask, infomask2)),
+                format!("{{{}}}", procarray::BackendXidGetPid(xmax)),
             )
         };
 
         bufmgr::LockBuffer(buf, bufmgr::BUFFER_LOCK_UNLOCK)?;
 
         let values = [
-            locked_row,
-            locker,
-            Datum::from_bool(is_multi),
-            xids_d,
-            modes_d,
-            pids_d,
+            format!("({blkno},{})", t_self.ip_posid),
+            xmax.to_string(),
+            (if is_multi { "true" } else { "false" }).to_string(),
+            xids_s,
+            modes_s,
+            pids_s,
         ];
-        srf.putvalues(&values, &[false; 6])?;
+        let (datums, nulls) = build_tuple_from_cstrings(mcx, &mut attinmeta, &values)?;
+        srf.putvalues(&datums, &nulls)?;
     }
 
     heapam::heap_endscan(hscan)?;

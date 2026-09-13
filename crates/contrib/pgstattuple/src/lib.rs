@@ -127,8 +127,13 @@ pub(crate) const fn maxalign(n: usize) -> usize {
 pub(crate) fn composite_tupdesc<'m>(
     mcx: Mcx<'m>,
     flinfo: &FmgrInfo,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<TupleDescData<'m>> {
-    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    let expected_desc = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    // SAFETY: expectedDesc contract — the executor armed it with the scan
+    // tupdesc, live for the duration of this call.
+    let expected = expected_desc.map(|p| unsafe { p.cast::<TupleDescData<'_>>().as_ref() });
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, expected)?;
     if resolved.class != funcapi::TypeFuncClass::Composite {
         return Err(Box::new(PgError::error("return type must be a row type")));
     }
@@ -158,16 +163,23 @@ pub(crate) fn cstrings_composite_result(
     debug_assert!(values.len() >= n);
     let mut datums = vec![Datum::null(); n];
     let mut nulls = vec![false; n];
+    // The input functions' FmgrInfos (and the scratch their by-reference
+    // results live in) must outlive heap_form_tuple's copy.
+    let mut flinfos: Vec<FmgrInfo> = Vec::with_capacity(n);
     for i in 0..n {
+        let att = tupdesc.attr(i);
+        if att.attisdropped {
+            nulls[i] = true;
+            continue;
+        }
         match &values[i] {
             Some(s) => {
-                let att = tupdesc.attr(i);
                 let (infunc, typioparam) = lsyscache::getTypeInputInfo(att.atttypid)?;
-                let mut flinfo = fmgr_core::fmgr_info(infunc)?;
+                flinfos.push(fmgr_core::fmgr_info(infunc)?);
                 let cstr = std::ffi::CString::new(s.as_str())
                     .expect("cstrings_composite_result: interior NUL");
                 datums[i] = types_fmgr::input_function_call(
-                    &mut flinfo,
+                    flinfos.last_mut().expect("just pushed"),
                     Some(&cstr),
                     typioparam,
                     att.atttypmod,
@@ -178,6 +190,7 @@ pub(crate) fn cstrings_composite_result(
         }
     }
     let tup = heaptuple::heap_form_tuple(mcx, tupdesc, &datums, &nulls)?;
+    drop(flinfos);
     byref_result(mcx, tup.image())
 }
 

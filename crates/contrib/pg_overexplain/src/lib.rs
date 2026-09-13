@@ -497,6 +497,9 @@ pub fn init_seams() {
         lookup: |_| None,
         pg_init: Some(pg_init),
     });
+    // The option/hook registrations are per-thread (explain state.rs), so a
+    // shared_preload_libraries load must repeat them in every backend.
+    dfmgr::register_backend_init(LIBRARY, pg_init);
 }
 
 #[cfg(test)]

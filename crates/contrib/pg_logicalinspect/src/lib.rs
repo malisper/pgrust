@@ -14,8 +14,16 @@ use types_tuple::tupdesc::TupleDescData;
 
 const LIBRARY: &str = "pg_logicalinspect";
 
-fn composite_tupdesc<'m>(mcx: Mcx<'m>, flinfo: &FmgrInfo) -> PgResult<TupleDescData<'m>> {
-    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+fn composite_tupdesc<'m>(
+    mcx: Mcx<'m>,
+    flinfo: &FmgrInfo,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<TupleDescData<'m>> {
+    let expected_desc = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    // SAFETY: expectedDesc contract — the executor armed it with the scan
+    // tupdesc, live for the duration of this call.
+    let expected = expected_desc.map(|p| unsafe { p.cast::<TupleDescData<'_>>().as_ref() });
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, expected)?;
     if resolved.class != funcapi::TypeFuncClass::Composite {
         return Err(Box::new(PgError::error("return type must be a row type")));
     }
@@ -91,7 +99,7 @@ fn fc_pg_get_logical_snapshot_meta(
     let flinfo = flinfo.expect("pg_get_logical_snapshot_meta: resolved FmgrInfo required");
     // SAFETY: the arming context outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = composite_tupdesc(mcx, flinfo, fcinfo)?;
 
     let lsn = parse_snapshot_filename(&filename_arg(fcinfo)?)?;
     let ondisk = snapbuild::ondisk::restore_snapshot(lsn, false)?
@@ -121,7 +129,7 @@ fn fc_pg_get_logical_snapshot_info(
     let flinfo = flinfo.expect("pg_get_logical_snapshot_info: resolved FmgrInfo required");
     // SAFETY: the arming context outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
-    let tupdesc = composite_tupdesc(mcx, flinfo)?;
+    let tupdesc = composite_tupdesc(mcx, flinfo, fcinfo)?;
 
     let lsn = parse_snapshot_filename(&filename_arg(fcinfo)?)?;
     let ondisk = snapbuild::ondisk::restore_snapshot(lsn, false)?

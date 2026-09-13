@@ -587,6 +587,7 @@ fn gtrgm_cached<'f>(
     f: &'f mut Option<&mut FmgrInfo>,
     fcinfo: &Fcinfo,
     strategy: u16,
+    distance: bool,
 ) -> PgResult<&'f mut GtrgmCache> {
     // SAFETY: the armed result mcx outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
@@ -603,6 +604,9 @@ fn gtrgm_cached<'f>(
     if !hit {
         let env = make_env();
         let (trigrams, graph) = match strategy {
+            // gtrgm_distance: generate_trgm for any strategy; the switch
+            // below rejects unsupported ones after extraction.
+            _ if distance => (Some(generate_trgm(payload, &env, &legacy_crc32)), None),
             SIMILARITY_STRATEGY
             | WORD_SIMILARITY_STRATEGY
             | STRICT_WORD_SIMILARITY_STRATEGY
@@ -646,7 +650,7 @@ fn fc_gtrgm_consistent(mut f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     let entry = unsafe { entry_arg(fcinfo, 0) };
     let strategy = fcinfo.arg(2).as_u32() as u16;
     let key = gist::decode_key(key_image(entry.key))?;
-    let cache = gtrgm_cached(&mut f, fcinfo, strategy)?;
+    let cache = gtrgm_cached(&mut f, fcinfo, strategy, false)?;
     let (res, rc) = match strategy {
         REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
             let GtrgmCache { trigrams, graph, .. } = cache;
@@ -684,7 +688,7 @@ fn fc_gtrgm_distance(mut f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     let entry = unsafe { entry_arg(fcinfo, 0) };
     let strategy = fcinfo.arg(2).as_u32() as u16;
     let key = gist::decode_key(key_image(entry.key))?;
-    let cache = gtrgm_cached(&mut f, fcinfo, strategy)?;
+    let cache = gtrgm_cached(&mut f, fcinfo, strategy, true)?;
     let qtrg = cache.trigrams.as_deref().expect("distance cache has trigrams");
     let (res, rc) = gist::distance(entry.page_is_leaf, &key, qtrg, strategy)?;
     let recheck = fcinfo.arg(4).as_usize() as *mut bool;

@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use datum::Datum;
 use types_core::{BlockNumber, ForkNumber, Oid, OidIsValid, BLCKSZ};
 use types_error::{
-    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_TABLE,
-    ERRCODE_WRONG_OBJECT_TYPE,
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 use types_nodes::parsenodes::{ObjectType, ACL_SELECT};
@@ -248,6 +248,14 @@ fn fc_pg_prewarm(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
             // C 18 streams via read_stream; no read_stream surface exists here,
             // so this is the pre-17 per-block ReadBuffer loop — same buffers
             // pulled into shared_buffers, same count returned.
+            // read_stream_begin_impl (read_stream.c:563) rejects before the
+            // first block, so an empty range still errors.
+            if rel.is_other_temp() {
+                return Err(Box::new(
+                    PgError::error("cannot access temporary tables of other sessions")
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
             for block in first_block..=last_block {
                 postgres_seams::check_for_interrupts::call()?;
                 let buf = bufmgr::ReadBufferExtended(

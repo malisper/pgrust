@@ -22,6 +22,8 @@ types_tuple = { path = "../../_support/types/types_tuple" }
 rel_vocab = { path = "../../_support/types/rel_vocab" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 relation = { path = "../../backend/access/common/relation" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
 heapam = { path = "../../backend/access/heap/heapam" }
