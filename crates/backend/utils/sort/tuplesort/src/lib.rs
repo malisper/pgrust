@@ -488,7 +488,7 @@ impl CmpCtx<'_> {
         // SAFETY: as comparetup_spec.
         let key0 = unsafe { self.keys.get_unchecked(0) };
         let c = ssup::apply_cmp_in(cmp, a.datum1, b.datum1, key0.ssup_collation, self.mcx);
-        let compare = if key0.ssup_reverse { -c } else { c };
+        let compare = if key0.ssup_reverse { ssup::invert_compare_result(c) } else { c };
         if compare != 0 {
             return compare;
         }

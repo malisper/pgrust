@@ -5,7 +5,7 @@
 use core::mem;
 
 use ::datum::Datum;
-use ::mcx::{bind, Mcx, McxOwned, MemoryContext, PgVec};
+use ::mcx::{bind, Allocator, Mcx, McxOwned, MemoryContext, PgVec};
 use ::types_error::{PgError, PgResult};
 use ::types_slot::{SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_REWIND};
 use ::types_tuple::htup::MINIMAL_TUPLE_DATA_OFFSET;
@@ -92,10 +92,12 @@ pub struct TuplestoreData<'m> {
     memtupdeleted: usize,
     readptrs: PgVec<'m, ReadPointer>,
     activeptr: usize,
-    // Retained flat-image scratch for the READFILE readtup, in MAXALIGN
-    // words so a slot can deform the image in place (`gettupleslot` with
-    // `copy == false` lends this buffer out — see its contract).
-    read_scratch: PgVec<'m, u64>,
+    // Retained flat-image scratch for the READFILE readtup, one per read
+    // pointer, in MAXALIGN words so a slot can deform the image in place
+    // (`gettupleslot` with `copy == false` lends this buffer out — see its
+    // contract). Per pointer: two scans of one store (nested loop over a
+    // transition table) each hold their own row across the other's reads.
+    read_scratch: PgVec<'m, PgVec<'m, u64>>,
 }
 
 bind!(pub TuplestoreTy => TuplestoreData<'mcx>);
@@ -214,9 +216,9 @@ impl Tuplestore {
             readptrs.push(ReadPointer { eflags, ..RP0 });
             Ok(TuplestoreData {
                 mcx,
-                // C: generation context (FIFO pfree); nothing here frees
-                // per-tuple, so a wholesale-reset bump arena matches cost.
-                tuplecontext: mcx.context().new_child_bump("tuplestore tuples"),
+                // C: generation context — trim pfrees FIFO and drained
+                // blocks are released.
+                tuplecontext: mcx.context().new_child_generation("tuplestore tuples"),
                 status: TupStoreStatus::InMem,
                 eflags,
                 backward: false,
@@ -318,16 +320,18 @@ impl Tuplestore {
                         exectuples::exec_store_minimal_tuple_owned(slot, slot_mcx, owned);
                     } else {
                         // SAFETY: readtup just staged a t_len-byte image at the
-                        // start of read_scratch (MAXALIGN'd), held until the
-                        // next readtup (caller contract above); full-buffer
-                        // provenance — a &MinimalTupleData here would shrink
-                        // it to the header.
+                        // start of this pointer's scratch (MAXALIGN'd), held
+                        // until its next readtup (caller contract above);
+                        // full-buffer provenance — a &MinimalTupleData here
+                        // would shrink it to the header.
                         unsafe {
                             exectuples::exec_store_minimal_tuple_ptr(
                                 slot,
                                 slot_mcx,
                                 core::ptr::NonNull::new_unchecked(
-                                    st.read_scratch.as_mut_ptr().cast::<MinimalTupleData>(),
+                                    st.read_scratch[st.activeptr]
+                                        .as_mut_ptr()
+                                        .cast::<MinimalTupleData>(),
                                 ),
                             )
                         };
@@ -593,9 +597,7 @@ impl Tuplestore {
         })
     }
 
-    /// `tuplestore_trim`, TSS_INMEM arm. C DIVERGENCE: the bump tuplecontext
-    /// cannot free one tuple, so C's pfree is mirrored in the accounting only
-    /// (spill decisions match C; the arena holds the bytes until reset).
+    /// `tuplestore_trim`, TSS_INMEM arm.
     pub fn trim(&mut self) {
         self.0.with_mut(|st| {
             if st.eflags & EXEC_FLAG_REWIND != 0 {
@@ -618,9 +620,19 @@ impl Tuplestore {
             debug_assert!(nremove >= st.memtupdeleted && nremove <= count);
             st.updatemax();
             for i in st.memtupdeleted..nremove {
+                let tuple = st.memtuples[i];
                 // SAFETY: live tuplecontext image; header read.
-                let len = unsafe { (*st.memtuples[i]).t_len } as usize;
+                let len = unsafe { (*tuple).t_len } as usize;
                 st.avail_mem += generation_chunk_space(len);
+                // SAFETY: the put paths allocate exactly t_len MAXALIGN'd
+                // bytes in tuplecontext (heaptuple alloc_image, extra 0); no
+                // reader can still reach this tuple (nremove < oldest).
+                unsafe {
+                    st.tuplecontext.mcx().deallocate(
+                        core::ptr::NonNull::new_unchecked(tuple.cast::<u8>()),
+                        core::alloc::Layout::from_size_align_unchecked(len, 8),
+                    )
+                };
             }
             st.memtupdeleted = nremove;
             if nremove < count / 8 {
@@ -717,8 +729,8 @@ impl<'m> TuplestoreData<'m> {
                 self.updatemax();
                 self.status = TupStoreStatus::WriteFile;
                 self.dumptuples()?;
-                // C's WRITETUP pfrees each dumped tuple; the bump arena
-                // releases them wholesale instead.
+                // C's WRITETUP pfrees each dumped tuple; the reset releases
+                // them wholesale instead.
                 self.tuplecontext.reset();
                 self.avail_mem = self.allowed_mem
                     - aset_chunk_space(self.memtuples.capacity() * PTR_SIZE);
@@ -828,9 +840,10 @@ impl<'m> TuplestoreData<'m> {
         Ok(u32::from_ne_bytes(buf))
     }
 
-    /// The staged READFILE image: `t_len` bytes at the head of `read_scratch`.
+    /// The staged READFILE image: `t_len` bytes at the head of the active
+    /// pointer's `read_scratch`.
     fn scratch_image(&self) -> &[u8] {
-        let words: &[u64] = &self.read_scratch;
+        let words: &[u64] = &self.read_scratch[self.activeptr];
         debug_assert!(!words.is_empty(), "scratch_image before readtup");
         // SAFETY: the buffer holds >= t_len bytes (readtup sized it).
         unsafe {
@@ -850,10 +863,14 @@ impl<'m> TuplestoreData<'m> {
         // stay zero across reuse: growth zero-fills, and no write below
         // touches them.
         let words = maxalign(t_len) / 8;
-        if self.read_scratch.len() < words {
-            self.read_scratch.resize(words, 0);
+        while self.read_scratch.len() <= self.activeptr {
+            self.read_scratch.push(PgVec::new_in(self.mcx));
         }
-        let TuplestoreData { myfile, read_scratch, .. } = self;
+        let TuplestoreData { myfile, read_scratch, activeptr, .. } = self;
+        let read_scratch = &mut read_scratch[*activeptr];
+        if read_scratch.len() < words {
+            read_scratch.resize(words, 0);
+        }
         // SAFETY: read_scratch holds >= maxalign(t_len) bytes; u64 -> u8
         // reinterpretation of an initialized buffer.
         let image = unsafe {

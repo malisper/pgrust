@@ -416,6 +416,34 @@ fn skiptuples_and_advance_window_navigation() {
 }
 
 #[test]
+fn trim_frees_consumed_tuples() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplestore::begin_heap(false, false, 65_536);
+    ts.set_eflags(0).unwrap();
+    let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+    // Material-under-mergejoin streaming: mark, consume, trim; C's generation
+    // context recycles the drained blocks so memory tracks the live window.
+    let mut peak = 0;
+    for round in 0..200 {
+        for v in 0..1000 {
+            put_i32(&mut ts, &desc, round * 1000 + v);
+        }
+        for v in 0..1000 {
+            assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+            assert_eq!(read_i32(&mut slot), round * 1000 + v);
+        }
+        ts.trim();
+        peak = peak.max(ts.0.with_mut(|st| st.tuplecontext.used()));
+    }
+    assert!(ts.in_memory());
+    assert_eq!(ts.tuple_count(), 200_000);
+    assert!(peak < 1 << 20, "trimmed tuples must be released: peak {peak}");
+    exectuples::exec_clear_tuple(&mut slot, mcx);
+    ts.end();
+}
+
+#[test]
 fn get_stats_tracks_chunk_space_maximum_across_clear() {
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 1);
@@ -726,6 +754,43 @@ mod spill {
         assert_eq!(read_i32(&mut slot), 10);
 
         exectuples::exec_clear_tuple(&mut slot, mcx);
+        ts.end();
+    }
+
+    #[test]
+    fn spill_copy_false_rows_survive_another_pointers_reads() {
+        setup();
+        let (_cwd, _dir) = enter_datadir("ptrscratch");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut outer =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+        let mut inner =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+
+        let mut ts = Tuplestore::begin_heap(false, false, 64);
+        let second = ts.alloc_read_pointer(EXEC_FLAG_REWIND).unwrap();
+        for v in 0..N {
+            put_i32(&mut ts, &desc, v);
+        }
+        assert!(!ts.in_memory());
+
+        // Pointer 0 lends its row to `outer` (not yet deformed), then pointer 1
+        // reads ahead into `inner`: C's per-read palloc keeps `outer` intact.
+        assert!(ts.gettupleslot(true, false, &mut outer, mcx).unwrap());
+        ts.select_read_pointer(second).unwrap();
+        for v in 0..5 {
+            assert!(ts.gettupleslot(true, false, &mut inner, mcx).unwrap());
+            assert_eq!(read_i32(&mut inner), v);
+        }
+        assert_eq!(read_i32(&mut outer), 0);
+        ts.select_read_pointer(0).unwrap();
+        assert!(ts.gettupleslot(true, false, &mut outer, mcx).unwrap());
+        assert_eq!(read_i32(&mut outer), 1);
+        assert_eq!(read_i32(&mut inner), 4);
+
+        exectuples::exec_clear_tuple(&mut outer, mcx);
+        exectuples::exec_clear_tuple(&mut inner, mcx);
         ts.end();
     }
 

@@ -288,15 +288,20 @@ fn install_shim_flinfo(fn_oid: Oid, flinfo: ::types_fmgr::FmgrInfo) {
 // out of line so apply_cmp_in's fast arms don't pay for it. Setup (re)seeds it
 // via install_shim_flinfo; this lazy fill covers the multi-key mismatch case
 // (one slot, several shim oids in a sort), always resolving fresh.
+// The carrier is taken out for the call and put back after: a SQL/PL
+// comparator may run a nested sort whose own shim setup/compare borrows the
+// same cell (C: each sort's ssup_cxt holds its own flinfo).
 #[inline(never)]
 fn shim_cmp(shim: ShimCmp, x: Datum, y: Datum, collation: Oid, mcx: Mcx<'_>) -> i32 {
-    let call = SHIM_FLINFO.with(|c| {
-        let mut slot = c.borrow_mut();
-        if !matches!(&**slot, Some((o, _)) if *o == shim.fn_oid) {
-            **slot = Some((shim.fn_oid, ::fmgr_seams::fmgr_info::call(shim.fn_oid)?));
-        }
-        let (_, fl) = slot.as_mut().expect("just filled");
-        ::types_fmgr::function_call2_coll_in(fl, collation, mcx, x, y)
+    let taken = SHIM_FLINFO.with(|c| core::mem::take(&mut **c.borrow_mut()));
+    let call = match taken {
+        Some(e) if e.0 == shim.fn_oid => Ok(e),
+        _ => ::fmgr_seams::fmgr_info::call(shim.fn_oid).map(|fl| (shim.fn_oid, fl)),
+    }
+    .and_then(|mut entry| {
+        let r = ::types_fmgr::function_call2_coll_in(&mut entry.1, collation, mcx, x, y);
+        SHIM_FLINFO.with(|c| **c.borrow_mut() = Some(entry));
+        r
     });
     match call {
         Ok(d) => d.as_i32(),
@@ -412,10 +417,21 @@ pub fn apply_sort_comparator_as(
     } else {
         let compare = apply_cmp(cmp, datum1, datum2);
         if ssup.ssup_reverse {
-            -compare
+            invert_compare_result(compare)
         } else {
             compare
         }
+    }
+}
+
+/// `INVERT_COMPARE_RESULT` (c.h): a comparator may return INT_MIN, which
+/// plain negation cannot flip.
+#[inline(always)]
+pub fn invert_compare_result(compare: i32) -> i32 {
+    if compare < 0 {
+        1
+    } else {
+        -compare
     }
 }
 
@@ -461,7 +477,7 @@ pub fn apply_sort_comparator_as_in(
     } else {
         let compare = apply_cmp_in(cmp, datum1, datum2, ssup.ssup_collation, mcx);
         if ssup.ssup_reverse {
-            -compare
+            invert_compare_result(compare)
         } else {
             compare
         }
@@ -584,6 +600,49 @@ fn abbrev_arm_for(comparator: SortComparator) -> Option<AbbrevArm> {
     Some(AbbrevArm { kind, full_comparator: comparator })
 }
 
+fn is_builtin_sortsupport(oid: Oid) -> bool {
+    matches!(
+        oid,
+        F_BTINT2SORTSUPPORT
+            | F_BTINT4SORTSUPPORT
+            | F_BTOIDSORTSUPPORT
+            | F_BTINT8SORTSUPPORT
+            | F_DATE_SORTSUPPORT
+            | F_TIMESTAMP_SORTSUPPORT
+            | F_BTTEXTSORTSUPPORT
+            | F_BTTEXT_PATTERN_SORTSUPPORT
+            | F_BTBPCHAR_PATTERN_SORTSUPPORT
+            | F_UUID_SORTSUPPORT
+            | F_NETWORK_SORTSUPPORT
+            | F_RANGE_SORTSUPPORT
+            | F_MACADDR_SORTSUPPORT
+            | F_BPCHAR_SORTSUPPORT
+            | F_BTNAMESORTSUPPORT
+            | F_BYTEA_SORTSUPPORT
+            | F_NUMERIC_SORTSUPPORT
+            | F_BTFLOAT4SORTSUPPORT
+            | F_BTFLOAT8SORTSUPPORT
+    )
+}
+
+// C OidFunctionCall1's the registered BTSORTSUPPORT_PROC whatever its oid
+// (sortsupport.c FinishSortSupportFunction): a LANGUAGE internal alias of a
+// builtin routine is that routine; any other proc installs no comparator here
+// and rides the BTORDER_PROC shim, as C does when the routine declines.
+fn canonical_sortsupport_proc(proc_oid: Oid) -> PgResult<Oid> {
+    if proc_oid == 0 || is_builtin_sortsupport(proc_oid) {
+        return Ok(proc_oid);
+    }
+    if ::fmgr_seams::internal_builtin_oid::is_installed() {
+        if let Some(builtin) = ::fmgr_seams::internal_builtin_oid::call(proc_oid)? {
+            if is_builtin_sortsupport(builtin) {
+                return Ok(builtin);
+            }
+        }
+    }
+    Ok(0)
+}
+
 /// The MJExamineQuals (nodeMergejoin.c) comparator resolve: BTSORTSUPPORT_PROC
 /// for (lefttype,righttype), else the BTORDER_PROC shim — a missing shim proc
 /// ereports as C does; an out-of-enum sortsupport routine panics loudly
@@ -594,8 +653,12 @@ pub fn comparator_for_opfamily(
     righttype: Oid,
     collation: Oid,
 ) -> PgResult<SortComparator> {
-    let sort_support_function =
-        lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTSORTSUPPORT_PROC as i16)?;
+    let sort_support_function = canonical_sortsupport_proc(lsyscache::get_opfamily_proc(
+        opfamily,
+        lefttype,
+        righttype,
+        BTSORTSUPPORT_PROC as i16,
+    )?)?;
     Ok(match sort_support_function {
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
         F_BTFLOAT4SORTSUPPORT => SortComparator::Float32,
@@ -747,8 +810,12 @@ pub fn comparator_for_index_col(
     opcintype: Oid,
     collation: Oid,
 ) -> PgResult<SortComparator> {
-    let ssup_proc =
-        lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTSORTSUPPORT_PROC as i16)?;
+    let ssup_proc = canonical_sortsupport_proc(lsyscache::get_opfamily_proc(
+        opfamily,
+        opcintype,
+        opcintype,
+        BTSORTSUPPORT_PROC as i16,
+    )?)?;
     Ok(match ssup_proc {
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
         F_BTFLOAT4SORTSUPPORT => SortComparator::Float32,
@@ -832,5 +899,33 @@ mod name_ssup_tests {
         apple[..5].copy_from_slice(b"apple");
         assert!(namefastcmp_c(&zebra, &apple) < 0);
         assert_eq!(name_cstr(&zebra), b"Zebra");
+    }
+}
+
+#[cfg(test)]
+mod invert_tests {
+    use super::*;
+
+    fn int_min_cmp(_: Datum, _: Datum, _: Oid, _: Mcx<'_>) -> PgResult<i32> {
+        Ok(i32::MIN)
+    }
+
+    #[test]
+    fn reverse_inverts_int_min() {
+        assert_eq!(invert_compare_result(i32::MIN), 1);
+        assert_eq!(invert_compare_result(-1), 1);
+        assert_eq!(invert_compare_result(0), 0);
+        assert_eq!(invert_compare_result(7), -7);
+        let ssup = SortSupport {
+            ssup_collation: 0,
+            ssup_reverse: true,
+            ssup_nulls_first: false,
+            ssup_attno: 1,
+            comparator: SortComparator::GistOpclass(int_min_cmp),
+        };
+        let m = ::mcx::MemoryContext::new("invert-test");
+        let (a, b) = (Datum::from_i32(1), Datum::from_i32(2));
+        assert_eq!(apply_sort_comparator_as_in(ssup.comparator, m.mcx(), a, false, b, false, &ssup), 1);
+        assert_eq!(apply_sort_comparator_in(m.mcx(), a, false, b, false, &ssup), 1);
     }
 }

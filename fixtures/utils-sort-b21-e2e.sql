@@ -1,0 +1,84 @@
+-- bugs/batch-21-backend-utils-sort: C-vs-pgrust parity for the fixes in
+-- utils/sort/{tuplesort,tuplestore}. Expected file captured from C 18.6
+-- (scripts/regress-diff.sh --capture).
+\set VERBOSITY verbose
+
+-- ssup: a PL comparator that runs a nested sort (comparison-shim re-entry)
+CREATE FUNCTION b21_nested_int4cmp(a int, b int) RETURNS int LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE r int[];
+BEGIN
+  SELECT array_agg(v ORDER BY v) INTO r FROM (VALUES (ARRAY[2]), (ARRAY[1])) s(v);
+  RETURN btint4cmp(a, b);
+END $$;
+CREATE OPERATOR CLASS b21_nested_int_ops FOR TYPE integer USING btree AS
+  OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,
+  FUNCTION 1 b21_nested_int4cmp(int,int);
+CREATE TABLE b21_nested(i int);
+INSERT INTO b21_nested VALUES (3),(1),(2),(5),(4);
+CREATE INDEX b21_nested_idx ON b21_nested (i b21_nested_int_ops);
+SET enable_seqscan = off; SET enable_bitmapscan = off;
+SELECT i FROM b21_nested ORDER BY i;
+CLUSTER b21_nested USING b21_nested_idx;
+SELECT ctid, i FROM b21_nested;
+RESET enable_seqscan; RESET enable_bitmapscan;
+
+-- ssup: a LANGUAGE internal alias of a builtin sortsupport routine is that
+-- routine (index build and ordering-operator paths)
+CREATE FUNCTION b21_my_ss(internal) RETURNS void AS 'btint4sortsupport' LANGUAGE internal IMMUTABLE STRICT;
+CREATE OPERATOR <# (LEFTARG = int, RIGHTARG = int, FUNCTION = int4lt);
+CREATE OPERATOR ># (LEFTARG = int, RIGHTARG = int, FUNCTION = int4gt);
+CREATE OPERATOR CLASS b21_alias_int_ops FOR TYPE integer USING btree AS
+  OPERATOR 1 <#, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >#,
+  FUNCTION 1 btint4cmp(integer,integer), FUNCTION 2 b21_my_ss(internal);
+CREATE TABLE b21_alias(i integer);
+INSERT INTO b21_alias VALUES (2),(1),(3),(NULL);
+CREATE INDEX b21_alias_idx ON b21_alias(i b21_alias_int_ops);
+SET enable_seqscan = off; SET enable_bitmapscan = off;
+SELECT i FROM b21_alias ORDER BY i;
+RESET enable_seqscan; RESET enable_bitmapscan;
+SET enable_indexscan = off;
+SELECT i FROM b21_alias ORDER BY i USING <#;
+SELECT i FROM b21_alias ORDER BY i USING ># NULLS FIRST;
+RESET enable_indexscan;
+
+-- ssup: INVERT_COMPARE_RESULT — a comparator returning INT_MIN under DESC
+CREATE FUNCTION b21_intmin_cmp(a int, b int) RETURNS int LANGUAGE sql IMMUTABLE STRICT AS
+  $$ SELECT CASE WHEN $1 < $2 THEN '-2147483648'::integer WHEN $1 > $2 THEN 1 ELSE 0 END $$;
+CREATE OPERATOR <<< (LEFTARG = int, RIGHTARG = int, FUNCTION = int4lt);
+CREATE OPERATOR >>> (LEFTARG = int, RIGHTARG = int, FUNCTION = int4gt);
+CREATE OPERATOR CLASS b21_intmin_ops FOR TYPE integer USING btree AS
+  OPERATOR 1 <<<, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >>>,
+  FUNCTION 1 b21_intmin_cmp(int,int);
+CREATE TABLE b21_intmin(a int);
+INSERT INTO b21_intmin SELECT g FROM generate_series(1,12) g;
+CREATE INDEX b21_intmin_idx ON b21_intmin (a b21_intmin_ops DESC);
+SET enable_seqscan = off; SET enable_bitmapscan = off;
+SELECT a FROM b21_intmin ORDER BY a USING >>>;
+RESET enable_seqscan; RESET enable_bitmapscan;
+SET enable_indexscan = off;
+SELECT array_agg(a ORDER BY a USING >>>) FROM b21_intmin;
+SELECT array_agg(a ORDER BY a USING <<<) FROM b21_intmin;
+RESET enable_indexscan;
+
+-- tuplestore: two scans of one spilled transition table, each holding its
+-- row across the other's reads (nested loop, copy=false)
+SET work_mem = '64kB'; SET enable_material = off; SET enable_hashjoin = off; SET enable_mergejoin = off;
+CREATE TABLE b21_tt(id int, pad text);
+CREATE TABLE b21_tlog(aid int, apad text, bid int, bpad text);
+CREATE FUNCTION b21_tt_trig() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO b21_tlog SELECT a.id, a.pad, b.id, b.pad FROM nt a CROSS JOIN nt b WHERE a.id = 7 LIMIT 3;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER b21_tt_after AFTER INSERT ON b21_tt REFERENCING NEW TABLE AS nt FOR EACH STATEMENT EXECUTE FUNCTION b21_tt_trig();
+INSERT INTO b21_tt SELECT g, lpad(g::text, 1000, 'x') FROM generate_series(1,1000) g;
+SELECT aid, right(apad, 5), bid, right(bpad, 5) FROM b21_tlog ORDER BY bid;
+RESET work_mem; RESET enable_material; RESET enable_hashjoin; RESET enable_mergejoin;
+
+-- tuplestore: merge join over a marked Materialize (trim frees tuples)
+SET enable_hashjoin = off; SET enable_nestloop = off; SET work_mem = '64kB'; SET max_parallel_workers_per_gather = 0;
+CREATE TABLE b21_mj1 AS SELECT g AS k, repeat('a', 200) AS p FROM generate_series(1, 3000) g;
+CREATE TABLE b21_mj2 AS SELECT g / 3 AS k, repeat('b', 200) AS q FROM generate_series(3, 9000) g;
+ANALYZE b21_mj1; ANALYZE b21_mj2;
+SELECT count(*), sum(length(a.p) + length(b.q)), min(a.k), max(b.k) FROM b21_mj1 a JOIN b21_mj2 b ON a.k = b.k;
+RESET enable_hashjoin; RESET enable_nestloop; RESET work_mem; RESET max_parallel_workers_per_gather;
