@@ -502,7 +502,25 @@ pub fn recover_and_clean(
         current_repointed,
         ..RecoveryReport::default()
     };
-    for name in vfs.list_dir(dir)? {
+    let names = vfs.list_dir(dir)?;
+    // Parts of a generation past the effective one whose publisher is still
+    // in progress are kept with that generation's manifest (the manifest and
+    // bankstats branches below spare it; its parts must survive too).
+    let mut in_progress_parts: std::collections::BTreeSet<u32> = Default::default();
+    for name in &names {
+        let Some(g) = parse_manifest_file_name(name) else {
+            continue;
+        };
+        if g <= eff_gen {
+            continue;
+        }
+        if let Some(m) = read_manifest_opt(vfs, dir, g) {
+            if probe.verdict(m.header.publisher_fxid) == TxnVerdict::InProgress {
+                in_progress_parts.extend(m.parts.iter().map(|p| p.part_no));
+            }
+        }
+    }
+    for name in names {
         let remove = if dirlayout::is_temp_file_name(&name) {
             match parse_temp_fxid(&name) {
                 // A live writer's scratch stays; everything else is dead.
@@ -511,7 +529,7 @@ pub fn recover_and_clean(
             }
         } else if let Some(pn) = parse_part_file_name(&name) {
             // Renamed by a publish whose txn never committed → orphan.
-            !live_parts.contains(&pn)
+            !live_parts.contains(&pn) && !in_progress_parts.contains(&pn)
         } else if let Some(g) = parse_manifest_file_name(&name) {
             if g <= eff_gen {
                 false // chain history, immutable, cheap — kept.

@@ -403,6 +403,19 @@ impl TableWriter {
         self.cut_part(env)
     }
 
+    /// `finish` for a writer already taken out of the registry: a failure
+    /// aborts the writer (sealed temps unlinked) before surfacing, since no
+    /// at_eoxact sweep covers it any more.
+    pub fn finish_or_abort(&mut self, env: &mut SealEnv<'_>) -> WriteResult<()> {
+        match self.finish(env) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = self.abort(env.vfs);
+                Err(e)
+            }
+        }
+    }
+
     /// The parallel-ingest seam, fact side (chunk M3-I). The rtpool BINDING
     /// lives one crate up (`pgrc2_ingest_par` — a `runtime` dependency here
     /// would close the `pgrc2_am → pgrc2_write` cycle #473 introduced); it
@@ -478,6 +491,21 @@ impl TableWriter {
         )?;
         self.sealed.clear();
         Ok(outcome)
+    }
+
+    /// `publish` with the `finish_or_abort` failure contract.
+    pub fn publish_or_abort(
+        &mut self,
+        vfs: &mut dyn WriteVfs,
+        probe: &dyn TxnProbe,
+    ) -> WriteResult<PublishOutcome> {
+        match self.publish(vfs, probe) {
+            Ok(o) => Ok(o),
+            Err(e) => {
+                let _ = self.abort(vfs);
+                Err(e)
+            }
+        }
     }
 
     /// Abort: unlink this writer's temp files, drop buffered rows. Missing

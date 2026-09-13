@@ -33,7 +33,8 @@ pub use scan::{
     ZoneCmp, ZoneQual,
 };
 pub use writer::{
-    at_eoxact, begin_parallel_ingest, coltypes_of, finish_bulk_insert, multi_insert, tuple_insert,
+    at_eoxact, at_subxact_abort, at_subxact_commit, begin_parallel_ingest, coltypes_of,
+    finish_bulk_insert, multi_insert, tuple_insert,
     CbWriter, ColOrderProbe, EncodedRg, ParallelIngestPlan, RgChunkEncoder,
 };
 

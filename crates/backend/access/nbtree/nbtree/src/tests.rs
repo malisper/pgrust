@@ -207,13 +207,14 @@ fn install() {
         // toast_compress_datum stand-in (index_form_tuple's TOAST_INDEX_HACK
         // arm): a run of one byte "compresses" to a 16-byte image with a
         // compressed 4B header; anything else is incompressible (None), the
-        // way pglz reports random bytes.
+        // way pglz reports random bytes. The buffer is sized for the
+        // uncompressed input, as pglz_compress_datum's is.
         heaptoast_seams::toast_compress_datum::set(|mcx, value, _cmethod| {
             let payload = &value[4..];
             if payload.len() < 32 || payload.iter().any(|b| *b != payload[0]) {
                 return Ok(None);
             }
-            let mut v: PgVec<'_, u8> = ::mcx::vec_with_capacity_in(mcx, 16)?;
+            let mut v: PgVec<'_, u8> = ::mcx::vec_with_capacity_in(mcx, 16 + payload.len())?;
             // VARATT_IS_4B_C: little-endian (len << 2) | 0x02
             ::mcx::vec_append_bytes(&mut v, &((16u32 << 2) | 0x02).to_le_bytes())?;
             // va_tcinfo: rawsize (cmethod bits 0 = pglz)
@@ -2087,6 +2088,31 @@ fn index_form_tuple_compresses_varlenas_over_toast_index_target() {
         sz >= 404,
         "400-byte value is under the target and stays raw, got {sz} bytes"
     );
+}
+
+// index_form_tuple_context (indextuple.c:184): the compressed temporary is
+// pfree'd after heap_fill_tuple; only the returned tuple is charged to the
+// caller's context. Leaking the input-sized compression buffer into
+// tuplesort's tuplecontext grew a 30k-row compressible expression-index
+// build by ~415 MB where C peaks at 36 MB.
+#[test]
+fn index_form_tuple_frees_compression_temporaries() {
+    install();
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let td = audit_tupdesc(mcx, &[(-1, false, ::types_tuple::TYPSTORAGE_EXTENDED)]);
+    let big = varlena_datum(mcx, &[b'a'; 4096]);
+    let before = cx.stats().used;
+    let mut kept = Vec::new();
+    for _ in 0..64 {
+        kept.push(crate::itup::index_form_tuple(mcx, &td, &[big], &[false]).unwrap());
+    }
+    let grown = cx.stats().used - before;
+    assert!(
+        grown < 64 * 256,
+        "64 compressed index tuples must not retain their compression scratch, grew {grown} bytes"
+    );
+    drop(kept);
 }
 
 // index_truncate_tuple (indextuple.c:591): CreateTupleDescTruncatedCopy

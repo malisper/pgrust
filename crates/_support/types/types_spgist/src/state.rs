@@ -358,8 +358,10 @@ pub struct SpGistScanOpaqueData<'mcx> {
     // numberOfOrderBys IndexOrderByDistance entries per reported item (None
     // for null items); parallel to heapPtrs
     pub distances: Vec<Option<Vec<::types_gist::state::IndexOrderByDistance>>>,
-    // reconstructed index-tuple images for IOS, packed 8-aligned; per-item
-    // byte offsets in recon_offs (scan-lifetime scratch, reset per page)
+    // reconstructed heap-tuple images for IOS (C reconTups), packed
+    // 8-aligned; per-item byte offsets/lengths (scan-lifetime scratch, reset
+    // per page)
     pub recon_buf: Vec<u8>,
     pub recon_offs: [u32; MaxIndexTuplesPerPage],
+    pub recon_lens: [u32; MaxIndexTuplesPerPage],
 }

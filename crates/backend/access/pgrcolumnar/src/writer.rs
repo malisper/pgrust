@@ -636,6 +636,10 @@ pub struct CbWriter {
     // (tuple_insert buffers until the statement-end flush), so a writer left
     // behind by an errored statement must not leak rows into the next one.
     cid: ::types_core::CommandId,
+    // Subtransaction that opened this writer: a writer abandoned by an
+    // errored statement dies with its subtransaction (at_subxact_abort),
+    // the way C's COPY state dies with the statement's memory contexts.
+    subid: ::types_core::SubTransactionId,
     frozen: bool,
     ncols: usize,
     coltypes: Vec<ColType>,
@@ -774,7 +778,7 @@ impl Drop for CbWriter {
     }
 }
 
-fn open_writer(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
+fn open_writer(rel: &::types_rel::Relation<'_>, cid: ::types_core::CommandId) -> PgResult<CbWriter> {
     claim_part_writer(rel.rd_id)?;
     let released_on_error = ReleaseOnError(rel.rd_id);
     let coltypes = coltypes_of(rel)?;
@@ -806,9 +810,9 @@ fn open_writer(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
     let fingerprint = schema_fingerprint(
         &rel.rd_att.attrs.iter().map(|a| (a.atttypid, a.attlen)).collect::<Vec<_>>(),
     );
-    let cid = xact_seams::get_current_command_id::call(false)?;
     let mut w = open_writer_inner(file, xid, cid, frozen_ok, coltypes, fingerprint, opts)?;
     w.lock_oid = rel.rd_id;
+    w.subid = cur_subid;
     std::mem::forget(released_on_error);
     if !w.opts.cluster_key.is_empty() || !w.opts.presort_key.is_empty() {
         // presort_key is only resolved when no cluster_key is declared
@@ -857,6 +861,7 @@ fn open_writer_inner(
         file,
         xid,
         cid,
+        subid: ::types_core::InvalidSubTransactionId,
         // Freeze-on-load: first write into a file created by our own
         // transaction (empty part) makes RGs all-visible-on-commit.
         frozen: false,
@@ -1706,7 +1711,7 @@ impl RgChunkEncoder {
 /// decision all identical to serial COPY. The caller owns admission (checked
 /// BEFORE opening: pgrcolumnar AM, no cluster key — `writer_opts_of`).
 pub fn begin_parallel_ingest(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
-    open_writer(rel)
+    open_writer(rel, xact_seams::get_current_command_id::call(false)?)
 }
 
 /// load-r2 L3-1: the parallel load-sort opens the writer PLAIN — the sort
@@ -1716,7 +1721,7 @@ pub fn begin_parallel_ingest(rel: &::types_rel::Relation<'_>) -> PgResult<CbWrit
 /// the open installed is dropped here; opts.presort_key stays as the
 /// caller's key-spec record.
 pub fn begin_parallel_ingest_presorted(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
-    let mut w = open_writer(rel)?;
+    let mut w = open_writer(rel, xact_seams::get_current_command_id::call(false)?)?;
     w.sorter = None;
     Ok(w)
 }
@@ -2559,13 +2564,17 @@ fn push_varlena_image(body: &mut Vec<u8>, s: &[u8]) {
 
 // ---- AM entry points -------------------------------------------------------
 
+/// `cid` is the caller's per-statement command id (C's `table_multi_insert`
+/// argument: COPY's mycid, ModifyTable's es_output_cid), not the live
+/// counter — a BEFORE ROW trigger body's DML bumps the counter mid-statement,
+/// which used to evict (and silently drop) the statement's own writer.
 pub fn multi_insert<'mcx>(
     rel: &::types_rel::Relation<'mcx>,
     slots: &mut [&mut ::types_slot::SlotData<'mcx>],
+    cid: ::types_core::CommandId,
 ) -> PgResult<()> {
     let oid = rel.rd_id;
     let xid = xact_seams::get_current_transaction_id::call()?;
-    let cid = xact_seams::get_current_command_id::call(false)?;
     WRITERS.with(|w| {
         let mut map = w.borrow_mut();
         // Evict writers from another transaction OR another command: buffered
@@ -2577,7 +2586,7 @@ pub fn multi_insert<'mcx>(
             map.remove(&oid);
         }
         if !map.contains_key(&oid) {
-            map.insert(oid, open_writer(rel)?);
+            map.insert(oid, open_writer(rel, cid)?);
         }
         let cw = map.get_mut(&oid).unwrap();
         for slot in slots.iter_mut() {
@@ -2598,6 +2607,7 @@ pub fn multi_insert<'mcx>(
 pub fn tuple_insert<'mcx>(
     rel: &::types_rel::Relation<'mcx>,
     slot: &mut ::types_slot::SlotData<'mcx>,
+    cid: ::types_core::CommandId,
 ) -> PgResult<()> {
     // Single-row inserts buffer like COPY: the row joins the per-(xid, cid)
     // ingest writer and the statement-end flush (ExecModifyTable's pgrcolumnar
@@ -2605,7 +2615,7 @@ pub fn tuple_insert<'mcx>(
     // old finish-per-row form sealed ONE ROW GROUP PER ROW on INSERT..SELECT
     // (24 GB for 2M rows), each with a full footer rewrite.
     let mut slots = [slot];
-    multi_insert(rel, &mut slots)
+    multi_insert(rel, &mut slots, cid)
 }
 
 pub fn finish_bulk_insert(rel: &::types_rel::Relation<'_>) -> PgResult<()> {
@@ -2614,13 +2624,15 @@ pub fn finish_bulk_insert(rel: &::types_rel::Relation<'_>) -> PgResult<()> {
         let Some(mut cw) = w.borrow_mut().remove(&oid) else {
             return Ok(());
         };
-        // Never publish a writer abandoned by an errored statement (or a
-        // rolled-back subtransaction): a later statement's flush must drop
-        // it, not commit its buffered rows. Mirror of multi_insert's stale
-        // eviction; probes without get_current_transaction_id so a row-less
-        // statement doesn't force an xid assignment.
+        // Never publish a writer from another transaction, or one stamped
+        // by a command the counter has not reached (a writer abandoned by
+        // an errored statement is purged with its subtransaction). The
+        // statement's cid may trail the live counter: BEFORE ROW trigger
+        // bodies increment it mid-statement. Probes without
+        // get_current_transaction_id so a row-less statement doesn't force
+        // an xid assignment.
         if !xact_seams::transaction_id_is_current_transaction_id::call(cw.xid)
-            || cw.cid != xact_seams::get_current_command_id::call(false)?
+            || cw.cid > xact_seams::get_current_command_id::call(false)?
         {
             return Ok(());
         }
@@ -2644,6 +2656,27 @@ pub fn finish_bulk_insert(rel: &::types_rel::Relation<'_>) -> PgResult<()> {
 /// context reset.
 pub fn at_eoxact() {
     WRITERS.with(|w| w.borrow_mut().clear());
+}
+
+/// Subtransaction abort: drop (never publish) every writer opened in it —
+/// an errored statement unwinds past its finish and leaves its writer here.
+pub fn at_subxact_abort(subid: ::types_core::SubTransactionId) {
+    WRITERS.with(|w| w.borrow_mut().retain(|_, cw| cw.subid != subid));
+}
+
+/// Subtransaction commit: its writers now belong to the parent (relcache's
+/// rd_createSubid reparenting).
+pub fn at_subxact_commit(
+    subid: ::types_core::SubTransactionId,
+    parent: ::types_core::SubTransactionId,
+) {
+    WRITERS.with(|w| {
+        for cw in w.borrow_mut().values_mut() {
+            if cw.subid == subid {
+                cw.subid = parent;
+            }
+        }
+    });
 }
 
 #[cfg(test)]

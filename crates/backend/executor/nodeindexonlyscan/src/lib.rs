@@ -153,27 +153,42 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                 tuple_from_heap = true;
             }
 
-            // xs_hitup arm pending an AM that returns whole heap tuples.
-            let Some(itup) = scandesc.xs_itup else {
-                return Err(no_data_returned());
-            };
-            let itupdesc = scandesc
-                .xs_itupdesc
-                .as_deref()
-                .expect("amgettuple published xs_itup without xs_itupdesc");
-            // SAFETY: xs_itup points at the AM's page-copy buffer, live until
-            // the next amgettuple/amendscan on this descriptor.
-            unsafe {
-                let (slot, per_tuple_mcx) = estate.slot_and_per_tuple_mcx(slot_id, ecxt);
-                store_index_tuple(
-                    slot,
-                    mcx,
-                    per_tuple_mcx,
-                    itup.as_ptr(),
-                    itupdesc,
-                    ioss_NameCStringAttNums,
-                )
-            };
+            if let Some(hitup) = scandesc.xs_hitup.as_ref() {
+                // C nodeIndexonlyscan.c:216: ExecForceStoreHeapTuple(xs_hitup,
+                // slot, false).
+                // SAFETY: xs_hitup aliases the AM's reconstructed-tuple
+                // scratch, live until the next amgettuple on this descriptor.
+                let view = unsafe {
+                    ::types_tuple::htup::HeapTupleData::from_raw_parts(
+                        hitup.header_ptr(),
+                        hitup.t_len,
+                        hitup.t_self,
+                        hitup.t_tableOid,
+                    )
+                };
+                exectuples::exec_force_store_heap_tuple(view, estate.slot_mut(slot_id), mcx)?;
+            } else {
+                let Some(itup) = scandesc.xs_itup else {
+                    return Err(no_data_returned());
+                };
+                let itupdesc = scandesc
+                    .xs_itupdesc
+                    .as_deref()
+                    .expect("amgettuple published xs_itup without xs_itupdesc");
+                // SAFETY: xs_itup points at the AM's page-copy buffer, live until
+                // the next amgettuple/amendscan on this descriptor.
+                unsafe {
+                    let (slot, per_tuple_mcx) = estate.slot_and_per_tuple_mcx(slot_id, ecxt);
+                    store_index_tuple(
+                        slot,
+                        mcx,
+                        per_tuple_mcx,
+                        itup.as_ptr(),
+                        itupdesc,
+                        ioss_NameCStringAttNums,
+                    )
+                };
+            }
 
             // Lossy index: recheck the index quals (ExecQualAndReset shape).
             // Btree never sets xs_recheck. SubPlan-carrying quals route

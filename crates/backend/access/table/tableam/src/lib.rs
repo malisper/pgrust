@@ -2537,9 +2537,25 @@ fn ensure_pgrcolumnar_eoxact_registered() {
     CB_EOXACT_REGISTERED.with(|c| {
         if !c.get() {
             xact::RegisterXactCallback(pgrcolumnar_eoxact_callback, ::datum::Datum::null());
+            xact::RegisterSubXactCallback(pgrcolumnar_subxact_callback, ::datum::Datum::null());
             c.set(true);
         }
     });
+}
+
+fn pgrcolumnar_subxact_callback(
+    event: ::types_core::xact::SubXactEvent,
+    my_subid: ::types_core::SubTransactionId,
+    parent_subid: ::types_core::SubTransactionId,
+    _arg: ::datum::Datum,
+) -> PgResult<()> {
+    use ::types_core::xact::SubXactEvent::*;
+    match event {
+        SUBXACT_EVENT_ABORT_SUB => ::pgrcolumnar::at_subxact_abort(my_subid),
+        SUBXACT_EVENT_COMMIT_SUB => ::pgrcolumnar::at_subxact_commit(my_subid, parent_subid),
+        SUBXACT_EVENT_START_SUB | SUBXACT_EVENT_PRE_COMMIT_SUB => {}
+    }
+    Ok(())
 }
 
 pub fn table_tuple_insert<'mcx>(
@@ -2553,10 +2569,10 @@ pub fn table_tuple_insert<'mcx>(
     match am(rel) {
         TableAm::Heap => heap::tuple_insert(mcx, rel, slot, cid, options, bistate),
         TableAm::Pgrcolumnar => {
-            let _ = (cid, options, bistate);
+            let _ = (options, bistate);
             ensure_pgrcolumnar_eoxact_registered();
             exectuples::exec_materialize_slot(slot, mcx)?;
-            ::pgrcolumnar::tuple_insert(rel, slot)
+            ::pgrcolumnar::tuple_insert(rel, slot, cid)
         }
         TableAm::Pgrcolumnar2 => {
             let _ = (cid, options, bistate);
@@ -2619,9 +2635,9 @@ pub fn table_multi_insert<'mcx>(
     match am(rel) {
         TableAm::Heap => heap::multi_insert(mcx, rel, slots, cid, options, bistate),
         TableAm::Pgrcolumnar => {
-            let _ = (mcx, cid, options, bistate);
+            let _ = (mcx, options, bistate);
             ensure_pgrcolumnar_eoxact_registered();
-            ::pgrcolumnar::multi_insert(rel, slots)
+            ::pgrcolumnar::multi_insert(rel, slots, cid)
         }
         TableAm::Pgrcolumnar2 => {
             let _ = (cid, options, bistate);

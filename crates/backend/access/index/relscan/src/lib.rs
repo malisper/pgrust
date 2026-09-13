@@ -487,6 +487,10 @@ pub struct IndexScanDescData<'mcx> {
     // the next amgettuple/amrescan/amendscan on this descriptor.
     pub xs_itup: Option<core::ptr::NonNull<u8>>,
     pub xs_itupdesc: Option<Rc<TupleDescData<'mcx>>>,
+    // C xs_hitup: a reconstructed heap tuple (spgist/gist IOS) aliasing the
+    // AM's scratch, live until the next amgettuple/amrescan/amendscan.
+    pub xs_hitup: Option<::types_tuple::htup::HeapTupleData<'mcx>>,
+    pub xs_hitupdesc: Option<Rc<TupleDescData<'mcx>>>,
     pub xs_temp_snap: bool,
     // 'mcx-erased xs_snapshot copy: the 'static Rc UnregisterSnapshot needs.
     pub xs_temp_snapshot: Option<Rc<SnapshotData<'static>>>,
@@ -573,6 +577,8 @@ pub fn relation_get_index_scan<'mcx>(
         xs_want_itup: false,
         xs_itup: None,
         xs_itupdesc: None,
+        xs_hitup: None,
+        xs_hitupdesc: None,
         xs_temp_snap: false,
         xs_temp_snapshot: None,
         kill_prior_tuple: false,

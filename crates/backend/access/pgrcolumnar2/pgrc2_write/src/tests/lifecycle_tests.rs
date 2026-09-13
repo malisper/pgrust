@@ -103,6 +103,98 @@ fn crashed_writer_temp_removed_by_recovery_scan() {
         .contains(&"tmp-61-0.pgrc2t".to_string()));
 }
 
+/// A writer taken for publish is outside the at_eoxact sweep: a failed
+/// publish must unlink its sealed temps itself (finish_bulk's error paths
+/// used to drop the writer and leave every tmp-* on disk).
+#[test]
+fn failed_publish_aborts_sealed_temps() {
+    let mut vfs = mem_with_dir();
+    let mut kit = Kit::new();
+    let committed = Probe::new(TxnVerdict::Committed);
+    let mut w1 = open_writer(vec![int8_col(1)], stamp(90, 1));
+    append_int8_rows(&mut w1, &mut vfs, &mut kit, 10, |i| Some(i as i64));
+    finish_and_publish(&mut w1, &mut vfs, &mut kit, &committed);
+
+    // Same table dir, different schema fingerprint: publish refuses with
+    // "manifest base identity mismatch" after the temps were sealed.
+    let mut w2 = open_writer(vec![int8_col(1), int8_col(2)], stamp(91, 1));
+    for i in 0..10u64 {
+        let sources: [&dyn crate::elect::CandidateSource; 1] = [&kit.cands];
+        let mut env = SealEnv {
+            vfs: &mut vfs,
+            sources: &sources,
+            resolver: &kit.resolver,
+            shred: &mut kit.shred,
+            shred_opts: &kit.opts,
+        };
+        w2.append_row(&[RawDatum::Word(i), RawDatum::Word(i)], &mut kit.ext, &mut env)
+            .expect("append");
+    }
+    {
+        let sources: [&dyn crate::elect::CandidateSource; 1] = [&kit.cands];
+        let mut env = SealEnv {
+            vfs: &mut vfs,
+            sources: &sources,
+            resolver: &kit.resolver,
+            shred: &mut kit.shred,
+            shred_opts: &kit.opts,
+        };
+        w2.finish_or_abort(&mut env).expect("finish");
+    }
+    assert!(vfs
+        .list_dir(DIR)
+        .expect("list")
+        .iter()
+        .any(|n| pgrc2_format::dirlayout::is_temp_file_name(n)));
+    assert!(w2.publish_or_abort(&mut vfs, &committed).is_err());
+    let names = vfs.list_dir(DIR).expect("list");
+    assert!(
+        !names.iter().any(|n| pgrc2_format::dirlayout::is_temp_file_name(n)),
+        "failed publish leaked temps: {names:?}"
+    );
+    assert!(w2.sealed_parts().is_empty());
+}
+
+/// Recovery keeps an in-progress publisher's generation whole: its manifest
+/// AND its part files survive (the part branch used to unlink every part
+/// outside the effective manifest, leaving the kept manifest dangling).
+#[test]
+fn recovery_keeps_in_progress_generation_parts() {
+    let mut vfs = mem_with_dir();
+    let mut kit = Kit::new();
+    let committed = Probe::new(TxnVerdict::Committed);
+    let mut w1 = open_writer(vec![int8_col(1)], stamp(80, 1));
+    append_int8_rows(&mut w1, &mut vfs, &mut kit, 10, |i| Some(i as i64));
+    let gen1 = finish_and_publish(&mut w1, &mut vfs, &mut kit, &committed);
+    assert_eq!(gen1.gen, 1);
+
+    let mut w2 = open_writer(vec![int8_col(1)], stamp(81, 1));
+    append_int8_rows(&mut w2, &mut vfs, &mut kit, 10, |i| Some(i as i64));
+    let probe = Probe::new(TxnVerdict::Committed).set(81, TxnVerdict::InProgress);
+    let gen2 = finish_and_publish(&mut w2, &mut vfs, &mut kit, &probe);
+    assert_eq!(gen2.gen, 2);
+    assert!(!gen2.part_nos.is_empty());
+
+    let rep = recover_and_clean(&mut vfs, DIR, &probe).expect("clean");
+    assert_eq!(rep.effective_gen, 1);
+    let names = vfs.list_dir(DIR).expect("list");
+    assert!(names.contains(&"manifest-2.pgrc2m".to_string()), "{names:?}");
+    for pn in &gen2.part_nos {
+        assert!(
+            names.contains(&format!("part-{pn}.pgrc2")),
+            "in-progress gen 2 part {pn} reaped: {names:?}"
+        );
+    }
+    // Once the publisher is known aborted, the whole generation goes.
+    let aborted = Probe::new(TxnVerdict::Committed).set(81, TxnVerdict::Aborted);
+    recover_and_clean(&mut vfs, DIR, &aborted).expect("clean");
+    let names = vfs.list_dir(DIR).expect("list");
+    assert!(!names.contains(&"manifest-2.pgrc2m".to_string()), "{names:?}");
+    for pn in &gen2.part_nos {
+        assert!(!names.contains(&format!("part-{pn}.pgrc2")), "{names:?}");
+    }
+}
+
 /// The freeze belt decision table (old-writer parity): frozen iff the
 /// current subxact is valid AND (created-in-it OR relfilelocator-minted-in
 /// -it). Silent downgrade otherwise — never an error.

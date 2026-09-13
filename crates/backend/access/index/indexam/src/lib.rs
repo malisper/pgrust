@@ -1274,6 +1274,8 @@ mod mock {
             xs_itup: None,
             // Scripted images are stored in the index's own descriptor.
             xs_itupdesc: Some(indexRelation.rd_att.clone()),
+            xs_hitup: None,
+            xs_hitupdesc: None,
             xs_temp_snap: false,
             xs_temp_snapshot: None,
             kill_prior_tuple: false,

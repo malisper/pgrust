@@ -106,8 +106,11 @@ fn full_xid_from_allowable_at(next_full: FullTransactionId, xid: TransactionId) 
     }
     let mut epoch = next_full.epoch();
     if xid > next_full.xid() {
-        // xid can't be from next_full's (not-yet-issued) epoch — it's the prior.
-        epoch = epoch.saturating_sub(1);
+        // xid can't be from next_full's (not-yet-issued) epoch — it's the
+        // prior one; C's `epoch--` wraps in epoch 0, which keeps a
+        // future-xid fxid from reconstructing to itself (recent_past_xid's
+        // corruption tripwire).
+        epoch = epoch.wrapping_sub(1);
     }
     FullTransactionId::from_epoch_and_xid(epoch, xid)
 }
@@ -309,6 +312,20 @@ mod tests {
         assert_eq!(full_xid_from_allowable_at(next, 200).to_u64(), (2u64 << 32) | 200);
         // Non-normal xids are epoch-0.
         assert_eq!(full_xid_from_allowable_at(next, 2).to_u64(), 2);
+    }
+
+    // Bootstrap epoch: a recorded fxid (0 << 32 | xid) with xid beyond
+    // next_full's xid can't be reconstructed as itself — `epoch--` wraps as
+    // in C, so recent_past_xid sees a mismatch (Aliased) instead of Live.
+    #[test]
+    fn allowable_at_bootstrap_epoch_future_xid_does_not_roundtrip() {
+        let next = FullTransactionId::from_epoch_and_xid(0, 100);
+        let fxid: u64 = 200;
+        assert_ne!(full_xid_from_allowable_at(next, 200).to_u64(), fxid);
+        assert_eq!(
+            full_xid_from_allowable_at(next, 200).to_u64(),
+            ((u32::MAX as u64) << 32) | 200
+        );
     }
 
     // The security property: an aborted publisher from an OLDER epoch whose

@@ -15,7 +15,7 @@ use ::types_core::geo::{Point, BOX, CIRCLE};
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult};
 use ::types_fmgr::{byref_result, datum_varlena_packed, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
-use ::types_gist::{GistEntryVector, GistSplitVec, GISTENTRY};
+use ::types_gist::{GistEntryVector, GistSortSupportShim, GistSplitVec, GISTENTRY};
 
 use ::pg_qsort::pg_qsort;
 
@@ -804,16 +804,25 @@ fn fc_gist_point_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(Datum::from_f64(distance))
 }
 
-// gistproc.c:1745-1761: C fills the SortSupport fn pointers; here the sorted
-// build resolves proc 3435 to SortComparator::GistPointZorder (tuplesort
-// ssup over types_core::geo::gist_bbox_zorder_cmp), so the fmgr entry —
-// reachable only through a raw-SortSupport datum this port never forms —
-// stays a guard.
-fn fc_gist_point_sortsupport(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!(
-        "gist_point_sortsupport: sorted builds ride SortComparator::GistPointZorder, \
-         never through fmgr"
-    )
+// gistproc.c:1745-1761: the sorted build resolves proc 3435 itself
+// (SortComparator::GistPointZorder); an opclass naming an alias of this
+// function reaches it through fmgr with the GistSortSupportShim and gets
+// gist_bbox_zorder_cmp installed (abbreviation is skipped like every
+// index-build abbrev; the order is identical).
+fn fc_gist_point_sortsupport(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist sortsupport protocol (GistSortSupportShim).
+    let shim = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut GistSortSupportShim) };
+    shim.comparator = Some(|a: Datum, b: Datum, _collation, _mcx| {
+        // SAFETY: gist_point_compress leaf keys are live 32-byte BOX images.
+        let (a, b) = unsafe {
+            (
+                BOX::from_datum_bytes(core::slice::from_raw_parts(a.as_usize() as *const u8, 32)),
+                BOX::from_datum_bytes(core::slice::from_raw_parts(b.as_usize() as *const u8, 32)),
+            )
+        };
+        Ok(::types_core::geo::gist_bbox_zorder_cmp(&a, &b))
+    });
+    Ok(Datum::from_usize(0))
 }
 
 // gist_poly_compress: represent a polygon by its bounding box.
@@ -921,10 +930,6 @@ fn fc_gist_translate_cmptype_common(
     )))
 }
 
-fn fc_gisthandler(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("gisthandler: the closed AM set dispatches via IndexAmKind, never through fmgr")
-}
-
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: ::types_fmgr::PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -937,7 +942,7 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: ::types_fmgr::PGFunc
 }
 
 pub const GISTPROC_BUILTINS: &[FmgrBuiltin] = &[
-    b(332, "gisthandler", 1, fc_gisthandler),
+    b(332, "gisthandler", 1, ::types_fmgr::fc_am_handler_stub),
     b(1030, "gist_point_compress", 1, fc_gist_point_compress),
     b(2179, "gist_point_consistent", 5, fc_gist_point_consistent),
     b(2578, "gist_box_consistent", 5, fc_gist_box_consistent),

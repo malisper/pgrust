@@ -107,6 +107,7 @@ pub fn spgbeginscan<'mcx>(
         distances: Vec::new(),
         recon_buf: Vec::new(),
         recon_offs: [0u32; ::types_storage::bufpage::MaxIndexTuplesPerPage],
+        recon_lens: [0u32; ::types_storage::bufpage::MaxIndexTuplesPerPage],
     };
 
     let so = PgBox::new_in(so, mcx);
@@ -121,7 +122,7 @@ pub fn spgbeginscan<'mcx>(
     let IndexScanOpaque::Spgist(so) = &scan.opaque else {
         unreachable!()
     };
-    scan.xs_itupdesc = so.reconTupDesc.clone();
+    scan.xs_hitupdesc = so.reconTupDesc.clone();
     Ok(scan)
 }
 
@@ -309,7 +310,7 @@ pub fn spgrescan(
 
     scan.xs_pgstat_index_scans += 1;
     scan.xs_nsearches += 1;
-    scan.xs_itup = None;
+    scan.xs_hitup = None;
     Ok(())
 }
 
@@ -430,18 +431,19 @@ fn store_result(
                 leaf_isnulls[spgKeyColumn] = isnull;
 
                 let mcx = so.tempCxt.mcx();
-                let formed = ::nbtree::itup::index_form_tuple(
+                let formed = ::heaptuple::heap_form_tuple(
                     mcx,
                     &recon_desc,
                     &leaf_datums[..natts],
                     &leaf_isnulls[..natts],
                 )?;
                 let off = so.recon_buf.len() as u32;
-                so.recon_buf.extend_from_slice(formed.as_slice());
+                so.recon_buf.extend_from_slice(formed.image());
                 while so.recon_buf.len() % 8 != 0 {
                     so.recon_buf.push(0);
                 }
                 so.recon_offs[so.nPtrs] = off;
+                so.recon_lens[so.nPtrs] = formed.as_tuple().t_len;
             }
             so.nPtrs += 1;
         }
@@ -973,8 +975,17 @@ pub fn spggettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgRe
                 scan.xs_recheck = so.recheck[so.iPtr];
                 if want_itup {
                     let off = so.recon_offs[so.iPtr] as usize;
-                    scan.xs_itup =
-                        core::ptr::NonNull::new(so.recon_buf[off..].as_ptr() as *mut u8);
+                    // SAFETY: recon_buf holds the 8-aligned heap_form_tuple
+                    // image formed in storeGettuple, live until the next
+                    // page / rescan / endscan.
+                    scan.xs_hitup = Some(unsafe {
+                        ::types_tuple::htup::HeapTupleData::from_raw_parts(
+                            so.recon_buf[off..].as_ptr(),
+                            so.recon_lens[so.iPtr],
+                            ItemPointerData::invalid(),
+                            0,
+                        )
+                    });
                 }
                 if so.numberOfOrderBys > 0 {
                     // index_store_float8_orderby_distances (indexam.c).
@@ -1024,7 +1035,7 @@ pub fn spggettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgRe
             so.nPtrs = 0;
             so.distances.clear();
             so.recon_buf.clear();
-            scan.xs_itup = None;
+            scan.xs_hitup = None;
         }
 
         spg_walk(scan, false, StoreDest::Tuples)?;

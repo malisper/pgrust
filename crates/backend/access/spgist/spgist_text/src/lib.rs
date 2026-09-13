@@ -589,10 +589,6 @@ fn fc_spg_text_leaf_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     Ok(Datum::from_bool(res))
 }
 
-fn fc_spghandler(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("spghandler: the closed AM set dispatches via IndexAmKind, never through fmgr")
-}
-
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: ::types_fmgr::PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -605,7 +601,7 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: ::types_fmgr::PGFunc
 }
 
 pub const SPGIST_TEXT_BUILTINS: &[FmgrBuiltin] = &[
-    b(334, "spghandler", 1, fc_spghandler),
+    b(334, "spghandler", 1, ::types_fmgr::fc_am_handler_stub),
     b(4027, "spg_text_config", 2, fc_spg_text_config),
     b(4028, "spg_text_choose", 2, fc_spg_text_choose),
     b(4029, "spg_text_picksplit", 2, fc_spg_text_picksplit),

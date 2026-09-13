@@ -637,9 +637,9 @@ pub const AMUTILS_BUILTINS: &[FmgrBuiltin] = &[
     // AM handlers (heapam_handler.c, nbtree.c, hash.c — crates unreachable
     // from fmgr_core without cycles): access methods resolve natively;
     // fmgr-lookup parity rows.
-    b(3, "heap_tableam_handler", 1, ::types_fmgr::fc_internal_dispatch_only),
-    b(330, "bthandler", 1, ::types_fmgr::fc_internal_dispatch_only),
-    b(331, "hashhandler", 1, ::types_fmgr::fc_internal_dispatch_only),
+    b(3, "heap_tableam_handler", 1, ::types_fmgr::fc_am_handler_stub),
+    b(330, "bthandler", 1, ::types_fmgr::fc_am_handler_stub),
+    b(331, "hashhandler", 1, ::types_fmgr::fc_am_handler_stub),
     b(636, "pg_indexam_has_property", 2, fc_pg_indexam_has_property),
     b(637, "pg_index_has_property", 2, fc_pg_index_has_property),
     b(638, "pg_index_column_has_property", 3, fc_pg_index_column_has_property),

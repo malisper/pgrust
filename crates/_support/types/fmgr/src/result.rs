@@ -21,6 +21,18 @@ pub fn fc_internal_dispatch_only(
     );
 }
 
+// C AM handlers (gisthandler, bthandler, heap_tableam_handler, ...) palloc
+// their AmRoutine and return it without inspecting the argument; pgrust
+// dispatches the closed AM set natively, so an alias call through fmgr
+// (CREATE FUNCTION ... AS 'gisthandler' LANGUAGE internal) gets an opaque
+// non-null block, as C's IS NOT NULL / pointer result does.
+pub fn fc_am_handler_stub(
+    _flinfo: Option<&mut crate::fcinfo::FmgrInfo>,
+    fcinfo: &mut crate::fcinfo::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    byref_result(fcinfo.result_mcx(), &[0u8; 8])
+}
+
 // Results leak into the arming context and die at its reset (C's palloc ownership).
 #[inline]
 pub fn varlena_result(v: Varlena<'_>) -> Datum {

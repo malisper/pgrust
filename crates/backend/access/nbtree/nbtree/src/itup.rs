@@ -275,6 +275,9 @@ pub fn index_form_tuple<'mcx>(
     // is enforced by _bt_check_third_page.)
     const TOAST_INDEX_TARGET: usize = ::types_storage::bufpage::MaxHeapTupleSize / 16;
 
+    // C pfrees the detoasted/compressed temporaries after heap_fill_tuple
+    // (indextuple.c:184); only the returned tuple lives in `mcx`.
+    let mut scratch: Option<::mcx::MemoryContext> = None;
     for i in 0..natts {
         let att = tupdesc.compact_attr(i);
         if isnull[i] || att.attlen != -1 {
@@ -284,7 +287,10 @@ pub fn index_form_tuple<'mcx>(
         unsafe {
             let mut p = untoasted[i].as_usize() as *const u8;
             if varatt_is_1b_e(p) {
-                let flat = ::detoast::detoast_external_attr(mcx, varlena_image(p))?;
+                let scx = scratch
+                    .get_or_insert_with(|| ::mcx::MemoryContext::new("index_form_tuple"))
+                    .mcx();
+                let flat = ::detoast::detoast_external_attr(scx, varlena_image(p))?;
                 untoasted[i] = Datum::from_usize(flat.leak().as_ptr() as usize);
                 p = untoasted[i].as_usize() as *const u8;
             }
@@ -292,8 +298,11 @@ pub fn index_form_tuple<'mcx>(
                 let storage = tupdesc.attr(i).attstorage;
                 if storage == TYPSTORAGE_EXTENDED || storage == TYPSTORAGE_MAIN {
                     let compression = tupdesc.attr(i).attcompression;
+                    let scx = scratch
+                        .get_or_insert_with(|| ::mcx::MemoryContext::new("index_form_tuple"))
+                        .mcx();
                     if let Some(cvalue) = ::heaptoast_seams::toast_compress_datum::call(
-                        mcx,
+                        scx,
                         varlena_image(p),
                         compression,
                     )? {

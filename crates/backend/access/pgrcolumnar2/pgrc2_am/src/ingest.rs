@@ -506,7 +506,7 @@ pub fn finish_bulk(rel: &Relation<'_>) -> PgResult<()> {
             shred: &mut shred,
             shred_opts: &shred_opts,
         };
-        writer.finish(&mut env)
+        writer.finish_or_abort(&mut env)
     })?
     .map_err(write_error)?;
     if writer.sealed_parts().is_empty() {
@@ -524,7 +524,7 @@ pub fn finish_bulk(rel: &Relation<'_>) -> PgResult<()> {
     let lock = crate::inval::publish_lock(relfilenumber);
     let guard = pgsync::lock(&lock);
     let probe = ClogTxnProbe::new();
-    let outcome = writer.publish(&mut vfs, &probe).map_err(write_error)?;
+    let outcome = writer.publish_or_abort(&mut vfs, &probe).map_err(write_error)?;
     drop(guard);
     probe.take_error()?;
     // Post-publish companions (the harness pattern; derived class — a

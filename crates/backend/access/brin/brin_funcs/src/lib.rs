@@ -292,7 +292,14 @@ const fn brin_internal(foid: ::types_core::Oid, name: &'static str, nargs: i16) 
 }
 
 pub static BRIN_FUNCS_BUILTINS: &[FmgrBuiltin] = &[
-    brin_internal(335, "brinhandler", 1),
+    FmgrBuiltin {
+        foid: 335,
+        name: "brinhandler",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: ::types_fmgr::fc_am_handler_stub,
+    },
     brin_internal(3383, "brin_minmax_opcinfo", 1),
     brin_internal(3384, "brin_minmax_add_value", 4),
     brin_internal(3385, "brin_minmax_consistent", 3),
