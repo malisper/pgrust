@@ -389,25 +389,15 @@ fn creation_namespace<'mcx, 'a>(
     Ok((namespace, name))
 }
 
-fn text_datum_to_string(d: Datum) -> String {
+fn text_datum_to_string(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
     let p = d.as_usize() as *const u8;
-    // SAFETY: non-null in-line text column datum from a pg_collation row.
-    unsafe {
-        let (off, len) = if types_tuple::varatt::varatt_is_1b(p) {
-            (
-                types_tuple::varatt::VARHDRSZ_SHORT,
-                types_tuple::varatt::varsize_1b(p) - types_tuple::varatt::VARHDRSZ_SHORT,
-            )
-        } else {
-            (
-                types_tuple::varatt::VARHDRSZ,
-                types_tuple::varatt::varsize_4b(p) - types_tuple::varatt::VARHDRSZ,
-            )
-        };
-        core::str::from_utf8(core::slice::from_raw_parts(p.add(off), len))
-            .expect("catalog text is valid UTF-8")
-            .to_string()
-    }
+    // SAFETY: non-null text column datum from a pg_collation row: a live
+    // varlena image (possibly compressed or external) of varsize_any bytes.
+    let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let payload = varlena::open_image(mcx, image)?;
+    Ok(core::str::from_utf8(payload.as_bytes())
+        .expect("catalog text is valid UTF-8")
+        .to_string())
 }
 
 // ALTER COLLATION ... REFRESH VERSION (collationcmds.c AlterCollation).
@@ -473,7 +463,7 @@ pub fn AlterCollation<'mcx>(
 
     let (version_datum, version_isnull) = getattr(Anum_pg_collation_collversion);
     let oldversion =
-        if version_isnull { None } else { Some(text_datum_to_string(version_datum)) };
+        if version_isnull { None } else { Some(text_datum_to_string(mcx, version_datum)?) };
 
     let collprovider = getattr(Anum_pg_collation_collprovider).0.as_u8();
     let locale_attno = if collprovider == COLLPROVIDER_LIBC {
@@ -487,7 +477,7 @@ pub fn AlterCollation<'mcx>(
         locale_datum,
         locale_isnull,
     )?;
-    let locale = text_datum_to_string(locale_datum);
+    let locale = text_datum_to_string(mcx, locale_datum)?;
 
     let newversion = pg_locale::get_collation_actual_version(collprovider, &locale)?;
 

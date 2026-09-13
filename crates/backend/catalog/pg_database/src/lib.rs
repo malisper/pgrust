@@ -198,6 +198,9 @@ pub fn get_database_tuple_by_name<'mcx>(
     mcx: Mcx<'mcx>,
     dbname: &str,
 ) -> PgResult<Option<PgDatabaseForm<'mcx>>> {
+    if dbname.len() >= NAMEDATALEN as usize {
+        return Ok(None);
+    }
     let rel = table::table_open(mcx, DATABASE_RELATION_ID, AccessShareLock)?;
     let (_name_buf, arg) = name_arg(mcx, dbname)?;
     let key = eq_key(Anum_pg_database_datname, F_NAMEEQ, arg);

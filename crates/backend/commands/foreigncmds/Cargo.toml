@@ -27,6 +27,7 @@ catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
 pg_shdepend = { path = "../../catalog/pg_shdepend" }
+objectaccess = { path = "../../catalog/objectaccess" }
 parse_func = { path = "../../parser/parse_func" }
 parser_small1 = { path = "../../parser/parser_small1" }
 commands_define = { path = "../commands_define" }

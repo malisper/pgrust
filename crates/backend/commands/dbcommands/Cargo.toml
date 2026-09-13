@@ -28,6 +28,7 @@ pg_database = { path = "../../catalog/pg_database" }
 pg_database_seams = { path = "../../catalog/pg_database_seams" }
 pg_depend = { path = "../../catalog/pg_depend" }
 pg_shdepend = { path = "../../catalog/pg_shdepend" }
+objectaccess = { path = "../../catalog/objectaccess" }
 catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 heaptuple = { path = "../../access/common/heaptuple" }

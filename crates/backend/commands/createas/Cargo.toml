@@ -26,6 +26,7 @@ rls = { path = "../../utils/misc/rls" }
 matview_seams = { path = "../matview_seams" }
 commands_view = { path = "../view" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }
+clauses = { path = "../../optimizer/util/clauses" }
 copyfuncs = { path = "../../nodes/copyfuncs" }
 elog = { path = "../../utils/error/elog" }
 elog_seams = { path = "../../utils/error/elog_seams" }

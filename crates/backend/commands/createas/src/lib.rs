@@ -146,6 +146,15 @@ pub fn ExecCreateTableAs<'mcx>(
     let query = rewritten.into_iter().next().expect("checked above");
     debug_assert!(query.commandType == CmdType::CMD_SELECT);
 
+    let query_node = Node::mk(mcx, query)?;
+    let volatile = clauses::contain_volatile_functions(query_node)?;
+    // SAFETY: fresh node; this call holds its only live access.
+    let query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
+        .expect("rewritten CTAS query");
+    if let tcop_dest::DestReceiver::IntoRel(st) = &mut dest {
+        st.multi_insert_ok = !volatile;
+    }
+
     let plan = postgres::simple_query::pg_plan_query(
         mcx,
         mcx::leak_in(mcx::alloc_in(mcx, query)?),
@@ -446,7 +455,11 @@ fn intorel_startup<'mcx>(
     state.ti_options = tableam_vocab::TABLE_INSERT_SKIP_FSM;
     state.bistate = if !into.skipData { Some(heapam::GetBulkInsertState()) } else { None };
     // W1 multi-insert buffering (PGRUST_CTAS_MULTIINSERT, default OFF).
-    state.mibuf = if !into.skipData { tableam::write_buffer::write_buffer_begin(&rel) } else { None };
+    state.mibuf = if !into.skipData && state.multi_insert_ok {
+        tableam::write_buffer::write_buffer_begin(&rel)
+    } else {
+        None
+    };
     state.rel = Some(rel);
     Ok(())
 }

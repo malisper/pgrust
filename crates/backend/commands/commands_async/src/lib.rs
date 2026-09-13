@@ -9,7 +9,8 @@ use init_small::globals as g;
 use mcx::{Mcx, MemoryContext};
 use types_core::NAMEDATALEN;
 use types_error::{
-    PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, INFO,
+    PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, FATAL,
+    INFO,
 };
 
 mod queue;
@@ -601,7 +602,12 @@ fn async_queue_read_all_notifications() -> PgResult<()> {
     })();
 
     g::SetExitOnAnyError(save_exit_on_any_error);
-    result?;
+    if let Err(mut e) = result {
+        if e.level == ERROR {
+            e.level = FATAL;
+        }
+        return Err(e);
+    }
 
     snapmgr::UnregisterSnapshot(Some(&snapshot));
     Ok(())

@@ -250,6 +250,8 @@ pub fn CreateForeignDataWrapper<'mcx>(
     pg_depend::recordDependencyOnOwner(mcx, FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id, owner_id)?;
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
+    objectaccess::InvokeObjectPostCreateHook(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id, 0)?;
+
     rel.close(RowExclusiveLock)?;
     Ok(fdw_id)
 }
@@ -377,6 +379,8 @@ pub fn AlterForeignDataWrapper<'mcx>(
         }
     }
 
+    objectaccess::InvokeObjectPostAlterHook(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id, 0)?;
+
     rel.close(RowExclusiveLock)?;
     Ok(ObjectAddress::set(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id))
 }
@@ -499,6 +503,8 @@ fn AlterForeignDataWrapperOwner_internal<'mcx>(
             new_owner_id,
         )?;
     }
+
+    objectaccess::InvokeObjectPostAlterHook(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id, 0)?;
 
     Ok(fdw_id)
 }
@@ -637,6 +643,8 @@ fn AlterForeignServerOwner_internal<'mcx>(
         pg_shdepend::changeDependencyOnOwner(mcx, FOREIGN_SERVER_RELATION_ID, srv_id, new_owner_id)?;
     }
 
+    objectaccess::InvokeObjectPostAlterHook(FOREIGN_SERVER_RELATION_ID, srv_id, 0)?;
+
     Ok(srv_id)
 }
 
@@ -729,6 +737,8 @@ pub fn CreateForeignServer<'mcx>(
     pg_depend::recordDependencyOnOwner(mcx, FOREIGN_SERVER_RELATION_ID, srv_id, owner_id)?;
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
+    objectaccess::InvokeObjectPostCreateHook(FOREIGN_SERVER_RELATION_ID, srv_id, 0)?;
+
     rel.close(RowExclusiveLock)?;
     Ok(srv_id)
 }
@@ -813,6 +823,8 @@ pub fn AlterForeignServer<'mcx>(
         heaptuple::heap_modify_tuple(mcx, &tp, rel.descr(), &repl_val, &repl_null, &repl_repl)?;
     let otid = tp.t_self;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+    objectaccess::InvokeObjectPostAlterHook(FOREIGN_SERVER_RELATION_ID, srv_id, 0)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(ObjectAddress::set(FOREIGN_SERVER_RELATION_ID, srv_id))
@@ -934,6 +946,8 @@ pub fn CreateUserMapping<'mcx>(
     // No recordDependencyOnCurrentExtension: user mappings are not extension
     // members (C comment, foreigncmds.c:1217).
 
+    objectaccess::InvokeObjectPostCreateHook(USER_MAPPING_RELATION_ID, um_id, 0)?;
+
     rel.close(RowExclusiveLock)?;
     Ok(myself)
 }
@@ -995,6 +1009,8 @@ pub fn AlterUserMapping<'mcx>(
     let otid = tuple.t_self;
     ReleaseSysCache(tp);
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+    objectaccess::InvokeObjectPostAlterHook(USER_MAPPING_RELATION_ID, um_id, 0)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(ObjectAddress::set(USER_MAPPING_RELATION_ID, um_id))

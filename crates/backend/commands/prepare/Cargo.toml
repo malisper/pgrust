@@ -43,6 +43,8 @@ funcapi = { path = "../../utils/fmgr/funcapi" }
 varlena = { path = "../../utils/adt/varlena" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 createas_seams = { path = "../createas_seams" }
+clauses = { path = "../../optimizer/util/clauses" }
+nodes_core = { path = "../../nodes/nodes_core" }
 
 [dev-dependencies]
 types_dest = { path = "../../../_support/types/types_dest" }

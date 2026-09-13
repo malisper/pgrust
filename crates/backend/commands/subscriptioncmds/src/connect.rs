@@ -219,19 +219,37 @@ fn note_published_table(
     Ok(())
 }
 
-// fetch_table_list (subscriptioncmds.c), publisher >= 16 arm.
+// fetch_table_list (subscriptioncmds.c:2251): the query text per publisher
+// version (pg_get_publication_tables(VARIADIC) exists from 16; column lists
+// from 15).
+fn fetch_table_list_query(server_version: i32, publications: &[&str]) -> String {
+    let pub_names = publications_str(publications);
+    if server_version >= 160000 {
+        return format!(
+            "SELECT DISTINCT n.nspname, c.relname, gpt.attrs\n       FROM pg_class c\n         \
+             JOIN pg_namespace n ON n.oid = c.relnamespace\n         \
+             JOIN ( SELECT (pg_get_publication_tables(VARIADIC array_agg(pubname::text))).*\n                \
+             FROM pg_publication\n                WHERE pubname IN ( {pub_names} )) AS gpt\n             \
+             ON gpt.relid = c.oid\n"
+        );
+    }
+    let mut cmd = String::from("SELECT DISTINCT t.schemaname, t.tablename \n");
+    if server_version >= 150000 {
+        cmd.push_str(", t.attnames\n");
+    }
+    cmd.push_str(&format!(
+        "FROM pg_catalog.pg_publication_tables t\n WHERE t.pubname IN ( {pub_names} )"
+    ));
+    cmd
+}
+
 pub(crate) fn fetch_table_list(
     conn: &mut PgConn,
     publications: &[&str],
 ) -> PgResult<Vec<(String, String)>> {
-    let cmd = format!(
-        "SELECT DISTINCT n.nspname, c.relname, gpt.attrs\n       FROM pg_class c\n         \
-         JOIN pg_namespace n ON n.oid = c.relnamespace\n         \
-         JOIN ( SELECT (pg_get_publication_tables(VARIADIC array_agg(pubname::text))).*\n                \
-         FROM pg_publication\n                WHERE pubname IN ( {} )) AS gpt\n             \
-         ON gpt.relid = c.oid\n",
-        publications_str(publications)
-    );
+    let server_version = conn.server_version();
+    let check_columnlist = server_version >= 150000;
+    let cmd = fetch_table_list_query(server_version, publications);
     let res = exec_or_fail(
         conn,
         &cmd,
@@ -240,7 +258,12 @@ pub(crate) fn fetch_table_list(
     )?;
     let mut tablelist = Vec::with_capacity(res.rows.len());
     for r in &res.rows {
-        note_published_table(&mut tablelist, row_text(r, 0), row_text(r, 1))?;
+        let (nspname, relname) = (row_text(r, 0), row_text(r, 1));
+        if check_columnlist {
+            note_published_table(&mut tablelist, nspname, relname)?;
+        } else {
+            tablelist.push((nspname, relname));
+        }
     }
     Ok(tablelist)
 }
@@ -550,6 +573,29 @@ mod tests {
         note_published_table(&mut tablelist, "public".into(), "u".into()).unwrap();
         note_published_table(&mut tablelist, "other".into(), "t".into()).unwrap();
         assert_eq!(tablelist.len(), 3);
+    }
+
+    // fetch_table_list (subscriptioncmds.c:2262-2303): the 16+ query is
+    // pg_get_publication_tables(VARIADIC); older publishers get
+    // pg_publication_tables, with attnames only from 15.
+    #[test]
+    fn table_list_query_follows_publisher_version() {
+        let pubs = ["p1", "p2"];
+        let v16 = fetch_table_list_query(160000, &pubs);
+        assert!(v16.starts_with("SELECT DISTINCT n.nspname, c.relname, gpt.attrs\n       FROM pg_class c\n"));
+        assert!(v16.contains("pg_get_publication_tables(VARIADIC array_agg(pubname::text))"));
+        assert!(v16.contains("WHERE pubname IN ( 'p1', 'p2' )) AS gpt\n"));
+        assert_eq!(
+            fetch_table_list_query(150000, &pubs),
+            "SELECT DISTINCT t.schemaname, t.tablename \n, t.attnames\n\
+             FROM pg_catalog.pg_publication_tables t\n WHERE t.pubname IN ( 'p1', 'p2' )"
+        );
+        assert_eq!(
+            fetch_table_list_query(140000, &pubs),
+            "SELECT DISTINCT t.schemaname, t.tablename \n\
+             FROM pg_catalog.pg_publication_tables t\n WHERE t.pubname IN ( 'p1', 'p2' )"
+        );
+        assert_eq!(fetch_table_list_query(180006, &pubs), v16);
     }
 
     // quote_literal_cstr (quote.c:47-71): a backslash anywhere selects the

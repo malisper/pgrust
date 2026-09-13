@@ -68,6 +68,10 @@ pub fn get_trigger_oid<'mcx>(
     trigname: &str,
     missing_ok: bool,
 ) -> PgResult<Oid> {
+    // nameeq compares NAMEDATALEN bytes: a longer name matches no row.
+    if trigname.len() >= types_core::NAMEDATALEN as usize {
+        return if missing_ok { Ok(InvalidOid) } else { Err(no_such_trigger(mcx, relid, trigname)?) };
+    }
     let tgrel = table::table_open(mcx, TRIGGER_RELATION_ID, types_rel::AccessShareLock)?;
     let cname = name_arg(mcx, trigname)?;
     let keys = [
@@ -85,15 +89,7 @@ pub fn get_trigger_oid<'mcx>(
         }
         None => {
             if !missing_ok {
-                let relname = lsyscache::get_rel_name(mcx, relid)?
-                    .ok_or_else(|| cache_lookup_failed("relation", relid))?;
-                return Err(err(
-                    format!(
-                        "trigger \"{trigname}\" for table \"{}\" does not exist",
-                        relname.as_str()
-                    ),
-                    ERRCODE_UNDEFINED_OBJECT,
-                ));
+                return Err(no_such_trigger(mcx, relid, trigname)?);
             }
             InvalidOid
         }
@@ -101,6 +97,15 @@ pub fn get_trigger_oid<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     tgrel.close(types_rel::AccessShareLock)?;
     Ok(oid)
+}
+
+fn no_such_trigger(mcx: Mcx<'_>, relid: Oid, trigname: &str) -> PgResult<Box<PgError>> {
+    let relname = lsyscache::get_rel_name(mcx, relid)?
+        .ok_or_else(|| cache_lookup_failed("relation", relid))?;
+    Ok(err(
+        format!("trigger \"{trigname}\" for table \"{}\" does not exist", relname.as_str()),
+        ERRCODE_UNDEFINED_OBJECT,
+    ))
 }
 
 pub fn RemoveTriggerById<'mcx>(mcx: Mcx<'mcx>, trig_oid: Oid) -> PgResult<()> {

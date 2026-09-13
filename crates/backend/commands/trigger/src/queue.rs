@@ -1044,6 +1044,7 @@ fn AfterTriggerExecute<'mcx>(
             tg_newtuple: t2_ref.as_deref(),
             tg_trigger: trigger,
         };
+        let _depth = crate::exec::TriggerDepthGuard::enter();
         ri_triggers_seams::ri_fkey_trigger::call(mcx, trigger.tgfoid, &data)
     };
     restore_role(restore);

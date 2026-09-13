@@ -630,7 +630,9 @@ fn expand_generated_columns_in_expr<'mcx>(
                 },
             )?));
         }
-        if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
+        if v.varattno < 0
+            || rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN
+        {
             return Ok(None);
         }
         return Ok(Some(rewrite_handler::build_generation_expression(

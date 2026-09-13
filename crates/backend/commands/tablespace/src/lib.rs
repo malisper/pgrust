@@ -997,6 +997,8 @@ pub fn AlterTableSpaceOwner(mcx: Mcx<'_>, name: &str, new_owner_id: Oid) -> PgRe
         genam::systable_endscan(mcx, scan)?;
     }
 
+    objectaccess::InvokeObjectPostAlterHook(TableSpaceRelationId, tablespaceoid, 0)?;
+
     rel.close(RowExclusiveLock)
 }
 
@@ -1141,8 +1143,17 @@ pub fn PrepareTempTablespaces(mcx: Mcx<'_>) -> PgResult<()> {
 // get_tablespace_oid (tablespace.c): C seq-scans pg_tablespace with a
 // spcname key.
 pub fn get_tablespace_oid(mcx: Mcx<'_>, tablespacename: &str, missing_ok: bool) -> PgResult<Oid> {
-    let rel = table::table_open(mcx, TableSpaceRelationId, AccessShareLock)?;
     let n = NAMEDATALEN as usize;
+    if tablespacename.len() >= n {
+        if missing_ok {
+            return Ok(InvalidOid);
+        }
+        return Err(Box::new(
+            PgError::new(ERROR, format!("tablespace \"{tablespacename}\" does not exist"))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ));
+    }
+    let rel = table::table_open(mcx, TableSpaceRelationId, AccessShareLock)?;
     let mut name_buf: PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, n)?;
     let take = tablespacename.len().min(n - 1);
     mcx::vec_append_bytes(&mut name_buf, &tablespacename.as_bytes()[..take])?;

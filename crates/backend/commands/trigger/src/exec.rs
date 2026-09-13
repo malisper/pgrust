@@ -773,10 +773,10 @@ pub fn trigger_depth() -> i32 {
 // C: MyTriggerDepth++ / MyTriggerDepth-- around FunctionCallInvoke, the
 // latter in PG_FINALLY so it runs even when the call errors; Drop gives the
 // same guarantee across both the `?` early-return and the panic-unwind path.
-struct TriggerDepthGuard;
+pub(crate) struct TriggerDepthGuard;
 
 impl TriggerDepthGuard {
-    fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         TRIGGER_DEPTH.with(|c| c.set(c.get() + 1));
         TriggerDepthGuard
     }

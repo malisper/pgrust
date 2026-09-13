@@ -618,6 +618,8 @@ pub fn AlterDatabaseRefreshColl<'mcx>(
     }
     lmgr::UnlockTuple(&rel, &otid, InplaceUpdateTupleLock)?;
 
+    objectaccess::InvokeObjectPostAlterHook(DATABASE_RELATION_ID, db_id, 0)?;
+
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_storage::lock::NoLock)?;
 
@@ -723,6 +725,8 @@ pub fn AlterDatabaseOwner(mcx: Mcx<'_>, dbname: &str, new_owner_id: Oid) -> PgRe
 
         pg_shdepend::changeDependencyOnOwner(mcx, DATABASE_RELATION_ID, db_id, new_owner_id)?;
     }
+
+    objectaccess::InvokeObjectPostAlterHook(DATABASE_RELATION_ID, db_id, 0)?;
 
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_storage::lock::NoLock)?;

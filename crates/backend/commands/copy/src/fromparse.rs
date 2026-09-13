@@ -1048,6 +1048,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             return Err(extra_data());
         }
 
+        let mut soft_error = false;
         for i in 0..attr_count {
             let attnum = self.attnumlist[i];
             let m = attnum as usize - 1;
@@ -1131,9 +1132,14 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                             .errcontext_msg(format!("COPY {}", self.relname))
                             .finish(loc("CopyFromTextLikeOneRow"))?;
                     }
-                    return Ok(true);
+                    soft_error = true;
+                    break;
                 }
             }
+            self.cur_attidx = None;
+            self.cur_attval_off = None;
+        }
+        if soft_error {
             self.cur_attidx = None;
             self.cur_attval_off = None;
         }

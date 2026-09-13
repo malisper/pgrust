@@ -320,7 +320,14 @@ fn EvaluateParams<'mcx>(
         coerced_exprs.push(coerced);
     }
 
-    // Pass 2 (prepare.c:345-363): evaluate the finished expressions.
+    // Pass 2 (prepare.c:345): ExecPrepareExprList runs expression_planner
+    // over every parameter before any is evaluated.
+    for coerced in coerced_exprs.iter_mut() {
+        *coerced = clauses::eval_const_expressions(mcx, *coerced)?;
+        nodes_core::fix_opfuncids(*coerced)?;
+    }
+
+    // Pass 3 (prepare.c:347-363): evaluate the finished expressions.
     let mut out: mcx::PgVec<'mcx, types_portal::params::ParamExternData> =
         mcx::vec_with_capacity_in(mcx, num_params)?;
     for (i, &coerced) in coerced_exprs.iter().enumerate() {

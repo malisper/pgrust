@@ -811,6 +811,7 @@ pub(crate) fn query_desc_worker_sort_instrument_seam(
                 .estate
                 .es_worker_instrument
                 .iter()
+                .filter(|w| w.node_ids.contains(&plan_node_id))
                 .enumerate()
                 .flat_map(|(n, w)| {
                     w.sort
@@ -837,6 +838,7 @@ pub(crate) fn query_desc_worker_memoize_instrument_seam(
                 .estate
                 .es_worker_instrument
                 .iter()
+                .filter(|w| w.node_ids.contains(&plan_node_id))
                 .enumerate()
                 .flat_map(|(n, w)| {
                     w.memoize
@@ -863,6 +865,7 @@ pub(crate) fn query_desc_worker_bitmap_instrument_seam(
                 .estate
                 .es_worker_instrument
                 .iter()
+                .filter(|w| w.node_ids.contains(&plan_node_id))
                 .enumerate()
                 .flat_map(|(n, w)| {
                     w.bitmap
@@ -887,6 +890,7 @@ pub(crate) fn query_desc_worker_incsort_instrument_seam(
                 .estate
                 .es_worker_instrument
                 .iter()
+                .filter(|w| w.node_ids.contains(&plan_node_id))
                 .enumerate()
                 .flat_map(|(n, w)| {
                     w.incsort
