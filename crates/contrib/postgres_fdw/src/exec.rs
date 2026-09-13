@@ -205,6 +205,43 @@ fn system_columns_unported() -> Box<PgError> {
     )
 }
 
+// get_tupdesc_for_join_scan_tuples: a whole-row row-identity Var has vartype
+// RECORD; use the table's composite type so the remote ROW() value converts.
+fn tupdesc_for_join_scan_tuples<'mcx>(
+    node: &ForeignScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> PgResult<TupleDescData<'mcx>> {
+    let slot_desc = estate
+        .slot(node.ss.ss_ScanTupleSlot)
+        .base()
+        .tts_tupleDescriptor
+        .clone()
+        .expect("scan slot descriptor");
+    let mut tupdesc = tupdesc::CreateTupleDescCopy(estate.es_query_cxt, &slot_desc)?;
+    let natts = tupdesc.natts as usize;
+    for (i, tle_node) in node.plan.fdw_scan_tlist.iter().enumerate().take(natts) {
+        let att = tupdesc.attr(i);
+        if att.atttypid != types_core::RECORDOID || att.atttypmod >= 0 {
+            continue;
+        }
+        let tle = tle_node.as_target_entry().expect("fdw_scan_tlist holds TargetEntries");
+        let Some(var) = tle.expr.as_var() else { continue };
+        if var.varattno != 0 {
+            continue;
+        }
+        let rte = estate.es_range_table[(var.varno - 1) as usize];
+        if rte.rtekind != types_nodes::parsenodes::RTEKind::RTE_RELATION {
+            continue;
+        }
+        let reltype = lsyscache::get_rel_type_id(rte.relid)?;
+        if reltype == InvalidOid {
+            continue;
+        }
+        tupdesc.attr_mut(i).atttypid = reltype;
+    }
+    Ok(tupdesc)
+}
+
 // postgresBeginForeignScan.
 pub(crate) fn begin_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
@@ -288,12 +325,7 @@ pub(crate) fn begin_foreign_scan<'mcx>(
     } else {
         // Join/upper scan tuples follow the fdw_scan_tlist-shaped slot; a Var
         // entry names its relation's alias, an expression only its position.
-        let desc = estate
-            .slot(node.ss.ss_ScanTupleSlot)
-            .base()
-            .tts_tupleDescriptor
-            .clone()
-            .expect("scan slot descriptor");
+        let desc = tupdesc_for_join_scan_tuples(node, estate)?;
         let mut attin = AttInMeta::build("foreign join", &desc)?;
         let mut ctx = Vec::with_capacity(desc.natts as usize);
         for tle_node in fsplan.fdw_scan_tlist.iter() {
@@ -659,6 +691,7 @@ pub(crate) fn iterate_foreign_scan<'mcx>(
         create_cursor(node, estate)?;
     }
     let scan_slot = node.ss.ss_ScanTupleSlot;
+    let fs_system_col = node.plan.fsSystemCol;
     let qmcx = estate.es_query_cxt;
     let state = fsstate(node).expect("fdw_state set by BeginForeignScan");
 
@@ -683,6 +716,21 @@ pub(crate) fn iterate_foreign_scan<'mcx>(
     state.next_tuple += 1;
     let slot = estate.slot_mut(scan_slot);
     exectuples::exec_clear_tuple(slot, qmcx);
+    if fs_system_col {
+        // make_tuple_from_result_row's heap_form_tuple arm: xmin/xmax/cmin
+        // stomped to zero, the retrieved ctid in t_self and t_ctid.
+        let desc = slot.base().tts_tupleDescriptor.clone().expect("scan slot descriptor");
+        let mut tuple = heaptuple::heap_form_tuple(qmcx, &desc, values, nulls)?;
+        let t = tuple.as_tuple_mut();
+        t.t_self = ctid;
+        let hdr = t.t_data_mut();
+        hdr.t_ctid = ctid;
+        hdr.set_xmax(types_core::xact::InvalidTransactionId);
+        hdr.set_xmin(types_core::xact::InvalidTransactionId);
+        hdr.set_cmin(types_core::xact::InvalidTransactionId);
+        exectuples::exec_store_heap_tuple_owned(slot, qmcx, tuple);
+        return Ok(true);
+    }
     {
         let base = slot.base_mut();
         base.tts_values.clear();
@@ -697,15 +745,13 @@ pub(crate) fn iterate_foreign_scan<'mcx>(
     Ok(true)
 }
 
-// postgresReScanForeignScan. Divergence from C: the executor does not track
-// chgParam, so any parameterized scan closes + recreates the cursor (same
-// results; C skips the recreate when params provably did not change). C also
-// MOVEs BACKWARD on pre-15 remotes; we always close + recreate (the v15+
-// arm), which every supported remote handles.
+// postgresReScanForeignScan. C MOVEs BACKWARD on pre-15 remotes; we always
+// close + recreate (the v15+ arm), which every supported remote handles.
 pub(crate) fn rescan_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let chg_param = node.chg_param;
     let Some(state) = fsstate(node) else {
         return Ok(()); // EXPLAIN
     };
@@ -724,7 +770,7 @@ pub(crate) fn rescan_foreign_scan<'mcx>(
             adopt_parked(state)?;
         }
     }
-    if state.param_exprs.is_empty() && state.fetch_ct_2 <= 1 {
+    if !chg_param && state.fetch_ct_2 <= 1 {
         // Just rewind the local batch (the cursor has not moved past it).
         state.next_tuple = 0;
         return Ok(());

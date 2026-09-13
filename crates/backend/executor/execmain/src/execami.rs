@@ -121,6 +121,7 @@ pub fn exec_re_scan<'mcx>(
                 &mut fs.state,
                 fs.outer.as_deref_mut(),
                 estate,
+                false,
             )
         }
         PlanStateNode::TableFuncScan(ts) => {
@@ -540,7 +541,7 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
                 plan: base.lefttree.expect("ForeignScan outer plan"),
                 chg,
             });
-            ::nodeforeignscan::exec_rescan_foreign_scan(&mut fs.state, outer.as_mut(), estate)?
+            ::nodeforeignscan::exec_rescan_foreign_scan(&mut fs.state, outer.as_mut(), estate, true)?
         }
         // C drops the tuplestore whenever chgParam is non-NULL.
         PlanStateNode::TableFuncScan(ts) => {

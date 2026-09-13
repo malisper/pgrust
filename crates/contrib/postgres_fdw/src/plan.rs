@@ -2434,13 +2434,12 @@ fn foreign_grouping_ok<'mcx>(
         {
             add_flat(mcx, &mut tlist, expr)?;
         } else {
-            let aggvars = vars::pull_var_clause(mcx, expr, vars::PVC_INCLUDE_AGGREGATES)?;
-            for v in &aggvars {
-                if !deparse::is_foreign_expr(run, grouped_rel, v)? {
-                    return Ok(false);
-                }
+            let aggvars =
+                Node::mk_list(mcx, vars::pull_var_clause(mcx, expr, vars::PVC_INCLUDE_AGGREGATES)?)?;
+            if !deparse::is_foreign_expr(run, grouped_rel, aggvars)? {
+                return Ok(false);
             }
-            for v in &aggvars {
+            for v in aggvars.as_list().expect("list node") {
                 if v.node_tag() == types_nodes::NodeTag::T_Aggref {
                     add_flat(mcx, &mut tlist, v)?;
                 }

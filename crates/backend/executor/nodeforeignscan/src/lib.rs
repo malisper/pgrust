@@ -26,6 +26,8 @@ pub struct ForeignScanState<'mcx> {
     table_oid: Oid,
     /// C fdw_state (funcapi_srf user_fctx precedent), dropped at end-scan.
     pub fdw_state: Option<Box<dyn core::any::Any>>,
+    /// C ps.chgParam != NULL, visible to the provider's ReScan only.
+    pub chg_param: bool,
 }
 
 /// C FdwRoutine's exec half; `iterate` fills the scan slot (false = EOF).
@@ -297,8 +299,10 @@ pub fn exec_init_foreign_scan<'mcx>(
         scan_tupdesc = execscan::exec_type_from_tl(mcx, &node.fdw_scan_tlist)?;
         table_oid = InvalidOid;
     }
-    let ss_ScanTupleSlot =
-        estate.exec_init_extra_tuple_slot(Some(scan_tupdesc), TupleSlotKind::Virtual);
+    // C: TTSOpsHeapTuple. Only a system-column read needs the heap shape
+    // (the provider then stores a formed tuple); otherwise stay virtual.
+    let kind = if node.fsSystemCol { TupleSlotKind::HeapTuple } else { TupleSlotKind::Virtual };
+    let ss_ScanTupleSlot = estate.exec_init_extra_tuple_slot(Some(scan_tupdesc), kind);
 
     let mut ss = ScanState {
         qual: None,
@@ -351,6 +355,7 @@ pub fn exec_init_foreign_scan<'mcx>(
         fdwroutine,
         table_oid,
         fdw_state: None,
+        chg_param: false,
     };
     if direct {
         (fdw_exec_routine(fdwroutine).begin_direct.expect("direct-modify provider"))(
@@ -384,13 +389,17 @@ pub fn exec_rescan_foreign_scan<'mcx, C: ForeignScanOuter<'mcx>>(
     node: &mut ForeignScanState<'mcx>,
     outer: Option<&mut C>,
     estate: &mut EStateData<'mcx>,
+    chg_param: bool,
 ) -> PgResult<()> {
     // Ignore direct modifications when EvalPlanQual is active --- they are
     // irrelevant for EvalPlanQual rechecking.
     if estate.es_epq_active && node.plan.operation != CmdType::CMD_SELECT {
         return Ok(());
     }
-    (fdw_exec_routine(node.fdwroutine).rescan)(node, estate)?;
+    node.chg_param = chg_param;
+    let r = (fdw_exec_routine(node.fdwroutine).rescan)(node, estate);
+    node.chg_param = false;
+    r?;
     // If chgParam of subnode is not null then plan will be re-scanned by
     // first ExecProcNode. outerPlan may also be NULL, in which case there is
     // nothing to rescan at all.
@@ -420,5 +429,5 @@ pub fn explain_foreign_scan<'mcx>(
 
 mcx::forget_safe_struct!(
     // Exempt: droppy ExprState carrier + provider state (ScanState precedent).
-    ForeignScanState<'_> { ss, plan, fdwroutine, table_oid; fdw_recheck_quals, fdw_state },
+    ForeignScanState<'_> { ss, plan, fdwroutine, table_oid, chg_param; fdw_recheck_quals, fdw_state },
 );

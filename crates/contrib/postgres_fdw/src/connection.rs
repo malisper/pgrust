@@ -1045,6 +1045,9 @@ fn pgfdw_abort_cleanup(entry: &mut ConnCacheEntry, toplevel: bool) -> PgResult<(
         entry.have_prep_stmt = false;
         entry.have_error = false;
     }
+    // An async fetch begun by fetch_more_data_begin and never finished leaves
+    // the per-connection state set; reset it here (connection.c:1797).
+    entry.pending_fetch = None;
     entry.changing_xact_state = false;
     Ok(())
 }

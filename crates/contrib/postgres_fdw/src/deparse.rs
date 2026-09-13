@@ -51,7 +51,7 @@ const TS_CONFIG_RELATION_ID: Oid = 3602;
 const TS_DICT_RELATION_ID: Oid = 3600;
 
 const SELF_ITEM_POINTER_ATTNUM: i16 = -1;
-const TABLE_OID_ATTNUM: i16 = -7;
+const TABLE_OID_ATTNUM: i16 = types_tuple::htup::TableOidAttributeNumber as i16;
 const FIRST_LOW_INVALID_HEAP_ATTNUM: i32 =
     types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
 
@@ -2697,5 +2697,13 @@ mod tests {
             )
         );
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    // deparseColumnRef emits the local relation OID for TableOidAttributeNumber
+    // (sysattr.h: -6), not -7; a -7 fallback silently deparsed tableoid as 0.
+    #[test]
+    fn table_oid_attnum_matches_sysattr() {
+        assert_eq!(TABLE_OID_ATTNUM, types_tuple::htup::TableOidAttributeNumber as i16);
+        assert_eq!(TABLE_OID_ATTNUM, -6);
     }
 }

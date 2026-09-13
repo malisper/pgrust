@@ -182,3 +182,106 @@ BEGIN;
 SELECT c1 FROM ft1 WHERE c1 = 1 ORDER BY c1;
 PREPARE TRANSACTION 'fdw_should_fail';
 ROLLBACK;
+
+-- ===================================================================
+-- system columns on a base foreign scan: xmin/xmax/cmin/cmax read as
+-- zero (make_tuple_from_result_row stomps them), ctid/tableoid as usual
+-- ===================================================================
+SELECT xmin, xmax, cmin, cmax, c1 FROM ft1 WHERE c1 < 3 ORDER BY c1;
+SELECT ctid, tableoid::regclass, xmin, c1 FROM ft1 WHERE c1 < 3 ORDER BY c1;
+
+-- ===================================================================
+-- pushed-down join: tableoid of the nullable side is the local relation
+-- OID (TableOidAttributeNumber = -6); whole-row row identity of an
+-- UPDATE target under a pushed-down join converts as the table's type
+-- ===================================================================
+CREATE TABLE "S 1"."T 3" (id int primary key, a int);
+INSERT INTO "S 1"."T 3" VALUES (1, 10), (2, 20), (4, 40);
+CREATE TABLE "S 1"."T 4" (id int primary key, v text);
+INSERT INTO "S 1"."T 4" VALUES (1, 'a'), (2, 'b'), (3, 'c');
+CREATE FOREIGN TABLE ft3 (id int, a int)
+  SERVER loopback OPTIONS (schema_name 'S 1', table_name 'T 3');
+CREATE FOREIGN TABLE ft4 (id int, v text)
+  SERVER loopback OPTIONS (schema_name 'S 1', table_name 'T 4');
+ANALYZE ft3;
+ANALYZE ft4;
+ALTER SERVER loopback OPTIONS (ADD use_remote_estimate 'true');
+SELECT ft4.id, ft3.tableoid::regclass FROM ft4 LEFT JOIN ft3 ON ft4.id = ft3.id ORDER BY ft4.id;
+WITH u AS (
+  UPDATE ft3 SET a = ft4.id FROM ft4 WHERE ft4.id = ft3.id RETURNING ft3.id, ft3.a, ft4.v
+) SELECT * FROM u ORDER BY id;
+SELECT * FROM ft3 ORDER BY id;
+ALTER SERVER loopback OPTIONS (DROP use_remote_estimate);
+
+-- ===================================================================
+-- rescan with unchanged parameters reuses the fetched batch (chgParam
+-- is NULL): the remote nextval() is not re-executed per outer row
+-- ===================================================================
+CREATE SEQUENCE "S 1".seq1;
+CREATE VIEW "S 1".vseq AS
+  SELECT g AS id, nextval('"S 1".seq1') AS n FROM generate_series(1, 50) g;
+CREATE FOREIGN TABLE ftseq (id int, n bigint)
+  SERVER loopback OPTIONS (schema_name 'S 1', table_name 'vseq');
+ANALYZE ftseq;
+CREATE TABLE loc_big AS SELECT g AS x FROM generate_series(1, 20000) g;
+ANALYZE loc_big;
+SET enable_material = off;
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET plan_cache_mode = force_generic_plan;
+PREPARE stseq(int) AS
+  SELECT count(DISTINCT ftseq.n) AS distinct_n, count(*) AS rows
+  FROM loc_big, ftseq WHERE ftseq.id > $1 AND loc_big.x <= 2;
+EXECUTE stseq(0);
+DEALLOCATE stseq;
+RESET plan_cache_mode;
+RESET enable_material;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+
+-- ===================================================================
+-- aggregate pushdown is refused when the aggregates of a non-shippable
+-- target carry conflicting non-default collations (aggvars as a list)
+-- ===================================================================
+CREATE TABLE "S 1"."T 5" (id int, c1 text COLLATE "C", c2 text COLLATE "POSIX");
+INSERT INTO "S 1"."T 5" VALUES (1, 'a', 'b'), (2, 'c', 'd');
+CREATE FOREIGN TABLE ft5 (id int, c1 text COLLATE "C", c2 text COLLATE "POSIX")
+  SERVER loopback OPTIONS (schema_name 'S 1', table_name 'T 5');
+CREATE FUNCTION local_wrap(text) RETURNS text IMMUTABLE LANGUAGE plpgsql
+  AS $$ BEGIN RETURN $1; END $$;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT local_wrap(max(c1) || max(c2)) FROM ft5;
+SELECT local_wrap(max(c1) || max(c2)) FROM ft5;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT local_wrap(sum(id)::text || count(*)::text) FROM ft5;
+SELECT local_wrap(sum(id)::text || count(*)::text) FROM ft5;
+
+-- ===================================================================
+-- async: a subtransaction abort while a FETCH is in flight on another
+-- connection leaves both connections usable (pgfdw_abort_cleanup)
+-- ===================================================================
+DO $d$
+    BEGIN
+        EXECUTE $$CREATE SERVER loopback2 FOREIGN DATA WRAPPER postgres_fdw
+            OPTIONS (host '$$||current_setting('unix_socket_directories')||$$',
+                     port '$$||current_setting('port')||$$',
+                     dbname '$$||current_database()||$$',
+                     async_capable 'true'
+            )$$;
+        EXECUTE $$CREATE USER MAPPING FOR CURRENT_USER SERVER loopback2
+            OPTIONS (user '$$||current_user||$$')$$;
+    END;
+$d$;
+ALTER SERVER loopback OPTIONS (ADD async_capable 'true');
+CREATE FOREIGN TABLE fta1 (c1 int OPTIONS (column_name 'C 1'), c2 int)
+  SERVER loopback OPTIONS (schema_name 'S 1', table_name 'T 1', fetch_size '1');
+CREATE FOREIGN TABLE fta2 (c1 int OPTIONS (column_name 'C 1'), c2 int)
+  SERVER loopback2 OPTIONS (schema_name 'S 1', table_name 'T 1', fetch_size '1');
+BEGIN;
+SAVEPOINT s1;
+SELECT CASE WHEN tag = 1 AND c1 = 2 THEN c1 / (c1 - 2) ELSE c1 END
+  FROM (SELECT 1 AS tag, c1 FROM fta1 UNION ALL SELECT 2 AS tag, c1 FROM fta2) x;
+ROLLBACK TO SAVEPOINT s1;
+SELECT count(*) FROM fta2;
+SELECT count(*) FROM fta1;
+SELECT count(*) FROM (SELECT * FROM fta1 UNION ALL SELECT * FROM fta2) x;
+COMMIT;
+ALTER SERVER loopback OPTIONS (DROP async_capable);
