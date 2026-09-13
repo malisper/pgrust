@@ -1295,7 +1295,7 @@ impl<'a> Estate<'a> {
                         if let PlDatum::RecField(f) = d {
                             if f.recparentno == recno {
                                 if let Some((t, m, c)) = self.recfield_type(f)? {
-                                    let key = format!("{recname}.{}", f.fieldname);
+                                    let key = format!("{recname}\0{}", f.fieldname);
                                     let info = (key.clone(), f.dno, t, m, c);
                                     if is_visible_rec_binding && !have(&names, &key) {
                                         names.push(info.clone());
@@ -1323,19 +1323,19 @@ impl<'a> Estate<'a> {
                     if !item.name.is_empty() {
                         let label = item.name.clone();
                         for (k, dno, t, m, c) in pending.drain(..) {
-                            let lk = format!("{label}.{k}");
+                            let lk = format!("{label}\0{k}");
                             if !have(&names, &lk) {
                                 names.push((lk, dno, t, m, c));
                             }
                         }
                         for r in pending_recs.drain(..) {
-                            let lr = format!("{label}.{r}");
+                            let lr = format!("{label}\0{r}");
                             if !recs.contains(&lr) {
                                 recs.push(lr);
                             }
                         }
                         for r in pending_valueless.drain(..) {
-                            let lr = format!("{label}.{r}");
+                            let lr = format!("{label}\0{r}");
                             if !valueless.contains(&lr) {
                                 valueless.push(lr);
                             }

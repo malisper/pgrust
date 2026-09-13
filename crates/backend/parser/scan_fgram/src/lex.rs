@@ -680,7 +680,7 @@ impl<'mcx> Scanner<'mcx> {
             _ if valid == buf.len() => return Ok(()),
             _ => valid,
         };
-        let mblen = (wchar::pg_encoding_mblen(self.encoding, &buf[bad..]) as usize)
+        let mblen = (wchar::pg_encoding_mblen_or_incomplete(self.encoding, &buf[bad..]) as usize)
             .min(buf.len() - bad);
         let mut seq = String::new();
         for (i, b) in buf[bad..bad + mblen].iter().enumerate() {
@@ -756,6 +756,13 @@ fn encoding_name(enc: wchar::pg_enc) -> &'static str {
         wchar::PG_WIN1255 => "WIN1255",
         wchar::PG_WIN1257 => "WIN1257",
         wchar::PG_KOI8U => "KOI8U",
+        wchar::PG_SJIS => "SJIS",
+        wchar::PG_BIG5 => "BIG5",
+        wchar::PG_GBK => "GBK",
+        wchar::PG_UHC => "UHC",
+        wchar::PG_GB18030 => "GB18030",
+        wchar::PG_JOHAB => "JOHAB",
+        wchar::PG_SHIFT_JIS_2004 => "SHIFT_JIS_2004",
         _ => "???",
     }
 }

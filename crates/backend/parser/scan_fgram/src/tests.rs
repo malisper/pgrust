@@ -356,3 +356,18 @@ fn sql_ascii_escape_bytes_outside_utf8_draw_the_carve_error() {
     assert_eq!(err.message(), "invalid byte sequence for encoding \"UTF8\": 0xc3 0x28");
     assert_eq!(err.cursor_position(), None);
 }
+
+#[test]
+fn gb18030_escape_string_ending_in_a_lone_lead_byte_reports_the_byte() {
+    let gb = ScannerSettings {
+        encoding: wchar::PG_GB18030,
+        client_encoding: wchar::PG_GB18030,
+        ..ScannerSettings::default()
+    };
+    let err = lex_err_with(br"e'\x81\x30'", gb);
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE);
+    assert_eq!(err.message(), "invalid byte sequence for encoding \"GB18030\": 0x81 0x30");
+    let err = lex_err_with(br"e'\x81'", gb);
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE);
+    assert_eq!(err.message(), "invalid byte sequence for encoding \"GB18030\": 0x81");
+}

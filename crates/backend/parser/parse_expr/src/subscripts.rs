@@ -34,11 +34,12 @@ pub fn subscript_handler_for(container_type: Oid) -> PgResult<Option<(SubscriptH
             Ok(Some((SubscriptHandler::Array, typelem)))
         }
         F_JSONB_SUBSCRIPT_HANDLER => Ok(Some((SubscriptHandler::Jsonb, typelem))),
-        // Extension handlers carry dynamic oids; match by proname (the GIN
-        // TrgmOps precedent).
+        // Extension handlers carry dynamic oids; match by prosrc, the link
+        // symbol C calls through (the GIN TrgmOps precedent), so ALTER
+        // FUNCTION RENAME does not change the dispatch.
         other => {
             let cx = ::mcx::MemoryContext::new("subscript handler probe");
-            let name = lsyscache::get_func_name(cx.mcx(), other)?
+            let name = lsyscache::get_func_prosrc(cx.mcx(), other)?
                 .map(|n| n.as_str().to_string());
             match name.as_deref() {
                 Some("hstore_subscript_handler") => Ok(Some((SubscriptHandler::Hstore, typelem))),

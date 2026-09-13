@@ -2725,6 +2725,7 @@ pub fn transformIndexConstraintForAlter<'mcx>(
         }
         index.indexParams = index_params;
         index.excludeOpNames = exclude_op_names;
+        index.indexIncludingParams = alter_including_params(mcx, &constraint.including)?;
         return Ok((index.seal(), NodeList::nil()));
     }
 
@@ -2800,10 +2801,18 @@ pub fn transformIndexConstraintForAlter<'mcx>(
         index.accessMethod = Some("gist");
     }
     index.indexParams = index_params;
-    // Included columns, isalter slice: keys may exist already, so no
-    // missing-column complaint here; DefineIndex raises it (2915-2919).
+    index.indexIncludingParams = alter_including_params(mcx, &constraint.including)?;
+    Ok((index.seal(), NodeList::nil()))
+}
+
+// Included columns, isalter slice: keys may exist already, so no
+// missing-column complaint here; DefineIndex raises it (2915-2919).
+fn alter_including_params<'mcx>(
+    mcx: Mcx<'mcx>,
+    including: &NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
     let mut including_params = NodeList::nil();
-    for keynode in constraint.including.iter() {
+    for keynode in including.iter() {
         let key = keynode.as_string().expect("constraint including").sval;
         let mut iparam = Node::build::<IndexElem>(mcx)?;
         iparam.name = Some(key);
@@ -2811,8 +2820,7 @@ pub fn transformIndexConstraintForAlter<'mcx>(
         iparam.nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
         including_params.lappend(mcx, iparam.seal())?;
     }
-    index.indexIncludingParams = including_params;
-    Ok((index.seal(), NodeList::nil()))
+    Ok(including_params)
 }
 
 // transformIndexConstraint's USING INDEX arm (parse_utilcmd.c:2397-2574);
@@ -3440,12 +3448,16 @@ pub fn transformAlterTableCmd<'mcx>(
         s.try_push_str(relname)?;
         Ok(leak_str(s))
     };
+    let arena_nspname = || -> PgResult<Option<&'mcx str>> {
+        Ok(lsyscache::get_namespace_name(mcx, rel.rd_rel.relnamespace)?.map(leak_str))
+    };
     match cmd.subtype {
         AlterTableType::AT_AddColumn => {
             let defnode = cmd.def.expect("AT_AddColumn ColumnDef");
             let mut ixconstraints = NodeList::nil();
             let mut fkconstraints = NodeList::nil();
             let mut rv = RangeVar::default();
+            rv.schemaname = arena_nspname()?;
             rv.relname = Some(arena_relname()?);
             rv.inh = true;
             rv.relpersistence = types_core::RELPERSISTENCE_PERMANENT;
@@ -3531,6 +3543,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 return Err(alter_undefined_column(colname, relname));
             }
             let mut rv = RangeVar::default();
+            rv.schemaname = arena_nspname()?;
             rv.relname = Some(arena_relname()?);
             rv.inh = true;
             rv.relpersistence = rel.rd_rel.relpersistence;

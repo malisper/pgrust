@@ -16,6 +16,10 @@ pub fn get_func_name<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<PgStr
     }
 }
 
+pub fn get_func_prosrc<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<PgString<'mcx>>> {
+    syscache_seams::lookup_pg_proc_prosrc::call(mcx, funcid)
+}
+
 pub fn get_func_namespace(funcid: Oid) -> PgResult<Oid> {
     Ok(match syscache_seams::lookup_pg_proc_shape::call(funcid)? {
         Some(functup) => functup.pronamespace,

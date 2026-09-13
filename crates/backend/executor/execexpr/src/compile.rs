@@ -3521,9 +3521,9 @@ fn init_subscripting_ref<'mcx>(
         typsubscript as Oid,
         F_ARRAY_SUBSCRIPT_HANDLER | F_RAW_ARRAY_SUBSCRIPT_HANDLER
     ) {
-        // Extension handlers carry dynamic oids; match by proname.
+        // Extension handlers carry dynamic oids; match by prosrc (link symbol).
         let cx = ::mcx::MemoryContext::new("sbsref handler probe");
-        let name = lsyscache::get_func_name(cx.mcx(), typsubscript as Oid)?
+        let name = lsyscache::get_func_prosrc(cx.mcx(), typsubscript as Oid)?
             .map(|n| n.as_str().to_string());
         drop(cx);
         match name.as_deref() {

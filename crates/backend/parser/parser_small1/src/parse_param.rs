@@ -64,9 +64,11 @@ impl Default for VarParamState {
 
 #[derive(Clone, Copy)]
 pub struct PlpgsqlNameEntry<'p> {
-    /// Dotted key as the PL/pgSQL scanner left the names (downcased unless
-    /// quoted): "v", "label.v", "rec.f", "label.rec.f". Matched exactly, as
-    /// C's resolve_column_ref / plpgsql_ns_lookup compare with strcmp.
+    /// Name components as the PL/pgSQL scanner left them (downcased unless
+    /// quoted), joined with NUL (the one byte an identifier cannot hold):
+    /// "v", "label\0v", "rec\0f", "label\0rec\0f". Matched exactly, as
+    /// C's resolve_column_ref / plpgsql_ns_lookup compare with strcmp per
+    /// component.
     pub key: &'p str,
     pub dno: i32,
     pub typoid: Oid,
@@ -314,9 +316,10 @@ pub fn variable_paramref_hook<'mcx>(
     mk_param(mcx, paramno, paramtype, pref.location)
 }
 
-/// plpgsql_param_ref (pl_exec.c): `$n` names the n-th function argument;
-/// anything else is undefined_parameter (C looks the name "$n" up in a
-/// namespace that holds only parameters).
+/// plpgsql_param_ref (pl_comp.c): `$n` is looked up by name in the
+/// expression's namespace (a local variable named "$n", the polymorphic $0,
+/// or the n-th argument's own "$n" entry); a named argument's slot is still
+/// reached through arg_dnos. Anything else is undefined_parameter.
 pub fn plpgsql_paramref_hook<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
@@ -328,10 +331,13 @@ pub fn plpgsql_paramref_hook<'mcx>(
         .as_plpgsql_params()
         .expect("plpgsql_paramref_hook: p_ref_hook_state is not PlpgsqlParams");
     let paramno = pref.number;
-    let dno = if paramno >= 1 && (paramno as usize) <= parstate.arg_dnos.len() {
-        Some(parstate.arg_dnos[(paramno - 1) as usize])
-    } else {
-        None
+    let pname = alloc::format!("${paramno}");
+    let dno = match parstate.names.iter().find(|e| e.key == pname) {
+        Some(e) => Some(e.dno),
+        None if paramno >= 1 && (paramno as usize) <= parstate.arg_dnos.len() => {
+            Some(parstate.arg_dnos[(paramno - 1) as usize])
+        }
+        None => None,
     };
     let slot = dno.and_then(|d| parstate.params_by_dno.get(d as usize).copied().flatten());
     // C's hook returns NULL and the core reports undefined_parameter.
@@ -356,27 +362,29 @@ pub fn plpgsql_paramref_hook<'mcx>(
     )
 }
 
-/// resolve_column_ref (pl_exec.c) over the flattened name table. Returns the
-/// Param for a match; `error_if_no_field` raises the record-has-no-field
-/// error when the name's rec prefix is known but the field key is not.
+/// resolve_column_ref (pl_comp.c) over the flattened name table. Returns the
+/// Param for a match. A field the record's current tuple lacks is an error
+/// regardless of `error_if_no_field`: C's scanner built a RECFIELD datum for
+/// every qualified reference, so resolve_column_ref finds it and
+/// make_datum_param's type lookup raises 42703 (pl_exec.c:5496-5499).
 pub fn plpgsql_resolve_column_ref<'mcx>(
     mcx: Mcx<'mcx>,
     _pstate: &ParseState<'_, 'mcx>,
     parstate: &PlpgsqlHookState<'_>,
     fields: &[&str],
     location: i32,
-    error_if_no_field: bool,
+    _error_if_no_field: bool,
     _encoding: pg_enc,
 ) -> PgResult<Option<Node<'mcx>>> {
     if fields.is_empty() || fields.len() > 3 {
         return Ok(None);
     }
-    let key = fields.join(".");
+    let key = fields.join("\0");
     // A whole-row reference reports the record's declared type instead
     // (pl_exec.c exec_get_datum_type_info, REC arm); the 55000 waits for the
     // execution-time fetch.
     if fields.len() >= 2 && fields[fields.len() - 1] != "*" {
-        let prefix = fields[..fields.len() - 1].join(".");
+        let prefix = fields[..fields.len() - 1].join("\0");
         if parstate.valueless_recs.iter().any(|r| *r == prefix) {
             let recname = fields[fields.len() - 2];
             // C's error comes from exec_get_datum_type_info (no cursor);
@@ -405,9 +413,9 @@ pub fn plpgsql_resolve_column_ref<'mcx>(
             },
         )?));
     }
-    if error_if_no_field && fields.len() >= 2 {
+    if fields.len() >= 2 && fields[fields.len() - 1] != "*" {
         // C reports against the last-1 prefix that named a rec/row.
-        let prefix = fields[..fields.len() - 1].join(".");
+        let prefix = fields[..fields.len() - 1].join("\0");
         if parstate.recs.iter().any(|r| *r == prefix) {
             let recname = fields[fields.len() - 2];
             let field = fields[fields.len() - 1];

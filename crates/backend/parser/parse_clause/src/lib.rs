@@ -185,6 +185,7 @@ fn transformJoinExpr<'mcx>(
     pstate: &mut ParseState<'_, 'mcx>,
     j: &types_nodes::JoinExpr<'mcx>,
 ) -> PgResult<(Node<'mcx>, mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>>)> {
+    stack_depth::check_stack_depth()?;
     if !matches!(
         j.jointype,
         types_nodes::JoinType::JOIN_INNER

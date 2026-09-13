@@ -1406,3 +1406,46 @@ fn grouping_set_sublist_dedups_locally() {
         "sublist duplicates drop out"
     );
 }
+
+#[test]
+fn deep_join_chain_trips_the_stack_guard_before_the_leaf() {
+    use types_nodes::jointype::JoinType;
+    use types_nodes::JoinExpr;
+    std::thread::Builder::new()
+        .stack_size(4 << 20)
+        .spawn(|| {
+            install_fixture();
+            stack_depth::set_stack_base();
+            stack_depth::set_enforced_stack_budget_for_tests(1 << 20);
+            let ctx = MemoryContext::new("t");
+            let mcx = ctx.mcx();
+            let mut pstate = make_parsestate(mcx, None);
+            let mut n = generate_series_from_item(mcx, Some("a0"));
+            for i in 1..100_000 {
+                let alias: &'static str = Box::leak(format!("a{i}").into_boxed_str());
+                let rarg = generate_series_from_item(mcx, Some(alias));
+                n = Node::mk(
+                    mcx,
+                    JoinExpr {
+                        jointype: JoinType::JOIN_INNER,
+                        isNatural: false,
+                        larg: n,
+                        rarg,
+                        usingClause: NodeList::nil(),
+                        join_using_alias: None,
+                        quals: None,
+                        alias: None,
+                        rtindex: 0,
+                    },
+                )
+                .unwrap();
+            }
+            let from = NodeList::make1(mcx, n).unwrap();
+            let err = transformFromClause(mcx, &mut pstate, &from).unwrap_err();
+            assert_eq!(err.sqlstate(), types_error::ERRCODE_STATEMENT_TOO_COMPLEX);
+            assert_eq!(err.message(), "stack depth limit exceeded");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

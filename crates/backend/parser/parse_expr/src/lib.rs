@@ -1301,20 +1301,23 @@ fn transformAExprBetweenRaw<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     use types_nodes::primnodes::BoolExprType::{AND_EXPR, OR_EXPR};
     let loc = a.location;
+    let copy = |n: Option<Node<'mcx>>| -> PgResult<Option<Node<'mcx>>> {
+        n.map(|n| copyfuncs::copy_object(mcx, n)).transpose()
+    };
 
     let result = match a.kind {
         A_Expr_Kind::AEXPR_BETWEEN => between_bool_expr(
             mcx,
             AND_EXPR,
             between_a_expr(mcx, ">=", aexpr, bexpr, loc)?,
-            between_a_expr(mcx, "<=", aexpr, cexpr, loc)?,
+            between_a_expr(mcx, "<=", copy(aexpr)?, cexpr, loc)?,
             loc,
         )?,
         A_Expr_Kind::AEXPR_NOT_BETWEEN => between_bool_expr(
             mcx,
             OR_EXPR,
             between_a_expr(mcx, "<", aexpr, bexpr, loc)?,
-            between_a_expr(mcx, ">", aexpr, cexpr, loc)?,
+            between_a_expr(mcx, ">", copy(aexpr)?, cexpr, loc)?,
             loc,
         )?,
         A_Expr_Kind::AEXPR_BETWEEN_SYM => {
@@ -1322,14 +1325,14 @@ fn transformAExprBetweenRaw<'mcx>(
                 mcx,
                 AND_EXPR,
                 between_a_expr(mcx, ">=", aexpr, bexpr, loc)?,
-                between_a_expr(mcx, "<=", aexpr, cexpr, loc)?,
+                between_a_expr(mcx, "<=", copy(aexpr)?, cexpr, loc)?,
                 loc,
             )?;
             let sub2 = between_bool_expr(
                 mcx,
                 AND_EXPR,
-                between_a_expr(mcx, ">=", aexpr, cexpr, loc)?,
-                between_a_expr(mcx, "<=", aexpr, bexpr, loc)?,
+                between_a_expr(mcx, ">=", copy(aexpr)?, copy(cexpr)?, loc)?,
+                between_a_expr(mcx, "<=", copy(aexpr)?, copy(bexpr)?, loc)?,
                 loc,
             )?;
             between_bool_expr(mcx, OR_EXPR, sub1, sub2, loc)?
@@ -1339,14 +1342,14 @@ fn transformAExprBetweenRaw<'mcx>(
                 mcx,
                 OR_EXPR,
                 between_a_expr(mcx, "<", aexpr, bexpr, loc)?,
-                between_a_expr(mcx, ">", aexpr, cexpr, loc)?,
+                between_a_expr(mcx, ">", copy(aexpr)?, cexpr, loc)?,
                 loc,
             )?;
             let sub2 = between_bool_expr(
                 mcx,
                 OR_EXPR,
-                between_a_expr(mcx, "<", aexpr, cexpr, loc)?,
-                between_a_expr(mcx, ">", aexpr, bexpr, loc)?,
+                between_a_expr(mcx, "<", copy(aexpr)?, copy(cexpr)?, loc)?,
+                between_a_expr(mcx, ">", copy(aexpr)?, copy(bexpr)?, loc)?,
                 loc,
             )?;
             between_bool_expr(mcx, AND_EXPR, sub1, sub2, loc)?
@@ -2813,7 +2816,7 @@ fn plpgsql_column_ref<'mcx>(
         )? {
             return Ok(Some(node));
         }
-        let prefix = names[..n - 1].join(".").to_ascii_lowercase();
+        let prefix = names[..n - 1].join("\0").to_ascii_lowercase();
         if !st.recs.iter().any(|r| *r == prefix) {
             return Ok(None);
         }

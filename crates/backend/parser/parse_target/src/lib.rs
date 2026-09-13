@@ -840,7 +840,7 @@ pub fn expandRecordVariable<'mcx>(
                     .expect("analyzed CTE")
                     .as_query()
                     .expect("analyzed CTE is a Query");
-                let ste = get_tle_by_resno(&ctequery.targetList, attnum);
+                let ste = get_tle_by_resno(cte.cte_target_list(), attnum);
                 let ste = match ste {
                     Some(t) if !t.resjunk => t,
                     _ => return Err(no_such_attribute("CTE", rte, attnum)),
