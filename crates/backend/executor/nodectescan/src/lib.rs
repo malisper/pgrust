@@ -6,6 +6,9 @@ extern crate alloc;
 
 use alloc::rc::Rc;
 
+#[cfg(test)]
+mod tests;
+
 use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{AuxCxtId, CteShared, EStateData, ExecSlotId};
 use ::mcx::Mcx;

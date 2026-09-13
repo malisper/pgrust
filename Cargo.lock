@@ -10077,19 +10077,34 @@ dependencies = [
 name = "nodectescan"
 version = "0.1.0"
 dependencies = [
+ "aio_seams",
+ "datum",
+ "elog",
  "execexpr",
  "execscan",
  "exectuples",
  "executils",
+ "fd",
+ "guc_tables",
  "init_small",
+ "ipc_seams",
  "mcx",
+ "pgstat_seams",
+ "postgres_seams",
+ "resowner",
+ "resowner_seams",
+ "syscache_seams",
  "tuplestore",
  "types_core",
  "types_error",
  "types_nodes",
+ "types_portal",
+ "types_resowner",
  "types_scan",
  "types_slot",
  "types_tuple",
+ "waitevent_seams",
+ "xact_seams",
 ]
 
 [[package]]

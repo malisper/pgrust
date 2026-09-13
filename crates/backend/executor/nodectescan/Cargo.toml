@@ -18,3 +18,20 @@ executils = { path = "../executils" }
 exectuples = { path = "../exectuples" }
 init_small = { path = "../../utils/init/init_small" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
+
+[dev-dependencies]
+aio_seams = { path = "../../storage/aio/aio_seams" }
+elog = { path = "../../utils/error/elog" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+resowner = { path = "../../utils/resowner/resowner" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+datum = { path = "../../../_support/types/datum" }
+fd = { path = "../../storage/file/fd" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_portal = { path = "../../../_support/types/portal" }
