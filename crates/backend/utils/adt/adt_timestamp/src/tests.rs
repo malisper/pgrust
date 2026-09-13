@@ -1085,3 +1085,84 @@ fn generate_series_timestamptz_keeps_the_first_call_session_timezone() {
     assert_eq!(s.next().unwrap(), Some(tstz_in("2024-03-11 12:00+00")));
     zone_session(b"GMT");
 }
+
+// One-dimensional cstring[] image; `bitmap` = Some(bits) attaches a null
+// bitmap (a slice of a NULL-bearing array keeps its source's bitmap).
+fn cstring_array_image(elems: &[&[u8]], bitmap: Option<u8>) -> Vec<u8> {
+    let n = elems.len() as u32;
+    let dataoffset = if bitmap.is_some() { 32u32 } else { 0 };
+    let mut img: Vec<u8> = vec![0u8; 4];
+    for w in [1u32, dataoffset, 2275, n, 1] {
+        img.extend_from_slice(&w.to_ne_bytes());
+    }
+    if let Some(bits) = bitmap {
+        img.push(bits);
+        img.resize(32, 0);
+    }
+    for e in elems {
+        img.extend_from_slice(e);
+        img.push(0);
+    }
+    let hdr = ::datum::varlena::set_varsize_4b(img.len());
+    img[..4].copy_from_slice(&hdr);
+    img
+}
+
+// audit-18.6 fp-adt-b1#2: arrayutils.c:249 array_contains_nulls inspects
+// the bitmap bits, so ('{NULL,6}'::cstring[])[2:2] (bitmap present, no
+// null) is the typmod 6, not "must not contain nulls".
+#[test]
+fn typmod_array_bitmap_without_nulls_is_accepted() {
+    let img = cstring_array_image(&[b"6"], Some(0x01));
+    let mut fci = ::types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_usize(img.as_ptr() as usize));
+    let mut out = [0i32; 8];
+    assert_eq!(crate::builtins::array_get_integer_typmods(&fci, &mut out, "too many").unwrap(), 1);
+    assert_eq!(out[0], 6);
+
+    let img = cstring_array_image(&[b"6", b"7"], Some(0x02));
+    fci.set_arg(0, ::datum::Datum::from_usize(img.as_ptr() as usize));
+    let err = crate::builtins::array_get_integer_typmods(&fci, &mut out, "too many").unwrap_err();
+    assert_eq!(err.message(), "typmod array must not contain nulls");
+}
+
+// audit-18.6 fp-adt-b1#3 / fp-adt-date-p1#2: C parses every element
+// (pg_strtoint32) before the caller counts them, so nine elements with a
+// bad integer are 22P02, and nine good ones are the caller's 22023.
+#[test]
+fn typmod_array_parses_elements_before_count_cap() {
+    let nine: Vec<&[u8]> = vec![b"bad", b"1", b"1", b"1", b"1", b"1", b"1", b"1", b"1"];
+    let img = cstring_array_image(&nine, None);
+    let mut fci = ::types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_usize(img.as_ptr() as usize));
+    let mut out = [0i32; 8];
+    let err = crate::builtins::array_get_integer_typmods(&fci, &mut out, "too many").unwrap_err();
+    assert_eq!(err.message(), "invalid input syntax for type integer: \"bad\"");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+
+    let nine: Vec<&[u8]> = vec![b"99999999999", b"1", b"1", b"1", b"1", b"1", b"1", b"1", b"1"];
+    let img = cstring_array_image(&nine, None);
+    fci.set_arg(0, ::datum::Datum::from_usize(img.as_ptr() as usize));
+    let err = crate::builtins::array_get_integer_typmods(&fci, &mut out, "too many").unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+
+    let nine: Vec<&[u8]> = vec![b"1"; 9];
+    let img = cstring_array_image(&nine, None);
+    fci.set_arg(0, ::datum::Datum::from_usize(img.as_ptr() as usize));
+    let err = crate::builtins::array_get_integer_typmods(&fci, &mut out, "too many").unwrap_err();
+    assert_eq!(err.message(), "too many");
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+}
+
+// audit-18.6 fp-adt-b1#4: a non-UTF-8 element (SQL_ASCII) is pg_strtoint32's
+// 22P02 quoting the raw bytes, not a UTF-8 decoding failure.
+#[test]
+fn typmod_array_non_utf8_element_is_invalid_integer() {
+    let img = cstring_array_image(&[b"\xff"], None);
+    let mut fci = ::types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_usize(img.as_ptr() as usize));
+    let mut out = [0i32; 8];
+    let err = crate::builtins::array_get_integer_typmods(&fci, &mut out, "too many").unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+    assert_eq!(err.message_raw.as_deref(), Some(&b"invalid input syntax for type integer: \"\xff\""[..]));
+}

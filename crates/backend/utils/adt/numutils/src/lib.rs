@@ -363,6 +363,23 @@ macro_rules! strtoint {
 
 strtoint!(pg_strtoint16, pg_strtoint16_safe, i16, "smallint");
 strtoint!(pg_strtoint32, pg_strtoint32_safe, i32, "integer");
+
+// pg_strtoint32 over raw cstring bytes (SQL_ASCII carries non-UTF-8): the
+// C message quotes the bytes verbatim.
+pub fn pg_strtoint32_bytes(s: &[u8]) -> PgResult<i32> {
+    match core::str::from_utf8(s) {
+        Ok(s) => pg_strtoint32(s),
+        Err(_) => {
+            let mut msg = b"invalid input syntax for type integer: \"".to_vec();
+            msg.extend_from_slice(s);
+            msg.push(b'"');
+            Err(Box::new(
+                PgError::error_raw_message(msg)
+                    .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
+            ))
+        }
+    }
+}
 strtoint!(pg_strtoint64, pg_strtoint64_safe, i64, "bigint");
 
 // C strtoul/strtou64 base-0 model + the uint*in_subr checks; cold (oid/xid

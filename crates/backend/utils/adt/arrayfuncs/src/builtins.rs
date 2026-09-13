@@ -122,8 +122,9 @@ pub fn fc_array_recv(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     // SAFETY: arg 0 of a recv function is a live &mut StringInfo pointer.
     let buf = unsafe { &mut *(fcinfo.arg(0).as_usize() as *mut ::stringinfo::StringInfo<'_>) };
     let flinfo = flinfo.expect("array_recv: NULL flinfo");
+    let hdr = crate::io::array_recv_header(buf, spec_element_type)?;
     let ams = cached_meta(flinfo, spec_element_type, IOFuncSelector::IOFunc_receive, true)?;
-    let img = array_recv(mcx, buf, &ams.meta, &mut ams.proc, typmod)?;
+    let img = crate::io::array_recv_body(mcx, buf, &hdr, &ams.meta, &mut ams.proc, typmod)?;
     byref_result(mcx, &img)
 }
 

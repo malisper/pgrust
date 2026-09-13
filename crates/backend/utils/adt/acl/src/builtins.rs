@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use datum::Datum;
 use types_core::{Oid, BOOLOID, OIDOID, RECORDOID, TEXTOID};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_TABLE};
@@ -43,19 +44,19 @@ fn aclitem_result(fcinfo: &Fcinfo, item: &AclItem) -> PgResult<Datum> {
     byref_result(fcinfo.result_mcx(), &b)
 }
 
-fn arg_text_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
+// text_to_cstring / NameStr: database-encoding bytes, which SQL_ASCII lets
+// be non-UTF-8; the lossy rendering keeps C's error class for such input.
+fn arg_text_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<Cow<'a, str>> {
     // SAFETY: catalog arg type text — non-null varlena (strict fn).
     let v = unsafe { fcinfo.arg_varlena_packed(i) }?;
-    core::str::from_utf8(v.data())
-        .map_err(|_| Box::new(PgError::error("invalid UTF-8 in text argument")))
+    Ok(String::from_utf8_lossy(v.data()))
 }
 
-fn arg_name_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
+fn arg_name_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<Cow<'a, str>> {
     // SAFETY: catalog arg type name — non-null 64-byte Name (strict fn).
     let b = unsafe { fcinfo.arg_name(i) };
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    core::str::from_utf8(&b[..end])
-        .map_err(|_| Box::new(PgError::error("invalid UTF-8 in name argument")))
+    Ok(String::from_utf8_lossy(&b[..end]))
 }
 
 fn fc_aclitemin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -198,12 +199,12 @@ const MAKEACLITEM_PRIV_MAP: &[PrivMapEntry] = &[
     PrivMapEntry { name: "MAINTAIN", value: ACL_MAINTAIN },
 ];
 
-fn fc_makeaclitem(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub(crate) fn fc_makeaclitem(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let grantee = fcinfo.arg_oid(0);
     let grantor = fcinfo.arg_oid(1);
     let privtext = arg_text_str(fcinfo, 2)?;
     let goption = fcinfo.arg_bool(3);
-    let privs = convert_any_priv_string(privtext, MAKEACLITEM_PRIV_MAP)?;
+    let privs = convert_any_priv_string(&privtext, MAKEACLITEM_PRIV_MAP)?;
     let mut item = AclItem {
         ai_grantee: grantee,
         ai_grantor: grantor,
@@ -327,16 +328,16 @@ fn fc_has_table_privilege_name_name(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     let tableoid = convert_table_name(fcinfo, 1)?;
-    let mode = convert_table_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_table_priv_string(&arg_text_str(fcinfo, 2)?)?;
     table_priv_check(roleid, tableoid, mode)
 }
 
 fn fc_has_table_privilege_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
     let tableoid = convert_table_name(fcinfo, 0)?;
-    let mode = convert_table_priv_string(arg_text_str(fcinfo, 1)?)?;
+    let mode = convert_table_priv_string(&arg_text_str(fcinfo, 1)?)?;
     table_priv_check(roleid, tableoid, mode)
 }
 
@@ -344,16 +345,16 @@ fn fc_has_table_privilege_name_id(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     let tableoid = fcinfo.arg_oid(1);
-    let mode = convert_table_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_table_priv_string(&arg_text_str(fcinfo, 2)?)?;
     table_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 
 fn fc_has_table_privilege_id(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
     let tableoid = fcinfo.arg_oid(0);
-    let mode = convert_table_priv_string(arg_text_str(fcinfo, 1)?)?;
+    let mode = convert_table_priv_string(&arg_text_str(fcinfo, 1)?)?;
     table_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 
@@ -363,7 +364,7 @@ fn fc_has_table_privilege_id_name(
 ) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
     let tableoid = convert_table_name(fcinfo, 1)?;
-    let mode = convert_table_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_table_priv_string(&arg_text_str(fcinfo, 2)?)?;
     table_priv_check(roleid, tableoid, mode)
 }
 
@@ -373,7 +374,7 @@ fn fc_has_table_privilege_id_id(
 ) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
     let tableoid = fcinfo.arg_oid(1);
-    let mode = convert_table_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_table_priv_string(&arg_text_str(fcinfo, 2)?)?;
     table_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 
@@ -435,20 +436,20 @@ fn object_priv_check_ext(
 }
 
 fn convert_database_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
-    dbcommands_seams::get_database_oid::call(fcinfo.result_mcx(), arg_text_str(fcinfo, i)?, false)
+    dbcommands_seams::get_database_oid::call(fcinfo.result_mcx(), &arg_text_str(fcinfo, i)?, false)
 }
 
 fn convert_schema_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
-    catalog_namespace::get_namespace_oid(arg_text_str(fcinfo, i)?, false)
+    catalog_namespace::get_namespace_oid(&arg_text_str(fcinfo, i)?, false)
 }
 
 fn convert_language_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
-    crate::get_language_oid(arg_text_str(fcinfo, i)?, false)
+    crate::get_language_oid(&arg_text_str(fcinfo, i)?, false)
 }
 
 fn convert_function_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
     let s = arg_text_str(fcinfo, i)?;
-    let oid = adt_regproc::regprocedurein(fcinfo.result_mcx(), s, None)?.unwrap_or(0);
+    let oid = adt_regproc::regprocedurein(fcinfo.result_mcx(), &s, None)?.unwrap_or(0);
     if oid == 0 {
         return Err(Box::new(
             PgError::error(format!("function \"{s}\" does not exist"))
@@ -460,7 +461,7 @@ fn convert_function_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
 
 fn convert_type_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
     let s = arg_text_str(fcinfo, i)?;
-    let oid = adt_regproc::regtypein(fcinfo.result_mcx(), s, None)?.unwrap_or(0);
+    let oid = adt_regproc::regtypein(fcinfo.result_mcx(), &s, None)?.unwrap_or(0);
     if oid == 0 {
         return Err(Box::new(
             PgError::error(format!("type \"{s}\" does not exist"))
@@ -474,39 +475,39 @@ macro_rules! has_priv_family {
     ($classid:expr, $map:expr, $convert:ident,
      $nn:ident, $ni:ident, $in_:ident, $ii:ident, $n:ident, $i:ident) => {
         fn $nn(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-            let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+            let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
             let objoid = $convert(fcinfo, 1)?;
-            let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
+            let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, $map)?;
             object_priv_check($classid, objoid, roleid, mode)
         }
         fn $ni(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-            let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+            let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
             let objoid = fcinfo.arg_oid(1);
-            let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
+            let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, $map)?;
             object_priv_check_ext(fcinfo, $classid, objoid, roleid, mode)
         }
         fn $in_(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let roleid = fcinfo.arg_oid(0);
             let objoid = $convert(fcinfo, 1)?;
-            let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
+            let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, $map)?;
             object_priv_check($classid, objoid, roleid, mode)
         }
         fn $ii(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let roleid = fcinfo.arg_oid(0);
             let objoid = fcinfo.arg_oid(1);
-            let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, $map)?;
+            let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, $map)?;
             object_priv_check_ext(fcinfo, $classid, objoid, roleid, mode)
         }
         fn $n(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let roleid = miscinit_seams::get_user_id::call();
             let objoid = $convert(fcinfo, 0)?;
-            let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, $map)?;
+            let mode = convert_any_priv_string(&arg_text_str(fcinfo, 1)?, $map)?;
             object_priv_check($classid, objoid, roleid, mode)
         }
         fn $i(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let roleid = miscinit_seams::get_user_id::call();
             let objoid = fcinfo.arg_oid(0);
-            let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, $map)?;
+            let mode = convert_any_priv_string(&arg_text_str(fcinfo, 1)?, $map)?;
             object_priv_check_ext(fcinfo, $classid, objoid, roleid, mode)
         }
     };
@@ -611,15 +612,15 @@ pub(crate) const ROLE_PRIV_MAP: &[PrivMapEntry] = &[
 ];
 
 fn convert_tablespace_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
-    tablespace_seams::get_tablespace_oid::call(fcinfo.result_mcx(), arg_text_str(fcinfo, i)?, false)
+    tablespace_seams::get_tablespace_oid::call(fcinfo.result_mcx(), &arg_text_str(fcinfo, i)?, false)
 }
 
 fn convert_foreign_data_wrapper_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
-    foreigncmds_seams::get_foreign_data_wrapper_oid::call(arg_text_str(fcinfo, i)?, false)
+    foreigncmds_seams::get_foreign_data_wrapper_oid::call(&arg_text_str(fcinfo, i)?, false)
 }
 
 fn convert_server_name(fcinfo: &Fcinfo, i: usize) -> PgResult<Oid> {
-    foreigncmds_seams::get_foreign_server_oid::call(arg_text_str(fcinfo, i)?, false)
+    foreigncmds_seams::get_foreign_server_oid::call(&arg_text_str(fcinfo, i)?, false)
 }
 
 has_priv_family!(
@@ -675,7 +676,7 @@ fn not_a_sequence(name: &str) -> Box<PgError> {
 fn sequence_priv_byname(fcinfo: &Fcinfo, roleid: Oid, nameidx: usize, mode: u64) -> PgResult<Datum> {
     let sequenceoid = convert_table_name(fcinfo, nameidx)?;
     if lsyscache::get_rel_relkind(sequenceoid)? as u8 != types_rel::pg_class::RELKIND_SEQUENCE {
-        return Err(not_a_sequence(arg_text_str(fcinfo, nameidx)?));
+        return Err(not_a_sequence(&arg_text_str(fcinfo, nameidx)?));
     }
     table_priv_check(roleid, sequenceoid, mode)
 }
@@ -699,8 +700,8 @@ fn fc_has_sequence_privilege_name_name(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
-    let mode = convert_sequence_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
+    let mode = convert_sequence_priv_string(&arg_text_str(fcinfo, 2)?)?;
     sequence_priv_byname(fcinfo, roleid, 1, mode)
 }
 
@@ -708,8 +709,8 @@ fn fc_has_sequence_privilege_name_id(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
-    let mode = convert_sequence_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
+    let mode = convert_sequence_priv_string(&arg_text_str(fcinfo, 2)?)?;
     sequence_priv_byid(fcinfo, roleid, 1, mode)
 }
 
@@ -718,7 +719,7 @@ fn fc_has_sequence_privilege_id_name(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
-    let mode = convert_sequence_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_sequence_priv_string(&arg_text_str(fcinfo, 2)?)?;
     sequence_priv_byname(fcinfo, roleid, 1, mode)
 }
 
@@ -727,7 +728,7 @@ fn fc_has_sequence_privilege_id_id(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
-    let mode = convert_sequence_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_sequence_priv_string(&arg_text_str(fcinfo, 2)?)?;
     sequence_priv_byid(fcinfo, roleid, 1, mode)
 }
 
@@ -736,7 +737,7 @@ fn fc_has_sequence_privilege_name(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
-    let mode = convert_sequence_priv_string(arg_text_str(fcinfo, 1)?)?;
+    let mode = convert_sequence_priv_string(&arg_text_str(fcinfo, 1)?)?;
     sequence_priv_byname(fcinfo, roleid, 0, mode)
 }
 
@@ -745,12 +746,12 @@ fn fc_has_sequence_privilege_id(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
-    let mode = convert_sequence_priv_string(arg_text_str(fcinfo, 1)?)?;
+    let mode = convert_sequence_priv_string(&arg_text_str(fcinfo, 1)?)?;
     sequence_priv_byid(fcinfo, roleid, 0, mode)
 }
 
 fn parameter_priv_check(fcinfo: &Fcinfo, roleid: Oid, paramidx: usize, mode: u64) -> PgResult<Datum> {
-    let r = aclchk_seams::pg_parameter_aclcheck::call(arg_text_str(fcinfo, paramidx)?, roleid, mode)?;
+    let r = aclchk_seams::pg_parameter_aclcheck::call(&arg_text_str(fcinfo, paramidx)?, roleid, mode)?;
     Ok(Datum::from_bool(r == ACLCHECK_OK))
 }
 
@@ -758,8 +759,8 @@ fn fc_has_parameter_privilege_name_name(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, PARAMETER_PRIV_MAP)?;
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, PARAMETER_PRIV_MAP)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     parameter_priv_check(fcinfo, roleid, 1, mode)
 }
 
@@ -768,7 +769,7 @@ fn fc_has_parameter_privilege_id_name(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, PARAMETER_PRIV_MAP)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, PARAMETER_PRIV_MAP)?;
     parameter_priv_check(fcinfo, roleid, 1, mode)
 }
 
@@ -776,7 +777,7 @@ fn fc_has_parameter_privilege_name(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, PARAMETER_PRIV_MAP)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 1)?, PARAMETER_PRIV_MAP)?;
     let roleid = miscinit_seams::get_user_id::call();
     parameter_priv_check(fcinfo, roleid, 0, mode)
 }
@@ -806,44 +807,44 @@ fn role_priv_result(role_oid: Oid, roleid: Oid, mode: u64) -> PgResult<Datum> {
 }
 
 fn fc_pg_has_role_name_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let roleid = crate::get_role_oid(arg_name_str(fcinfo, 0)?, false)?;
-    let role_oid = crate::get_role_oid(arg_name_str(fcinfo, 1)?, false)?;
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
+    let roleid = crate::get_role_oid(&arg_name_str(fcinfo, 0)?, false)?;
+    let role_oid = crate::get_role_oid(&arg_name_str(fcinfo, 1)?, false)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
     role_priv_result(role_oid, roleid, mode)
 }
 
 fn fc_pg_has_role_name_id(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let roleid = crate::get_role_oid(arg_name_str(fcinfo, 0)?, false)?;
+    let roleid = crate::get_role_oid(&arg_name_str(fcinfo, 0)?, false)?;
     let role_oid = fcinfo.arg_oid(1);
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
     role_priv_result(role_oid, roleid, mode)
 }
 
 fn fc_pg_has_role_id_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
-    let role_oid = crate::get_role_oid(arg_name_str(fcinfo, 1)?, false)?;
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
+    let role_oid = crate::get_role_oid(&arg_name_str(fcinfo, 1)?, false)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
     role_priv_result(role_oid, roleid, mode)
 }
 
 fn fc_pg_has_role_id_id(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
     let role_oid = fcinfo.arg_oid(1);
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, ROLE_PRIV_MAP)?;
     role_priv_result(role_oid, roleid, mode)
 }
 
 fn fc_pg_has_role_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
-    let role_oid = crate::get_role_oid(arg_name_str(fcinfo, 0)?, false)?;
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, ROLE_PRIV_MAP)?;
+    let role_oid = crate::get_role_oid(&arg_name_str(fcinfo, 0)?, false)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 1)?, ROLE_PRIV_MAP)?;
     role_priv_result(role_oid, roleid, mode)
 }
 
 fn fc_pg_has_role_id(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
     let role_oid = fcinfo.arg_oid(0);
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, ROLE_PRIV_MAP)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 1)?, ROLE_PRIV_MAP)?;
     role_priv_result(role_oid, roleid, mode)
 }
 
@@ -859,9 +860,9 @@ fn fc_has_largeobject_privilege_name_id(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     let lobj = fcinfo.arg_oid(1);
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, LARGEOBJECT_PRIV_MAP)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, LARGEOBJECT_PRIV_MAP)?;
     lo_priv_result(fcinfo, roleid, lobj, mode)
 }
 
@@ -871,7 +872,7 @@ fn fc_has_largeobject_privilege_id(
 ) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
     let lobj = fcinfo.arg_oid(0);
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 1)?, LARGEOBJECT_PRIV_MAP)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 1)?, LARGEOBJECT_PRIV_MAP)?;
     lo_priv_result(fcinfo, roleid, lobj, mode)
 }
 
@@ -881,7 +882,7 @@ fn fc_has_largeobject_privilege_id_id(
 ) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
     let lobj = fcinfo.arg_oid(1);
-    let mode = convert_any_priv_string(arg_text_str(fcinfo, 2)?, LARGEOBJECT_PRIV_MAP)?;
+    let mode = convert_any_priv_string(&arg_text_str(fcinfo, 2)?, LARGEOBJECT_PRIV_MAP)?;
     lo_priv_result(fcinfo, roleid, lobj, mode)
 }
 
@@ -915,7 +916,7 @@ fn convert_column_name(fcinfo: &Fcinfo, tableoid: Oid, i: usize) -> PgResult<i16
     match SearchSysCache2(
         ATTNAME,
         SysCacheKey::Value(Datum::from_oid(tableoid)),
-        SysCacheKey::Str(colname),
+        SysCacheKey::Str(&colname),
     )? {
         Some(tuple) => {
             let dropped =
@@ -978,10 +979,10 @@ fn fc_has_column_privilege_name_name_name(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     let tableoid = convert_table_name(fcinfo, 1)?;
     let colattnum = convert_column_name(fcinfo, tableoid, 2)?;
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 3)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -990,10 +991,10 @@ fn fc_has_column_privilege_name_name_attnum(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     let tableoid = convert_table_name(fcinfo, 1)?;
     let colattnum = fcinfo.arg_i16(2);
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 3)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1002,10 +1003,10 @@ fn fc_has_column_privilege_name_id_name(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     let tableoid = fcinfo.arg_oid(1);
     let colattnum = convert_column_name(fcinfo, tableoid, 2)?;
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 3)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1014,10 +1015,10 @@ fn fc_has_column_privilege_name_id_attnum(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     let tableoid = fcinfo.arg_oid(1);
     let colattnum = fcinfo.arg_i16(2);
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 3)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1029,7 +1030,7 @@ fn fc_has_column_privilege_id_name_name(
     let roleid = fcinfo.arg_oid(0);
     let tableoid = convert_table_name(fcinfo, 1)?;
     let colattnum = convert_column_name(fcinfo, tableoid, 2)?;
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 3)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1041,7 +1042,7 @@ fn fc_has_column_privilege_id_name_attnum(
     let roleid = fcinfo.arg_oid(0);
     let tableoid = convert_table_name(fcinfo, 1)?;
     let colattnum = fcinfo.arg_i16(2);
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 3)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1053,7 +1054,7 @@ fn fc_has_column_privilege_id_id_name(
     let roleid = fcinfo.arg_oid(0);
     let tableoid = fcinfo.arg_oid(1);
     let colattnum = convert_column_name(fcinfo, tableoid, 2)?;
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 3)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1065,7 +1066,7 @@ fn fc_has_column_privilege_id_id_attnum(
     let roleid = fcinfo.arg_oid(0);
     let tableoid = fcinfo.arg_oid(1);
     let colattnum = fcinfo.arg_i16(2);
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 3)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 3)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1077,7 +1078,7 @@ fn fc_has_column_privilege_name_name(
     let roleid = miscinit_seams::get_user_id::call();
     let tableoid = convert_table_name(fcinfo, 0)?;
     let colattnum = convert_column_name(fcinfo, tableoid, 1)?;
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 2)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1089,7 +1090,7 @@ fn fc_has_column_privilege_name_attnum(
     let roleid = miscinit_seams::get_user_id::call();
     let tableoid = convert_table_name(fcinfo, 0)?;
     let colattnum = fcinfo.arg_i16(1);
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 2)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1101,7 +1102,7 @@ fn fc_has_column_privilege_id_name(
     let roleid = miscinit_seams::get_user_id::call();
     let tableoid = fcinfo.arg_oid(0);
     let colattnum = convert_column_name(fcinfo, tableoid, 1)?;
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 2)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1113,7 +1114,7 @@ fn fc_has_column_privilege_id_attnum(
     let roleid = miscinit_seams::get_user_id::call();
     let tableoid = fcinfo.arg_oid(0);
     let colattnum = fcinfo.arg_i16(1);
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 2)?)?;
     let r = column_privilege_check(tableoid, colattnum, roleid, mode)?;
     column_priv_result(fcinfo, r)
 }
@@ -1153,9 +1154,9 @@ fn fc_has_any_column_privilege_name_name(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     let tableoid = convert_table_name(fcinfo, 1)?;
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 2)?)?;
     any_column_priv_check(roleid, tableoid, mode)
 }
 
@@ -1165,7 +1166,7 @@ fn fc_has_any_column_privilege_name(
 ) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
     let tableoid = convert_table_name(fcinfo, 0)?;
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 1)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 1)?)?;
     any_column_priv_check(roleid, tableoid, mode)
 }
 
@@ -1173,9 +1174,9 @@ fn fc_has_any_column_privilege_name_id(
     _f: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    let roleid = get_role_oid_or_public(arg_name_str(fcinfo, 0)?)?;
+    let roleid = get_role_oid_or_public(&arg_name_str(fcinfo, 0)?)?;
     let tableoid = fcinfo.arg_oid(1);
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 2)?)?;
     any_column_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 
@@ -1185,7 +1186,7 @@ fn fc_has_any_column_privilege_id(
 ) -> PgResult<Datum> {
     let roleid = miscinit_seams::get_user_id::call();
     let tableoid = fcinfo.arg_oid(0);
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 1)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 1)?)?;
     any_column_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 
@@ -1195,7 +1196,7 @@ fn fc_has_any_column_privilege_id_name(
 ) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
     let tableoid = convert_table_name(fcinfo, 1)?;
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 2)?)?;
     any_column_priv_check(roleid, tableoid, mode)
 }
 
@@ -1205,7 +1206,7 @@ fn fc_has_any_column_privilege_id_id(
 ) -> PgResult<Datum> {
     let roleid = fcinfo.arg_oid(0);
     let tableoid = fcinfo.arg_oid(1);
-    let mode = convert_column_priv_string(arg_text_str(fcinfo, 2)?)?;
+    let mode = convert_column_priv_string(&arg_text_str(fcinfo, 2)?)?;
     any_column_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 

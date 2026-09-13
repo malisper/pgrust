@@ -2443,3 +2443,34 @@ fn recv_null_element_still_calls_a_non_strict_receiver() {
     let img = array_recv(mcx, &mut buf, &m, &mut strict, -1).unwrap();
     assert!(crate::foundation::arr_hasnull(&img));
 }
+
+// audit-18.6 fp-adt-arrayfuncs-p1#3: arrayfuncs.c:1218-1249 sizes the
+// output exactly, so one 512 MiB unquoted element fits under MaxAllocSize;
+// the per-element reservation is the element's real length, not 2n+2.
+#[test]
+fn array_out_reserves_exact_element_length() {
+    assert_eq!(crate::io::element_reserve(b"abc", false, 1), 3 + 4);
+    assert_eq!(crate::io::element_reserve(b"a\"b\\", true, 1), 4 + 2 + 2 + 4);
+    assert_eq!(crate::io::element_reserve(b"", true, 2), 2 + 6);
+    let big = 536_870_912usize;
+    assert!(big + crate::io::element_reserve(b"", false, 1) < 1_073_741_823);
+}
+
+// audit-18.6 fp-adt-arrayfuncs-p1#4: arrayfuncs.c:1297-1358 validates the
+// wire header (dimensions, flags, element type, bounds) before resolving the
+// element receive function, so FF FF FF FF into aclitem[] is 22P03, not the
+// 42883 "no binary input function" of the element lookup.
+#[test]
+fn recv_header_is_validated_before_element_meta() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let payload = (-1i32).to_be_bytes();
+    let mut buf = StringInfo::with_capacity_in(mcx, payload.len()).unwrap();
+    buf.append_bytes(&payload).unwrap();
+    let e = crate::io::array_recv_header(&mut buf, 1033).unwrap_err();
+    assert_eq!(
+        core::str::from_utf8(&::types_error::unpack_sqlstate(e.sqlstate())).unwrap(),
+        "22P03"
+    );
+    assert_eq!(e.message(), "invalid number of dimensions: -1");
+}

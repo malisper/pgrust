@@ -14,7 +14,6 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 relation_seams = { path = "../../../access/common/relation_seams" }
-smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 varlena = { path = "../varlena" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 acl_seams = { path = "../acl_seams" }

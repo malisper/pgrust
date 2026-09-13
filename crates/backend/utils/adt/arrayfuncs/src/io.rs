@@ -703,9 +703,9 @@ pub fn array_out<'mcx>(
         };
         let quote = !is_null && element_needs_quote(bytes, meta.typdelim);
         let n = bytes.len();
-        let extra = 2 * n + 2 + 2 * ndim_u + 2;
+        let extra = element_reserve(bytes, quote, ndim_u);
         // `extra` bounds every write in the closure (braces/delims <=
-        // 2*ndim_u + 1, element <= 2n + 2); append_written enlarges through
+        // 2*ndim_u + 1, element exact); append_written enlarges through
         // the StringInfo ceiling and re-checks the returned count.
         out.append_written(extra, |base| {
             // SAFETY: writes below stay within `extra` bytes at `base`, per
@@ -769,6 +769,17 @@ pub fn array_out<'mcx>(
     Ok(out)
 }
 
+// arrayfuncs.c:1218-1249 array_out's exact per-element length: the bytes,
+// the quotes and one backslash per escaped byte when quoting, plus this
+// element's share of braces and one delimiter.
+pub(crate) fn element_reserve(bytes: &[u8], quote: bool, ndim: usize) -> usize {
+    let mut n = bytes.len() + 2 * ndim + 2;
+    if quote {
+        n += 2 + bytes.iter().filter(|&&ch| ch == b'"' || ch == b'\\').count();
+    }
+    n
+}
+
 fn element_needs_quote(bytes: &[u8], typdelim: u8) -> bool {
     if bytes.is_empty() {
         return true;
@@ -809,6 +820,24 @@ pub fn array_recv<'mcx>(
     proc: &mut FmgrInfo,
     typmod: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
+    let hdr = array_recv_header(buf, meta.element_type)?;
+    array_recv_body(mcx, buf, &hdr, meta, proc, typmod)
+}
+
+#[derive(Debug)]
+pub struct ArrayRecvHeader {
+    ndim: i32,
+    dim: [i32; MAXDIM],
+    lbound: [i32; MAXDIM],
+    nitems: i32,
+}
+
+// arrayfuncs.c:1297-1358: the wire header is validated against the expected
+// element type before the element receive function is resolved.
+pub fn array_recv_header(
+    buf: &mut StringInfo<'_>,
+    spec_element_type: Oid,
+) -> PgResult<ArrayRecvHeader> {
     let ndim = ::pqformat::pq_getmsgint(buf, 4)? as i32;
     if ndim < 0 {
         return Err(Box::new(
@@ -847,9 +876,9 @@ pub fn array_recv<'mcx>(
     // are in the built-in range.  Otherwise, carry on with the element type
     // we "should" be getting (which the rest of this function does anyway, by
     // using meta.element_type throughout).
-    if element_type != meta.element_type
+    if element_type != spec_element_type
         && element_type < FirstGenbkiObjectId
-        && meta.element_type < FirstGenbkiObjectId
+        && spec_element_type < FirstGenbkiObjectId
     {
         return Err(Box::new(
             PgError::error(alloc::format!(
@@ -860,9 +889,9 @@ pub fn array_recv<'mcx>(
                     ::format_type::FORMAT_TYPE_ALLOW_INVALID,
                 )?
                 .expect("no FORMAT_TYPE_INVALID_AS_NULL"),
-                meta.element_type,
+                spec_element_type,
                 ::format_type::format_type_extended(
-                    meta.element_type,
+                    spec_element_type,
                     -1,
                     ::format_type::FORMAT_TYPE_ALLOW_INVALID,
                 )?
@@ -880,7 +909,18 @@ pub fn array_recv<'mcx>(
     }
     let nitems = array_get_n_items(ndim, &dim)?;
     array_check_bounds(ndim, &dim, &lbound)?;
+    Ok(ArrayRecvHeader { ndim, dim, lbound, nitems })
+}
 
+pub fn array_recv_body<'mcx>(
+    mcx: Mcx<'mcx>,
+    buf: &mut StringInfo<'_>,
+    hdr: &ArrayRecvHeader,
+    meta: &ArrayIoMeta,
+    proc: &mut FmgrInfo,
+    typmod: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let ArrayRecvHeader { ndim, dim, lbound, nitems } = *hdr;
     if nitems == 0 {
         return construct_empty_array(mcx, meta.element_type);
     }

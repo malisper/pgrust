@@ -3,6 +3,7 @@
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
+use std::path::Path;
 use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
 pub fn fc_pg_size_bytes(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -16,23 +17,33 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
 
-// calculate_relation_size (dbsize.c). C stats the segment files; one backend
-// + full-page segments make smgrnblocks * BLCKSZ the same number without the
-// fs walk.
+// calculate_relation_size (dbsize.c): stat every consecutive segment file;
+// the first ENOENT ends the run, any other failure is an error.
 fn calculate_relation_size(
     key: ::types_storage::RelFileLocatorBackend,
     forknum: types_core::ForkNumber,
 ) -> PgResult<i64> {
-    // Storage-less rels (views: relfilenumber 0) stat a nonexistent path in C
-    // and count 0 bytes; smgropen asserts on RelFileNumber 0 so gate here.
-    if key.locator.relNumber == 0 {
-        return Ok(0);
+    let relationpath = relpath::GetRelationPath(key.locator, key.backend, forknum);
+    let mut totalsize = 0i64;
+    for segcount in 0u32.. {
+        check_for_interrupts()?;
+        let pathname = if segcount == 0 {
+            relationpath.clone()
+        } else {
+            format!("{relationpath}.{segcount}")
+        };
+        match stat(Path::new(&pathname)) {
+            Ok((_, len)) => totalsize += len as i64,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => {
+                return Err(file_access_error(
+                    &e,
+                    format!("could not stat file \"{pathname}\": %m"),
+                ))
+            }
+        }
     }
-    if smgr_seams::smgr_exists::call(key, forknum)? {
-        Ok(smgr_seams::smgr_nblocks::call(key, forknum)? as i64 * types_core::BLCKSZ as i64)
-    } else {
-        Ok(0)
-    }
+    Ok(totalsize)
 }
 
 fn rel_key(rel: &types_rel::Relation<'_>) -> ::types_storage::RelFileLocatorBackend {
@@ -222,9 +233,25 @@ fn file_access_error(e: &std::io::Error, message: String) -> Box<::types_error::
     Box::new(builder.errcode_for_file_access().errmsg(message).into_error())
 }
 
+// stat(2): (is_dir, st_size); the crate's one raw fs stat site.
+fn stat(path: &Path) -> std::io::Result<(bool, u64)> {
+    let m = std::fs::metadata(path)?;
+    Ok((m.is_dir(), m.len()))
+}
+
+// ReadDir (fd.c:3006): a readdir failure is an error, never a short walk.
+fn read_dir_entry<T>(entry: std::io::Result<T>, path: &Path) -> PgResult<T> {
+    entry.map_err(|e| {
+        file_access_error(
+            &e,
+            format!("could not read directory \"{}\": %m", path.display()),
+        )
+    })
+}
+
 // db_dir_size (dbsize.c): physical size of directory contents, 0 if absent.
 // Paths are DataDir-relative (the backend chdir's to PGDATA, per C).
-fn db_dir_size(path: &str) -> PgResult<i64> {
+pub(crate) fn db_dir_size(path: &Path) -> PgResult<i64> {
     let Ok(entries) = std::fs::read_dir(path) else {
         return Ok(0);
     };
@@ -232,20 +259,17 @@ fn db_dir_size(path: &str) -> PgResult<i64> {
     for entry in entries {
         // dbsize.c:86-90: cancel point per directory entry
         check_for_interrupts()?;
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let entry = read_dir_entry(entry, path)?;
         // dbsize.c:99-105: stat() (follows symlinks); ENOENT is skipped,
         // any other failure is an error with %m + errcode_for_file_access().
-        let filename = format!("{path}/{}", entry.file_name().to_string_lossy());
-        match std::fs::metadata(&filename) {
-            Ok(m) => dirsize += m.len() as i64,
+        let filename = path.join(entry.file_name());
+        match stat(&filename) {
+            Ok((_, len)) => dirsize += len as i64,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 return Err(file_access_error(
                     &e,
-                    format!("could not stat file \"{filename}\": %m"),
+                    format!("could not stat file \"{}\": %m", filename.display()),
                 ))
             }
         }
@@ -272,9 +296,10 @@ fn calculate_database_size(db_oid: Oid) -> PgResult<i64> {
         )?;
     }
 
-    let mut totalsize = db_dir_size(&format!("base/{db_oid}"))?;
+    let mut totalsize = db_dir_size(Path::new(&format!("base/{db_oid}")))?;
 
-    let tblspc = match std::fs::read_dir("pg_tblspc") {
+    let tblspc_dir = Path::new("pg_tblspc");
+    let tblspc = match std::fs::read_dir(tblspc_dir) {
         Ok(entries) => entries,
         Err(e) => {
             // ReadDirExtended (fd.c:2997) over a failed AllocateDir.
@@ -284,14 +309,16 @@ fn calculate_database_size(db_oid: Oid) -> PgResult<i64> {
             ))
         }
     };
-    for entry in tblspc.flatten() {
+    for entry in tblspc {
         // dbsize.c:149-151: cancel point per tablespace
         check_for_interrupts()?;
-        totalsize += db_dir_size(&format!(
-            "pg_tblspc/{}/{}/{db_oid}",
-            entry.file_name().to_string_lossy(),
-            ::types_storage::TABLESPACE_VERSION_DIRECTORY,
-        ))?;
+        let entry = read_dir_entry(entry, tblspc_dir)?;
+        totalsize += db_dir_size(
+            &tblspc_dir
+                .join(entry.file_name())
+                .join(::types_storage::TABLESPACE_VERSION_DIRECTORY)
+                .join(db_oid.to_string()),
+        )?;
     }
     Ok(totalsize)
 }
@@ -370,36 +397,39 @@ fn calculate_tablespace_size(mcx: ::mcx::Mcx<'_>, tblspc_oid: Oid) -> PgResult<i
         }
     }
 
-    let tblspc_path = tablespace_dir_path(tblspc_oid);
-    let Ok(entries) = std::fs::read_dir(&tblspc_path) else {
+    tablespace_dir_size(Path::new(&tablespace_dir_path(tblspc_oid)))
+}
+
+// calculate_tablespace_size (dbsize.c:236-274) below the ACL check: -1 when
+// the directory cannot be opened (NULL to the caller).
+pub(crate) fn tablespace_dir_size(tblspc_path: &Path) -> PgResult<i64> {
+    let Ok(entries) = std::fs::read_dir(tblspc_path) else {
         return Ok(-1);
     };
     let mut totalsize = 0i64;
     for entry in entries {
         // dbsize.c:247-251: cancel point per directory entry
         check_for_interrupts()?;
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let pathname = format!("{tblspc_path}/{}", entry.file_name().to_string_lossy());
+        let entry = read_dir_entry(entry, tblspc_path)?;
+        let pathname = tblspc_path.join(entry.file_name());
         // std::fs::metadata follows symlinks like C's stat(); pg_tblspc
         // entries are symlinks to the tablespace directories.
-        let fst = match std::fs::metadata(&pathname) {
+        let (is_dir, len) = match stat(&pathname) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                return Err(Box::new(::types_error::PgError::error(format!(
-                    "could not stat file \"{pathname}\": {e}"
-                ))))
+                return Err(file_access_error(
+                    &e,
+                    format!("could not stat file \"{}\": %m", pathname.display()),
+                ))
             }
         };
         // C adds fst.st_size for every dirent and additionally recurses into
         // directories, so a subdirectory's own inode size is counted too.
-        if fst.is_dir() {
+        if is_dir {
             totalsize += db_dir_size(&pathname)?;
         }
-        totalsize += fst.len() as i64;
+        totalsize += len as i64;
     }
     Ok(totalsize)
 }

@@ -5181,7 +5181,6 @@ dependencies = [
  "relfilenumbermap_seams",
  "relmapper_seams",
  "relpath",
- "smgr_seams",
  "syscache_seams",
  "tablespace_seams",
  "types_core",

@@ -441,6 +441,13 @@ fn populate_scalar(
     Ok(res)
 }
 
+// domain_check_safe's domain_state_setup(binary = true): the base type must
+// have a receive function (domains.c:389).
+fn domain_check_setup(typid: Oid) -> PgResult<()> {
+    lsyscache::getTypeBinaryInputInfo(lsyscache::getBaseType(typid)?)?;
+    Ok(())
+}
+
 // C populate_domain; constraint evaluation rides the compiled-check engine
 // behind typcache_seams::domain_check_input (C domain_check_safe).
 #[allow(clippy::too_many_arguments)]
@@ -468,6 +475,7 @@ fn populate_domain(
         )?;
         debug_assert!(!*isnull || soft_occurred(&escontext));
     }
+    domain_check_setup(typid)?;
     typcache_seams::domain_check_input::call(
         res,
         *isnull,
@@ -872,6 +880,7 @@ fn populate_composite(
 
     // C: domain over composite — check constraints (RECORD input skips).
     if typid != io.base_typid && typid != RECORDOID {
+        domain_check_setup(typid)?;
         typcache_seams::domain_check_input::call(
             result,
             *isnull,
@@ -1560,6 +1569,7 @@ fn populate_recordset_record(
         } else {
             Datum::from_usize(tuple.image().as_ptr() as usize)
         };
+        domain_check_setup(argtype)?;
         typcache_seams::domain_check_input::call(d, false, argtype, None)?;
     }
     store.putvalues(tupdesc, &values, &nulls)?;

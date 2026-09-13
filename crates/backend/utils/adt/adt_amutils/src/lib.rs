@@ -233,10 +233,13 @@ fn am_flags(amoid: Oid) -> Option<&'static AmFlags> {
     }
 }
 
+// C calls the handler; a LANGUAGE C handler's C symbol is its prosrc, which
+// survives ALTER FUNCTION ... RENAME.
 fn extension_am_handler(amoid: Oid) -> Option<Vec<u8>> {
     let handler = syscache_seams::pg_am_amhandler::call(amoid).ok()??;
-    let name = syscache_seams::pg_proc_proname::call(handler).ok()??;
-    Some(name.name_str().to_vec())
+    let scratch = ::mcx::MemoryContext::new("amutils handler prosrc");
+    let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(scratch.mcx(), handler).ok()??;
+    Some(prosrc.as_bytes().to_vec())
 }
 
 // pg_am.amhandler -> the handler's builtin AM (C reads the IndexAmRoutine, so

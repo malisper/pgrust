@@ -321,3 +321,22 @@ fn aclitemin_rejects_a_grantor_name_that_is_not_utf8() {
     let err = crate::io::aclitemin(b"=r/\xff", None).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT);
 }
+
+// audit-18.6 fp-adt-acl-p1#3 / fp-adt-acl-p2#3: acl.c:1721 takes the
+// privilege text as database-encoding bytes (SQL_ASCII allows 0xFF), so an
+// unrecognized privilege is 22023 rather than an internal UTF-8 error.
+#[test]
+fn makeaclitem_non_utf8_privilege_is_invalid_parameter() {
+    let mut img: Vec<u8> = vec![0u8; 4];
+    img.extend_from_slice(b"\xff");
+    let hdr = ::datum::varlena::set_varsize_4b(img.len());
+    img[..4].copy_from_slice(&hdr);
+    let mut fci = ::types_fmgr::LocalFcinfo::<4>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_oid(0));
+    fci.set_arg(1, ::datum::Datum::from_oid(10));
+    fci.set_arg(2, ::datum::Datum::from_usize(img.as_ptr() as usize));
+    fci.set_arg(3, ::datum::Datum::from_bool(false));
+    let err = crate::builtins::fc_makeaclitem(None, &mut fci).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+    assert_eq!(err.message(), "unrecognized privilege type: \"\u{FFFD}\"");
+}

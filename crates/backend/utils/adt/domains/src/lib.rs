@@ -161,8 +161,22 @@ pub fn fc_domain_recv(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(value)
 }
 
+// domain_check_internal's domain_state_setup(binary = true): the base type
+// must have a receive function even though no bytes are received.
+// Unit harnesses stub only the check seam; the catalog lookups are gated on
+// their seams being installed (the acl/amutils precedent).
+pub fn domain_check_setup(domainType: Oid) -> PgResult<()> {
+    if syscache_seams::pg_type_base_shape::is_installed()
+        && syscache_seams::pg_type_io_shape::is_installed()
+    {
+        lsyscache::getTypeBinaryInputInfo(lsyscache::getBaseType(domainType)?)?;
+    }
+    Ok(())
+}
+
 // C's extra/mcxt per-callsite memo collapses into the engine's per-domain memo.
 pub fn domain_check(value: Datum, isnull: bool, domainType: Oid) -> PgResult<()> {
+    domain_check_setup(domainType)?;
     typcache_seams::domain_check_input::call(value, isnull, domainType, None)
 }
 
@@ -172,6 +186,7 @@ pub fn domain_check_safe(
     domainType: Oid,
     escontext: &mut types_error::SoftErrorContext,
 ) -> PgResult<bool> {
+    domain_check_setup(domainType)?;
     typcache_seams::domain_check_input::call(value, isnull, domainType, Some(escontext))?;
     Ok(!escontext.error_occurred())
 }
@@ -214,9 +229,72 @@ mod tests {
         Ok(())
     }
 
+    // Domain 1 sits over a type with a receive function, domain 2 over one
+    // without (aclitem's shape): domain_check_internal's binary setup.
+    fn install_type_stubs() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            typcache_seams::domain_check_input::set(fake_check);
+            syscache_seams::pg_type_base_shape::set(|typid| {
+                Ok(match typid {
+                    1 | 2 => Some(syscache_seams::PgTypeBaseShape {
+                        typtype: TYPTYPE_DOMAIN,
+                        typbasetype: typid + 100,
+                        typtypmod: -1,
+                        typelem: 0,
+                        typsubscript: 0,
+                    }),
+                    101 | 102 => Some(syscache_seams::PgTypeBaseShape {
+                        typtype: b'b' as i8,
+                        typbasetype: 0,
+                        typtypmod: -1,
+                        typelem: 0,
+                        typsubscript: 0,
+                    }),
+                    _ => None,
+                })
+            });
+            syscache_seams::pg_type_io_shape::set(|typid| {
+                Ok(match typid {
+                    101 | 102 => Some(syscache_seams::PgTypeIoShape {
+                        oid: typid,
+                        typinput: 42,
+                        typoutput: 43,
+                        typreceive: if typid == 101 { 44 } else { 0 },
+                        typsend: 45,
+                        typmodin: 0,
+                        typmodout: 0,
+                        typelem: 0,
+                        typlen: 4,
+                        typbyval: true,
+                        typalign: b'i' as i8,
+                        typdelim: b',' as i8,
+                        typisdefined: true,
+                    }),
+                    _ => None,
+                })
+            });
+        });
+    }
+
+    // audit-18.6 fp-adt-domains#2: domains.c:389 domain_check_internal sets
+    // up with binary = true, so a domain over a type without a receive
+    // function (aclitem) is "no binary input function available for type
+    // ..." (42883) before any constraint runs.
+    #[test]
+    fn check_requires_base_type_receive_function() {
+        install_type_stubs();
+        let err = domain_check(Datum::from_i32(7), false, 2).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_FUNCTION);
+        assert!(err.message().starts_with("no binary input function available for type"), "{}", err.message());
+        let mut esc = SoftErrorContext::new(true);
+        let err = domain_check_safe(Datum::null(), true, 2, &mut esc).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_FUNCTION);
+    }
+
     #[test]
     fn check_and_check_safe() {
-        typcache_seams::domain_check_input::set(fake_check);
+        install_type_stubs();
         assert!(domain_check(Datum::from_i32(7), false, 1).is_ok());
         assert!(domain_check(Datum::from_i32(-1), false, 1).is_err());
 

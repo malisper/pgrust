@@ -240,8 +240,7 @@ fn array_get_integer_typmods<'mcx>(mcx: Mcx<'mcx>, arr: &[u8]) -> PgResult<PgVec
     for d in elems.iter() {
         // SAFETY: non-null cstring element datum pointing into `arr`.
         let c = unsafe { CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
-        let s = core::str::from_utf8(c.to_bytes()).map_err(|_| invalid_type_modifier())?;
-        out.push(numutils::pg_strtoint32(s)?);
+        out.push(numutils::pg_strtoint32_bytes(c.to_bytes())?);
     }
     Ok(out)
 }

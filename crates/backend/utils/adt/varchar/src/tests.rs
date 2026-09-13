@@ -542,3 +542,17 @@ fn fc_ceiling_fires_on_huge_input_arm() {
         );
     }
 }
+
+// audit-18.6 fp-adt-b1#4: arrayutils.c:259 hands the raw cstring bytes to
+// pg_strtoint32, so a non-UTF-8 modifier (SQL_ASCII) is 22P02, not 22023.
+#[test]
+fn typmod_non_utf8_element_is_invalid_integer() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let arr = cstring_array_1d(&[b"\xff"]);
+    let err = varchartypmodin(mcx, &arr).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+    assert!(err.message().starts_with("invalid input syntax for type integer: \""), "{}", err.message());
+    let err = bpchartypmodin(mcx, &arr).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+}

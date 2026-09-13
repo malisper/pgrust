@@ -27,10 +27,31 @@ fn install_amhandler_stub() {
                 GIN_AM_OID => Some(333),
                 SPGIST_AM_OID => Some(334),
                 BRIN_AM_OID => Some(335),
+                20000 => Some(9999),
+                20001 => Some(9998),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_proc_prosrc::set(|mcx, funcid| {
+            Ok(match funcid {
+                9999 => Some(mcx::PgString::from_str_in("blhandler", mcx)?),
+                9998 => Some(mcx::PgString::from_str_in("hnswhandler", mcx)?),
                 _ => None,
             })
         });
     });
+}
+
+// audit-18.6 fp-adt-amutils#1: amutils.c:198 calls the catalog's handler,
+// so an extension AM is known by its handler's C symbol (prosrc), which
+// ALTER FUNCTION ... RENAME does not touch.
+#[test]
+fn extension_am_identified_by_handler_prosrc() {
+    install_amhandler_stub();
+    let bloom = am_flags(20000).unwrap();
+    assert!(bloom.amcanmulticol && !bloom.has_ambuildphasename && !bloom.amcanorderbyop);
+    let hnsw = am_flags(20001).unwrap();
+    assert!(hnsw.amcanorderbyop && hnsw.has_ambuildphasename && !hnsw.amcanmulticol);
 }
 
 #[test]

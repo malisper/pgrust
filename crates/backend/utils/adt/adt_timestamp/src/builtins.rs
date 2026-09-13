@@ -396,8 +396,8 @@ fn interval_result(fcinfo: &mut Fcinfo, iv: Interval) -> PgResult<Datum> {
 }
 
 // ArrayGetIntegerTypmods (arrayutils.c) over the _cstring argument. C has no
-// element cap; `cap_msg` is the caller's own too-many-modifiers error, which
-// C would raise one frame up.
+// element cap and parses every element first; `cap_msg` is the caller's own
+// too-many-modifiers error, which C would raise one frame up.
 pub fn array_get_integer_typmods(
     fcinfo: &Fcinfo,
     out: &mut [i32; 8],
@@ -419,30 +419,30 @@ pub fn array_get_integer_typmods(
                 .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
         ));
     }
-    if rd(8) != 0 {
+    let n = rd(16).max(0) as usize;
+    let dataoffset = rd(8) as usize;
+    // array_contains_nulls: a bitmap (a slice keeps its source's) only
+    // counts when some bit is clear.
+    if dataoffset != 0 && (0..n).any(|i| image[24 + i / 8] & (1 << (i % 8)) == 0) {
         return Err(Box::new(
             PgError::error("typmod array must not contain nulls")
                 .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
         ));
     }
-    let n = rd(16) as usize;
+    let mut off = if dataoffset != 0 { dataoffset } else { 24 };
+    for i in 0..n {
+        let end = off + image[off..].iter().position(|&b| b == 0).expect("NUL-terminated");
+        let v = numutils::pg_strtoint32_bytes(&image[off..end])?;
+        if let Some(slot) = out.get_mut(i) {
+            *slot = v;
+        }
+        off = end + 1;
+    }
     if n > out.len() {
         return Err(Box::new(
             PgError::error(cap_msg)
                 .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
         ));
-    }
-    let mut off = 24usize;
-    for slot in out.iter_mut().take(n) {
-        let end = off + image[off..].iter().position(|&b| b == 0).expect("NUL-terminated");
-        let s = core::str::from_utf8(&image[off..end]).map_err(|_| {
-            Box::new(
-                PgError::error("invalid input syntax for type integer")
-                    .with_sqlstate(::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
-            )
-        })?;
-        *slot = numutils::pg_strtoint32(s)?;
-        off = end + 1;
     }
     Ok(n)
 }
