@@ -134,21 +134,11 @@ pub fn fc_record_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
             &mut flinfo.fn_extra_mut::<RecordIOData>().unwrap().columns[i].as_mut().unwrap().proc;
         let d = function_call1_coll_in(proc, InvalidOid, mcx, values[i])?;
         let value = cstring_bytes(d);
-        let nq = value.is_empty()
-            || value.iter().any(|&ch| {
-                ch == b'"'
-                    || ch == b'\\'
-                    || ch == b'('
-                    || ch == b')'
-                    || ch == b','
-                    // rowtypes.c:445 record_out needquote
-                    || isspace_c_locale(ch)
-            });
-        let extra = 2 * value.len() + 2;
+        let (nq, extra) = record_out_quoting(value);
         buf.append_written(extra, |dst| {
             let mut w = 0usize;
-            // SAFETY: writes below total <= 2 * value.len() + 2 = `extra`
-            // bytes at `dst` (each byte emits at most twice, plus 2 quotes).
+            // SAFETY: writes below total exactly `extra` bytes at `dst`
+            // (each escaped byte emits twice, plus 2 quotes when `nq`).
             unsafe {
                 if nq {
                     *dst.add(w) = b'"';
@@ -176,6 +166,23 @@ pub fn fc_record_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     let mut buf = buf.into_vec();
     buf.push(0);
     Ok(cstring_result(buf))
+}
+
+// rowtypes.c:445 record_out needquote plus the exact escaped output length,
+// so the StringInfo reservation is what C's byte-by-byte appends consume.
+#[inline]
+fn record_out_quoting(value: &[u8]) -> (bool, usize) {
+    let mut nq = value.is_empty();
+    let mut escaped = 0usize;
+    for &ch in value {
+        if ch == b'"' || ch == b'\\' {
+            nq = true;
+            escaped += 1;
+        } else if ch == b'(' || ch == b')' || ch == b',' || isspace_c_locale(ch) {
+            nq = true;
+        }
+    }
+    (nq, value.len() + escaped + if nq { 2 } else { 0 })
 }
 
 #[inline]

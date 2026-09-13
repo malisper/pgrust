@@ -189,6 +189,12 @@ fn install() {
         // AcquireRewriteLocks (rewriteHandler.c) as the deparser reaches it:
         // record every call and its (forExecute, forUpdatePushedDown) flags.
         rewrite_handler_seams::acquire_rewrite_locks::set(record_rewrite_locks);
+        relation_seams::relation_open::set(|_mcx, relid, lockmode| {
+            Err(types_error::PgError::error(format!("open {relid} lockmode {lockmode}")).into())
+        });
+        relation_seams::try_relation_open::set(|_mcx, relid, lockmode| {
+            Err(types_error::PgError::error(format!("open {relid} lockmode {lockmode}")).into())
+        });
         // CHECK_FOR_INTERRUPTS(): a pending cancel raises 57014, as
         // ProcessInterrupts does for QueryCancelPending.
         postgres_seams::check_for_interrupts::set(|| {
@@ -693,4 +699,27 @@ fn empty_ev_action_list_is_elog_error() {
     let err = super::ruledef::make_ruledef(mcx, &row, 0).err().expect("make_ruledef raises");
     assert_eq!(err.message(), "invalid empty ev_action list");
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+}
+
+// ruleutils.c:2772 try_relation_open(relid, AccessShareLock): pg_get_expr
+// takes the relation lock before deparsing, so a lock wait surfaces first.
+#[test]
+fn pg_get_expr_opens_relation_with_access_share_lock() {
+    install();
+    let ctx = MemoryContext::new("ruleutils lock test");
+    let err = pg_get_expr_worker(ctx.mcx(), "<>", REL_OID, PRETTYFLAG_INDENT).unwrap_err();
+    assert_eq!(err.message(), format!("open {REL_OID} lockmode {}", types_rel::AccessShareLock));
+}
+
+// ruleutils.c:5598 make_viewdef table_open(ev_class, AccessShareLock).
+#[test]
+fn viewdef_opens_view_with_access_share_lock() {
+    install();
+    let ctx = MemoryContext::new("ruleutils viewdef lock test");
+    let mcx = ctx.mcx();
+    let action = include_str!("fixtures/v1_action.txt");
+    let node = readfuncs::stringToNode(mcx, action.trim_end()).unwrap();
+    let q = node.as_list().unwrap().nth(0).as_query().unwrap();
+    let err = viewdef::make_viewdef(mcx, REL_OID, q, PRETTYFLAG_INDENT, 0).unwrap_err();
+    assert_eq!(err.message(), format!("open {REL_OID} lockmode {}", types_rel::AccessShareLock));
 }

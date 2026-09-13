@@ -233,6 +233,8 @@ fn get_docrep<'mcx>(
     Ok(Some(doc))
 }
 
+const QUERY_REPRESENTATION_OPERAND_SIZE: usize = 8 + 2 * 16384;
+
 pub fn calc_rank_cd(
     mcx: Mcx<'_>,
     arrdata: &[f32; NUM_WEIGHTS],
@@ -251,6 +253,9 @@ pub fn calc_rank_cd(
         invws[i] = 1.0 / v as f64;
     }
 
+    // tsrank.c:881 palloc0(sizeof(QueryRepresentationOperand) * size): the
+    // C operand record is 32776 bytes, so the request trips MaxAllocSize.
+    mcx::check_alloc_size(QUERY_REPRESENTATION_OPERAND_SIZE * query.size())?;
     let mut op_data: PgVec<QrOperand> = PgVec::new_in(mcx);
     op_data
         .try_reserve_exact(query.size())

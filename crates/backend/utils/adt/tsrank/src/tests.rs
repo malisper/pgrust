@@ -75,3 +75,24 @@ fn rank_cd_matrix() {
         assert!(close(got, want), "{doc} @@ {query}: got {got}, want {want}");
     }
 }
+
+// tsrank.c:881 palloc0(sizeof(QueryRepresentationOperand) * query->size):
+// 32776 bytes per item trips MaxAllocSize past 32767 items (C 18.6:
+// "invalid memory alloc request size 2147975160" for 65535 items).
+#[test]
+fn rank_cd_rejects_query_over_alloc_ceiling() {
+    cfi_installed();
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(|| {
+            let ctx = MemoryContext::new("tsrank test");
+            let mcx = ctx.mcx();
+            let query = vec!["a"; 32768].join("|");
+            let err =
+                calc_rank_cd(mcx, &DEFAULT_WEIGHTS, v(mcx, ""), q(mcx, &query), 0).unwrap_err();
+            assert_eq!(err.message(), "invalid memory alloc request size 2147975160");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

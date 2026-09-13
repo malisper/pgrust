@@ -219,16 +219,35 @@ pub fn fc_tsquery_rewrite(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     finish_tree(mcx, tree)
 }
 
-fn tsquery_ref_from_datum<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<TsQueryRef<'mcx>> {
+// DatumGetTSQuery on a SPI tuple: C returns the stored image itself when it
+// is already a plain 4-byte-header varlena and pfrees the copy otherwise
+// (tsquery_rewrite.c:344-370), so the rule stream never accumulates.
+enum RuleImage<'a, 'mcx> {
+    Flat(&'a [u8]),
+    Detoasted(PgVec<'mcx, u8>),
+}
+
+impl RuleImage<'_, '_> {
+    fn as_query(&self) -> TsQueryRef<'_> {
+        let flat: &[u8] = match self {
+            RuleImage::Flat(s) => s,
+            RuleImage::Detoasted(v) => v.as_slice(),
+        };
+        TsQueryRef { payload: &flat[::types_tuple::varatt::VARHDRSZ..] }
+    }
+}
+
+fn tsquery_image_from_datum<'a, 'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<RuleImage<'a, 'mcx>> {
     let p = d.as_usize() as *const u8;
     // SAFETY: a not-null tsquery column datum: a live varlena image readable
-    // through its varsize_any extent.
+    // through its varsize_any extent, outliving the SPI tuptable it sits in.
     let image = unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
+    if unsafe { ::types_tuple::varatt::varatt_is_4b_u(p) } {
+        return Ok(RuleImage::Flat(image));
+    }
     // pg_detoast_datum: normalizes short headers (the payload needs int32
     // alignment) and detoasts stored values.
-    let flat = detoast::detoast_attr(mcx, image)?;
-    let flat = flat.leak();
-    Ok(TsQueryRef { payload: &flat[::types_tuple::varatt::VARHDRSZ..] })
+    Ok(RuleImage::Detoasted(detoast::detoast_attr(mcx, image)?))
 }
 
 // tsquery_rewrite_query (3685): ts_rewrite(tsquery, text) — the SELECT must
@@ -295,8 +314,10 @@ pub fn fc_tsquery_rewrite_query(
                     if isnull {
                         continue;
                     }
-                    let qtex = tsquery_ref_from_datum(mcx, qdata)?;
-                    let qtsubs = tsquery_ref_from_datum(mcx, sdata)?;
+                    let qtex_image = tsquery_image_from_datum(mcx, qdata)?;
+                    let qtsubs_image = tsquery_image_from_datum(mcx, sdata)?;
+                    let qtex = qtex_image.as_query();
+                    let qtsubs = qtsubs_image.as_query();
                     if qtex.size() == 0 {
                         continue;
                     }
@@ -333,3 +354,32 @@ pub const TSQUERY_REWRITE_BUILTINS: &[FmgrBuiltin] = &[
     b(3684, "tsquery_rewrite", 3, fc_tsquery_rewrite),
     b(3685, "tsquery_rewrite_query", 2, fc_tsquery_rewrite_query),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // tsquery_rewrite.c:344-370: a plain 4-byte-header rule datum is used in
+    // place (no per-row copy); a short-header one is detoasted into an
+    // owned image that drops with the row.
+    #[test]
+    fn rule_image_borrows_flat_datums() {
+        let ctx = ::mcx::MemoryContext::new("tsquery_rewrite test");
+        let mcx = ctx.mcx();
+        let mut flat = [0u8; 12];
+        flat[..4].copy_from_slice(&::types_tuple::varatt::set_varsize_4b_word(12).to_ne_bytes());
+        let img = tsquery_image_from_datum(mcx, Datum::from_usize(flat.as_ptr() as usize)).unwrap();
+        assert!(matches!(img, RuleImage::Flat(s) if s.len() == 12));
+        assert_eq!(img.as_query().payload.len(), 8);
+
+        #[cfg(target_endian = "little")]
+        {
+            let mut short = [0u8; 9];
+            short[0] = (9 << 1) | 1;
+            let img =
+                tsquery_image_from_datum(mcx, Datum::from_usize(short.as_ptr() as usize)).unwrap();
+            assert!(matches!(img, RuleImage::Detoasted(_)));
+            assert_eq!(img.as_query().payload.len(), 8);
+        }
+    }
+}

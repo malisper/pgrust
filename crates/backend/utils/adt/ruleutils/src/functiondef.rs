@@ -155,13 +155,9 @@ fn char_array_checked(d: Datum) -> Result<Vec<u8>, ()> {
     Ok(b[20..20 + dim1].to_vec())
 }
 
-// %g for the COST/ROWS values CREATE FUNCTION accepts.
+// ruleutils.c:3027 " COST %g": float4 promoted to double, C printf %g.
 fn fmt_g(f: f32) -> String {
-    if f == f.trunc() && f.abs() < 1e15 {
-        format!("{}", f as i64)
-    } else {
-        format!("{f}")
-    }
+    guc::units::fmt_g(f as f64)
 }
 
 struct ArgInfo {

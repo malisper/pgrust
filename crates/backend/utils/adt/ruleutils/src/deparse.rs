@@ -631,7 +631,7 @@ pub(crate) fn get_rule_expr<'mcx>(
         NodeTag::T_RowCompareExpr => {
             let rc = node.as_row_compare_expr().unwrap();
             ctx.buf.push_str("(ROW(");
-            get_rule_list_toplevel(&rc.largs, ctx, showimplicit)?;
+            get_rule_list_toplevel(&rc.largs, ctx, true)?;
             let opname = generate_operator_name(
                 ctx.mcx,
                 rc.opnos.nth(0),
@@ -639,7 +639,7 @@ pub(crate) fn get_rule_expr<'mcx>(
                 parse_expr::expr_type(rc.rargs.nth(0)),
             )?;
             ctx.buf.push_str(&format!(") {opname} ROW("));
-            get_rule_list_toplevel(&rc.rargs, ctx, showimplicit)?;
+            get_rule_list_toplevel(&rc.rargs, ctx, true)?;
             ctx.buf.push_str("))");
             Ok(())
         }

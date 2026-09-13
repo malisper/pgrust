@@ -44,13 +44,28 @@ pub fn pg_get_viewdef_worker(
         return Ok(None);
     }
 
+    Ok(Some(make_viewdef(mcx, viewoid, query, pretty_flags, wrap_column)?))
+}
+
+// make_viewdef (ruleutils.c:5598): table_open(ev_class, AccessShareLock) is
+// held until the definition is complete.
+pub(crate) fn make_viewdef<'mcx>(
+    mcx: Mcx<'mcx>,
+    viewoid: Oid,
+    query: &'mcx types_nodes::parsenodes::Query<'mcx>,
+    pretty_flags: i32,
+    wrap_column: i32,
+) -> PgResult<String> {
+    let ev_relation = table::table_open(mcx, viewoid, types_rel::AccessShareLock)?;
     let result_desc = Rc::new(view_attnames(viewoid)?);
 
     let mut ctx = DeparseContext::new(mcx, pretty_flags);
     ctx.wrap_column = wrap_column;
-    query::get_query_def(query, &mut ctx, Some(result_desc), true)?;
+    let deparsed = query::get_query_def(query, &mut ctx, Some(result_desc), true);
+    ev_relation.close(types_rel::AccessShareLock)?;
+    deparsed?;
     ctx.buf.push(';');
-    Ok(Some(ctx.buf.into_inner()))
+    Ok(ctx.buf.into_inner())
 }
 
 // RelationGetDescr(ev_relation) reduced to the attname-by-position slice

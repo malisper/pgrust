@@ -523,7 +523,9 @@ pub(crate) fn generate_function_name(
             false,
             false,
         )?;
-        best = cands.iter().find(|c| c.args.as_slice() == argtypes).map(|c| c.oid);
+        // parse_func.c:1494: memcmp over nargs supplied types only, so a
+        // candidate expanded with defaulted trailing args still matches.
+        best = cands.iter().find(|c| c.args.starts_with(argtypes)).map(|c| c.oid);
         if best.is_none() && !cands.is_empty() {
             let matched = parse_func::func_match_argtypes(mcx, argtypes, cands.as_slice())?;
             best = match matched.len() {
@@ -1468,22 +1470,30 @@ pub fn pg_get_expr_worker(
         }
     }
 
-    if relid != InvalidOid {
-        // Divergence from C: try_relation_open existence probe without the
-        // AccessShareLock (relation_open machinery is another lane). The
-        // probe stays BEFORE deparse: C returns SQL NULL for a vanished
-        // relation even when the node itself is NULL.
-        if pg_class_row(relid)?.is_none() {
+    // ruleutils.c:2772 try_relation_open(relid, AccessShareLock): the lock
+    // is held across the deparse; C returns SQL NULL for a vanished
+    // relation even when the node itself is NULL.
+    let rel = if relid != InvalidOid {
+        let Some(rel) =
+            relation_seams::try_relation_open::call(mcx, relid, types_rel::AccessShareLock)?
+        else {
             return Ok(None);
-        }
-    }
-    match node {
-        Some(n) => Ok(Some(deparse_expression_pretty(mcx, n, relid, false, pretty_flags)?)),
+        };
+        Some(rel)
+    } else {
+        None
+    };
+    let result = match node {
+        Some(n) => deparse_expression_pretty(mcx, n, relid, false, pretty_flags),
         // get_rule_expr (ruleutils.c): "if (node == NULL) return;" — the
         // deparse of the NULL node is the EMPTY STRING, not SQL NULL
         // (verified against live C 18.3: is_null=f, is_empty=t).
-        None => Ok(Some(String::new())),
+        None => Ok(String::new()),
+    };
+    if let Some(rel) = rel {
+        rel.close(types_rel::AccessShareLock)?;
     }
+    Ok(Some(result?))
 }
 
 const PARTITION_STRATEGY_HASH: i8 = b'h' as i8;

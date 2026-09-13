@@ -385,3 +385,22 @@ fn tidout_and_xid8out_do_not_alias_across_fmgrinfos() {
     assert_eq!(cs(d1), b"(1,2)");
     assert_eq!(cs(d2), b"(3,4)");
 }
+
+// SplitIdentifierString (varlena.c:3581) + truncate_identifier: currtid2
+// relation names. C 18.6: 'public.' is invalid name syntax; overlength
+// names clip at a character boundary (pg_mbcliplen).
+#[test]
+fn currtid_qualified_name_split() {
+    let split = |s: &str| {
+        crate::currtid::split_qualified_name(s)
+            .map(|v| v.iter().map(String::as_str).map(str::to_owned).collect::<Vec<_>>())
+    };
+    assert_eq!(split("public.t"), Some(vec!["public".to_owned(), "t".to_owned()]));
+    assert_eq!(split("public."), None);
+    assert_eq!(split("public. "), None);
+    assert_eq!(split("."), None);
+    assert_eq!(split("a..b"), None);
+    assert_eq!(split(&("a".repeat(62) + "é")), Some(vec!["a".repeat(62)]));
+    assert_eq!(split(&("a".repeat(61) + "éé")), Some(vec!["a".repeat(61) + "é"]));
+    assert_eq!(split(&("a".repeat(64))), Some(vec!["a".repeat(63)]));
+}

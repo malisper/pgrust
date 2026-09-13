@@ -19,7 +19,7 @@ const TIDOID: Oid = 27;
 // SplitIdentifierString (varlena.c), ASCII-identifier arm: no lsyscache/
 // varlena dependency is reachable from adt_scalar (cycle), so the dotted-name
 // split is reimplemented here rather than shared.
-fn split_qualified_name(s: &str) -> Option<Vec<String>> {
+pub(crate) fn split_qualified_name(s: &str) -> Option<Vec<String>> {
     let b = s.as_bytes();
     let mut names = Vec::new();
     let mut p = 0usize;
@@ -32,6 +32,9 @@ fn split_qualified_name(s: &str) -> Option<Vec<String>> {
     }
     loop {
         let mut cur = Vec::new();
+        if p == b.len() {
+            return None;
+        }
         if b[p] == b'"' {
             let mut q = p + 1;
             loop {
@@ -70,8 +73,13 @@ fn split_qualified_name(s: &str) -> Option<Vec<String>> {
         } else {
             return None;
         };
-        cur.truncate((types_core::fmgr::NAMEDATALEN - 1) as usize);
-        names.push(String::from_utf8_lossy(&cur).into_owned());
+        let mut cur = String::from_utf8_lossy(&cur).into_owned();
+        let mut len = cur.len().min((types_core::fmgr::NAMEDATALEN - 1) as usize);
+        while !cur.is_char_boundary(len) {
+            len -= 1;
+        }
+        cur.truncate(len);
+        names.push(cur);
         if done {
             return Some(names);
         }

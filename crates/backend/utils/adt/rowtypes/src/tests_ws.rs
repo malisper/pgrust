@@ -342,3 +342,15 @@ fn record_out_over_ceiling_output_raises_c_stringinfo_error() {
         )
     );
 }
+
+// record_out reserves exactly the bytes C's per-character appends consume
+// (rowtypes.c:455), so the StringInfo ceiling is C's, not 2*len+2.
+#[test]
+fn record_out_reservation_is_exact() {
+    assert_eq!(record_out_quoting(b"abc"), (false, 3));
+    assert_eq!(record_out_quoting(b""), (true, 2));
+    assert_eq!(record_out_quoting(b"a b"), (true, 5));
+    assert_eq!(record_out_quoting(b"a\"b\\"), (true, 8));
+    assert_eq!(record_out_quoting(b"(x)"), (true, 5));
+    assert_eq!(record_out_quoting(b"x,y"), (true, 5));
+}
