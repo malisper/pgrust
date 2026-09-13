@@ -7,8 +7,8 @@ use types_core::BackendType;
 // over the my_backend() call-site count or InitProcess FATALs mid-suite.
 const MAX_CONNECTIONS: i32 = 24;
 // Bump when claim_other() call sites grow: the claimable simulated-backend
-// range is MAX_BACKENDS - MAX_CONNECTIONS (19 today for 18 claim_other()s).
-const MAX_WORKER_PROCESSES: i32 = 12;
+// range is MAX_BACKENDS - MAX_CONNECTIONS (20 today for 19 claim_other()s).
+const MAX_WORKER_PROCESSES: i32 = 13;
 const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
 
@@ -1421,4 +1421,29 @@ fn shmem_init_registers_proc_array_and_known_assigned_xids() {
     assert!(found, "\"KnownAssignedXids\" is not registered in the ShmemIndex");
     let (_, found) = shmem::ShmemInitStruct("KnownAssignedXidsValid", max_kax).unwrap();
     assert!(found, "\"KnownAssignedXidsValid\" is not registered in the ShmemIndex");
+}
+
+#[test]
+fn replication_horizons_xmin_includes_slot_xmin() {
+    let _g = test_lock();
+    let me = my_backend();
+
+    let tv = TransamVariables();
+    tv.latestCompletedXid.store(
+        FullTransactionId::from_epoch_and_xid(0, 4000).value,
+        Relaxed,
+    );
+    let other = claim_other();
+    other_proc_running(other, 3900);
+
+    ProcArraySetReplicationSlotXmin(3700, 3600, false).unwrap();
+    let (xmin, catalog_xmin) = GetReplicationHorizons().unwrap();
+    ProcArraySetReplicationSlotXmin(InvalidTransactionId, InvalidTransactionId, false).unwrap();
+
+    other_proc_end(other, 3900);
+    GetPGProcByNumber(me).xmin.value.store(0, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
+
+    assert_eq!(catalog_xmin, 3600);
+    assert_eq!(xmin, 3700);
 }

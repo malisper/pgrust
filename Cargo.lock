@@ -8168,6 +8168,7 @@ dependencies = [
  "init_small_seams",
  "mcx",
  "miscinit_seams",
+ "pgsync",
  "types_core",
  "types_error",
  "types_startup",

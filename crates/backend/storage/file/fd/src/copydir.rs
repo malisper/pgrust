@@ -312,12 +312,32 @@ fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
 // rmtree (common/rmtree.c): returns false if any operation failed (with a
 // WARNING), true on full success.
 pub fn rmtree(path: &str, rmtopdir: bool) -> PgResult<bool> {
-    let names = match entry_names(path) {
-        Ok(n) => n,
-        Err(_) => return Ok(false),
+    let dir = crate::desc::AllocateDir(path)?;
+    let Some(index) = dir else {
+        ereport(WARNING)
+            .with_saved_errno(get_errno())
+            .errmsg(format!("could not open directory \"{path}\": %m"))
+            .finish(loc("rmtree"))?;
+        return Ok(false);
     };
     let mut result = true;
-    for name in names {
+    let mut dirnames = Vec::new();
+    loop {
+        let name = match crate::desc::next_dirent(index) {
+            None => break,
+            Some(Err(en)) => {
+                ereport(WARNING)
+                    .with_saved_errno(en)
+                    .errmsg(format!("could not read directory \"{path}\": %m"))
+                    .finish(loc("rmtree"))?;
+                result = false;
+                break;
+            }
+            Some(Ok(name)) => name,
+        };
+        if name == "." || name == ".." {
+            continue;
+        }
         let full = format!("{path}/{name}");
         let cfull = cpath(&full);
         let mut md = vfs::FileInfo::zeroed();
@@ -330,9 +350,7 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> PgResult<bool> {
             continue;
         }
         if md.is_dir() {
-            if !rmtree(&full, true)? {
-                result = false;
-            }
+            dirnames.push(full);
         } else if vfs::unlink(&cfull) != 0 {
             let en = get_errno();
             if en != libc::ENOENT {
@@ -342,6 +360,12 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> PgResult<bool> {
                     .finish(loc("rmtree"))?;
                 result = false;
             }
+        }
+    }
+    crate::desc::FreeDir(dir)?;
+    for sub in dirnames {
+        if !rmtree(&sub, true)? {
+            result = false;
         }
     }
     if rmtopdir {

@@ -26,6 +26,12 @@ pub(crate) struct PipeHandle {
     pub stdin: Option<std::process::ChildStdin>,
 }
 
+impl Drop for PipeHandle {
+    fn drop(&mut self) {
+        init_small::globals::unregister_backend_child(self.child.id());
+    }
+}
+
 pub(crate) struct AllocateDesc {
     pub create_subid: SubTransactionId,
     pub desc: AllocatedHandle,
@@ -251,8 +257,8 @@ pub fn OpenPipeStream(command: &str, mode: &str) -> PgResult<i32> {
 
     with_fd(vfd::ReleaseLruFiles)?;
 
-    // C flushes stdio and flips SIGPIPE to SIG_DFL around popen; a Command
-    // child gets default dispositions already, so no signal dance is needed.
+    // C flushes stdio and flips SIGPIPE to SIG_DFL around popen; the child's
+    // signal state is restored in popen's pre_exec instead.
     loop {
         match popen(command, mode) {
             Ok(pipe) => {
@@ -443,14 +449,7 @@ pub fn ReadDirExtended(
         Some(index) => index,
     };
 
-    let next = with_fd(|fd| match fd.allocated_descs[index as usize].as_mut() {
-        Some(AllocateDesc { desc: AllocatedHandle::Dir(iter), .. }) => {
-            iter.as_mut().and_then(Iterator::next)
-        }
-        _ => None,
-    });
-
-    match next {
+    match next_dirent(index) {
         Some(Ok(d_name)) => Ok(Some(DirEnt { d_name })),
         Some(Err(en)) => {
             ereport(elevel)
@@ -462,6 +461,17 @@ pub fn ReadDirExtended(
         }
         None => Ok(None),
     }
+}
+
+// One readdir(3) step: None at end of directory, Err(errno) on a read
+// failure (C's errno != 0 after a NULL readdir).
+pub(crate) fn next_dirent(index: Dir) -> Option<Result<String, i32>> {
+    with_fd(|fd| match fd.allocated_descs[index as usize].as_mut() {
+        Some(AllocateDesc { desc: AllocatedHandle::Dir(iter), .. }) => {
+            iter.as_mut().and_then(Iterator::next)
+        }
+        _ => None,
+    })
 }
 
 pub fn FreeDir(dir: Option<Dir>) -> PgResult<i32> {
@@ -565,6 +575,28 @@ fn popen(command: &str, mode: &str) -> Result<PipeHandle, i32> {
     let reading = mode.starts_with('r');
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(command);
+    // A C backend's popen child starts with an empty signal mask and the
+    // backend's dispositions after exec: handled signals back to default,
+    // SIGUSR2 (and the postmaster's SIGPIPE/TTIN/TTOU/XFSZ) still ignored.
+    // The thread model blocks the process signals on every backend thread
+    // and ignores SIGALRM; both would survive into the child, leaving it
+    // deaf to the group SIGINT/SIGTERM of pg_signal_backend.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: async-signal-safe calls only (sigemptyset, pthread_sigmask,
+        // signal), run in the child between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::pthread_sigmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+                libc::signal(libc::SIGALRM, libc::SIG_DFL);
+                libc::signal(libc::SIGUSR2, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+    }
     if reading {
         cmd.stdout(Stdio::piped());
     } else {
@@ -572,6 +604,7 @@ fn popen(command: &str, mode: &str) -> Result<PipeHandle, i32> {
     }
     match cmd.spawn() {
         Ok(mut child) => {
+            init_small::globals::register_backend_child(child.id());
             let stdout = child.stdout.take();
             let stdin = child.stdin.take();
             Ok(PipeHandle {

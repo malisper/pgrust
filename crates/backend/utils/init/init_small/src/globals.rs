@@ -54,6 +54,38 @@ pub fn set_data_directory_mode(mode: i32) {
     DATA_DIRECTORY_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
 }
 
+// C backends setsid() at start, so a popen'd COPY PROGRAM child sits in the
+// backend's process group and kill(-pid, sig) from pg_signal_backend /
+// signal_child reaches it. One process here: each backend's live children
+// are recorded under its (synthetic) MyProcPid so thread-signal delivery can
+// fan the group signals out to them.
+pgsync::process_global! { static BACKEND_CHILDREN: pgsync::Mutex<Vec<(i32, u32)>> =
+    pgsync::Mutex::new(Vec::new()); }
+
+pub fn register_backend_child(child_pid: u32) {
+    BACKEND_CHILDREN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((MyProcPid(), child_pid));
+}
+
+pub fn unregister_backend_child(child_pid: u32) {
+    BACKEND_CHILDREN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|&(_, c)| c != child_pid);
+}
+
+pub fn backend_children(pid: i32) -> Vec<u32> {
+    BACKEND_CHILDREN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|&&(p, _)| p == pid)
+        .map(|&(_, c)| c)
+        .collect()
+}
+
 scalar_global! {
     FRONTEND_PROTOCOL, FrontendProtocol, SetFrontendProtocol, ProtocolVersion, 0;
 

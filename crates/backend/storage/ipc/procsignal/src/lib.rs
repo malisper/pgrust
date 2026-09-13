@@ -53,7 +53,7 @@ pub mod signums {
     #[cfg(target_family = "wasm")]
     pub use wasm_signums::*;
 }
-use signums::{SIGINT, SIGKILL, SIGSTOP, SIGUSR1};
+use signums::{SIGINT, SIGKILL, SIGQUIT, SIGSTOP, SIGTERM, SIGUSR1};
 
 pub struct ProcSignalSlot {
     pss_pid: AtomicI32,
@@ -699,8 +699,28 @@ fn deliver_thread_signal_to_slot(i: usize, pid: i32, bit: u32) -> bool {
             slot.pss_extraWakeLatch.load(Relaxed),
         ));
     }
+    signal_backend_children(pid, bit);
     true
 }
+
+// The HAVE_SETSID kill(-pid, signal) leg of signal_child (postmaster.c) and
+// pg_signal_backend (signalfuncs.c): the group signals also reach the
+// backend's popen'd children (COPY PROGRAM), which otherwise keep a backend
+// blocked on the pipe past its termination.
+#[cfg(not(target_family = "wasm"))]
+fn signal_backend_children(pid: i32, bit: u32) {
+    let signo = bit.trailing_zeros() as i32;
+    if signo != SIGINT && signo != SIGTERM && signo != SIGQUIT && signo != SIGKILL {
+        return;
+    }
+    for child in init_small::globals::backend_children(pid) {
+        // SAFETY: kill(2) on a pid this backend spawned and still owns.
+        unsafe { libc::kill(child as libc::pid_t, signo) };
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn signal_backend_children(_pid: i32, _bit: u32) {}
 
 /// By-ProcNumber thread-signal delivery: signal the single slot the caller
 /// already resolved, rather than re-scanning by pid. signalfuncs
@@ -890,13 +910,19 @@ fn CleanupProcSignalState(_code: i32, _arg: usize) {
 }
 
 // C's kill(pid, SIGUSR1). One backend = one thread: the sender cannot run the
-// drain (target thread-locals), so pend SIGUSR1 and set the target's procLatch
-// (slot index == ProcNumber); the target's drain point runs
-// procsignal_sigusr1_handler when it wakes.
+// drain (target thread-locals), so pend SIGUSR1, raise the target's
+// InterruptPending (C's handler sets it at delivery, so a busy backend drains
+// at its next CHECK_FOR_INTERRUPTS) and set its procLatch (slot index ==
+// ProcNumber); the target's drain point runs procsignal_sigusr1_handler.
 fn deliver_sigusr1(slot_index: usize) {
-    proc_signal().psh_slot[slot_index]
-        .pss_pendingThreadSignals
+    let slot = &proc_signal().psh_slot[slot_index];
+    slot.pss_pendingThreadSignals
         .fetch_or(thread_signal_bit(SIGUSR1), SeqCst);
+    let flag = slot.pss_interruptFlag.load(Relaxed);
+    if !flag.is_null() {
+        // SAFETY: only ever a Box::leak'd 'static (never freed).
+        unsafe { &*flag }.store(true, SeqCst);
+    }
     latch::set_latch(&lmgr_proc::GetPGProcByNumber(slot_index as ProcNumber).procLatch);
 }
 

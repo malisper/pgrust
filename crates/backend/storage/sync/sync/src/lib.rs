@@ -443,7 +443,11 @@ pub fn RememberSyncRequest(ftag: &FileTag, req_type: SyncRequestType) -> PgResul
         SyncRequestType::SYNC_REQUEST => {
             let ctr = SYNC_CYCLE_CTR.with(|c| c.get());
             with_pending(|p| {
-                if p.ops.len() == p.ops.capacity() && p.ops.try_reserve(1).is_err() {
+                // HASH_ENTER on a present key allocates nothing.
+                if !p.ops.contains_key(ftag)
+                    && p.ops.len() == p.ops.capacity()
+                    && p.ops.try_reserve(1).is_err()
+                {
                     return Err(oom("pendingOps"));
                 }
                 let e = p.ops.entry(*ftag).or_insert(PendingFsync {
@@ -495,6 +499,11 @@ pub fn init_seams() {
     sync_seams::sync_post_checkpoint::set(SyncPostCheckpoint);
     sync_seams::process_sync_requests::set(ProcessSyncRequests);
     // absorb_sync_requests: the checkpointer's queue drain (aux-mains lane).
+}
+
+#[cfg(test)]
+pub(crate) fn pending_ops_capacity() -> usize {
+    with_pending(|p| p.ops.capacity()).unwrap_or(0)
 }
 
 #[cfg(test)]

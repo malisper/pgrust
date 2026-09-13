@@ -113,6 +113,23 @@ fn duplicate_requests_merge() {
     assert_eq!(pending_counts().0, 0);
 }
 
+// sync.c RememberSyncRequest: a duplicate SYNC_REQUEST is HASH_ENTER on a
+// present key, which never grows (or fails to grow) the table.
+#[test]
+fn duplicate_request_does_not_grow_pending_ops() {
+    setup();
+    let tag = md_tag(20010);
+    RegisterSyncRequest(tag, SyncRequestType::SYNC_REQUEST, false).unwrap();
+    let mut rel = 20011;
+    while pending_counts().0 < pending_ops_capacity() {
+        RegisterSyncRequest(md_tag(rel), SyncRequestType::SYNC_REQUEST, false).unwrap();
+        rel += 1;
+    }
+    let cap = pending_ops_capacity();
+    RegisterSyncRequest(tag, SyncRequestType::SYNC_REQUEST, false).unwrap();
+    assert_eq!(pending_ops_capacity(), cap);
+}
+
 #[test]
 fn missing_file_fails_after_retry() {
     setup();

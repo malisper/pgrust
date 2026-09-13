@@ -1731,8 +1731,8 @@ struct ComputeXidHorizonsResult {
     latest_completed: FullTransactionId,
     oldest_considered_running: TransactionId,
     shared_oldest_nonremovable: TransactionId,
-    // shared horizon before the slot xmins fold in (hot_standby_feedback
-    // reports slot effects separately).
+    // shared horizon after slot_xmin but before slot_catalog_xmin folds in
+    // (hot_standby_feedback reports catalog_xmin separately).
     shared_oldest_nonremovable_raw: TransactionId,
     catalog_oldest_nonremovable: TransactionId,
     data_oldest_nonremovable: TransactionId,
@@ -1824,11 +1824,11 @@ fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
         h.data_oldest_nonremovable = TransactionIdOlder(h.data_oldest_nonremovable, kaxmin);
     }
 
-    h.shared_oldest_nonremovable_raw = h.shared_oldest_nonremovable;
     h.slot_catalog_xmin = slot_catalog_xmin;
     h.shared_oldest_nonremovable =
         TransactionIdOlder(h.shared_oldest_nonremovable, slot_xmin);
     h.data_oldest_nonremovable = TransactionIdOlder(h.data_oldest_nonremovable, slot_xmin);
+    h.shared_oldest_nonremovable_raw = h.shared_oldest_nonremovable;
     h.shared_oldest_nonremovable =
         TransactionIdOlder(h.shared_oldest_nonremovable, slot_catalog_xmin);
     h.catalog_oldest_nonremovable =

@@ -349,6 +349,9 @@ fn send_proc_signal_pends_sigusr1_and_drain_reaches_cfi_flags() {
         slot(11).pss_pendingThreadSignals.load(Relaxed),
         1 << libc::SIGUSR1 as u32
     );
+    // Delivery alone raises InterruptPending (C's handler sets it), so a
+    // busy target drains at its next CHECK_FOR_INTERRUPTS.
+    assert!(g::InterruptPending());
 
     // ProcSignalInit's default SIGUSR1 disposition runs the C handler.
     DrainThreadSignals().unwrap();
@@ -621,4 +624,26 @@ fn shmem_init_registers_proc_signal_block() {
     let slots = NumProcSignalSlots() as usize;
     let (_, found) = shmem::ShmemInitStruct("ProcSignal", 8 + 128 * slots).unwrap();
     assert!(found, "\"ProcSignal\" is not registered in the ShmemIndex");
+}
+
+#[test]
+fn thread_signal_reaches_backend_children() {
+    use std::os::unix::process::ExitStatusExt;
+    setup();
+    let _guard = serial();
+    register(15, 1015, &[]);
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    g::register_backend_child(child.id());
+
+    pqsignal_thread(libc::SIGTERM, ThreadSignalHandler::Ignore);
+    assert_eq!(SendThreadSignalByProcNumber(15, 1015, libc::SIGTERM), 0);
+    let status = child.wait().unwrap();
+    g::unregister_backend_child(child.id());
+    assert_eq!(status.signal(), Some(libc::SIGTERM));
+
+    DrainThreadSignals().unwrap();
+    cleanup_current();
 }

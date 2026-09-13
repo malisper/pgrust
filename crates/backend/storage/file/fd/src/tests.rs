@@ -645,6 +645,28 @@ fn pipe_stream_round_trip() {
     assert_eq!(status, 3 << 8);
 }
 
+// A backend thread's blocked signal mask must not reach the popen child:
+// C's kill(-pid, SIGTERM) from pg_terminate_backend kills a COPY PROGRAM.
+#[test]
+fn pipe_stream_child_starts_with_signals_unblocked() {
+    setup();
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: thread-local mask change, restored below.
+    unsafe {
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old);
+    }
+    let idx = crate::desc::OpenPipeStream("kill -TERM $$; echo survived", "r").unwrap();
+    // SAFETY: restores the mask saved above.
+    unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+    assert!(idx >= 0);
+    let mut buf = [0u8; 64];
+    assert_eq!(crate::desc::PipeStreamRead(idx, &mut buf).unwrap(), 0);
+    assert_eq!(crate::desc::ClosePipeStream(idx).unwrap(), libc::SIGTERM);
+}
+
 #[test]
 fn pipe_stream_read_drains_child_stdout() {
     setup();
@@ -1893,4 +1915,37 @@ fn buffile_segment_rollover_keeps_creation_owner() {
     bf.close().unwrap();
     resowner::SetCurrentResourceOwner(saved);
     resowner::ResourceOwnerDelete(owner);
+}
+
+// rmtree.c:63: an unopenable directory logs WARNING "could not open
+// directory" and reports false (nothing was silently skipped).
+#[cfg(not(pgrust_sim))]
+#[test]
+fn rmtree_warns_on_unopenable_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    setup();
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = scratch_dir("rmtree_unopenable");
+    let sub = format!("{dir}/locked");
+    std::fs::create_dir(&sub).unwrap();
+    vfs_write_file(&format!("{sub}/inner"), b"x");
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let prev = elog::set_emit_log_hook(Some(capture_log_line));
+    take_log_lines();
+    let ok = crate::copydir::rmtree(&sub, true);
+    let lines = take_log_lines();
+    elog::set_emit_log_hook(prev);
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(ok.unwrap(), false);
+    let want = format!("could not open directory \"{sub}\": Permission denied");
+    assert!(
+        lines.iter().any(|(lvl, m)| *lvl == types_error::WARNING && *m == want),
+        "expected WARNING {want:?}, got {lines:?}"
+    );
+    assert!(std::path::Path::new(&format!("{sub}/inner")).exists());
+
+    assert!(crate::copydir::rmtree(&dir, true).unwrap());
+    assert!(!std::path::Path::new(&dir).exists());
 }
