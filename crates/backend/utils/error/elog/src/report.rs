@@ -234,7 +234,7 @@ pub fn format_elog_string(fmt: &str) -> String {
 
 fn process_log_prefix_padding(chars: &[char], mut p: usize, padding: &mut i32) -> Option<usize> {
     let mut paddingsign = 1;
-    let mut pad = 0i64;
+    let mut pad = 0i32;
 
     if chars.get(p) == Some(&'-') {
         p += 1;
@@ -248,7 +248,7 @@ fn process_log_prefix_padding(chars: &[char], mut p: usize, padding: &mut i32) -
         if !c.is_ascii_digit() {
             break;
         }
-        pad = (pad * 10 + (c as i64 - '0' as i64)).min(i32::MAX as i64);
+        pad = pad.wrapping_mul(10).wrapping_add(c as i32 - '0' as i32);
         p += 1;
     }
 
@@ -256,7 +256,7 @@ fn process_log_prefix_padding(chars: &[char], mut p: usize, padding: &mut i32) -
         return None;
     }
 
-    *padding = pad as i32 * paddingsign;
+    *padding = pad.wrapping_mul(paddingsign);
     Some(p)
 }
 

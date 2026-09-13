@@ -11,7 +11,7 @@ pub use builtins::MBUTILS_BUILTINS;
 use core::cell::{Cell, RefCell};
 
 use datum::Datum;
-use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
+use mcx::{slice_in, vec_with_capacity_huge_in, vec_with_capacity_in, Mcx, PgVec};
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -405,7 +405,8 @@ fn convert_with_proc<'mcx>(
     no_error: bool,
 ) -> PgResult<(i32, PgVec<'mcx, u8>)> {
     let cap = src.len() * MAX_CONVERSION_GROWTH + 1;
-    let mut dest: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, cap)?;
+    // mbutils.c:414 MemoryContextAllocHuge: the worst case may exceed MaxAllocSize.
+    let mut dest: PgVec<'mcx, u8> = vec_with_capacity_huge_in(mcx, cap)?;
     let consumed = direct_function_call6_coll(
         proc.fn_addr,
         InvalidOid,
@@ -470,10 +471,13 @@ pub fn pg_do_encoding_conversion<'mcx>(
     // General case: C's OidFunctionCall6 re-resolves per call (only the
     // client<->server default pair is cached); mirrored here.
     let resolved = resolve_conv_proc(proc)?;
-    let (_, result) = convert_with_proc(mcx, resolved, src_encoding, dest_encoding, src, false)?;
+    let (_, mut result) = convert_with_proc(mcx, resolved, src_encoding, dest_encoding, src, false)?;
 
-    if src.len() > 1_000_000 && result.len() >= MAX_ALLOC_SIZE {
-        return Err(too_long_error(src.len()));
+    if src.len() > 1_000_000 {
+        if result.len() >= MAX_ALLOC_SIZE {
+            return Err(too_long_error(src.len()));
+        }
+        result.shrink_to_fit();
     }
     Ok(Some(result))
 }
@@ -615,9 +619,12 @@ fn perform_default_encoding_conversion<'mcx>(
     if src.len() >= MAX_ALLOC_HUGE_SIZE / MAX_CONVERSION_GROWTH {
         return Err(too_long_error(src.len()));
     }
-    let (_, result) = convert_with_proc(mcx, proc, src_encoding, dest_encoding, src, false)?;
-    if src.len() > 1_000_000 && result.len() >= MAX_ALLOC_SIZE {
-        return Err(too_long_error(src.len()));
+    let (_, mut result) = convert_with_proc(mcx, proc, src_encoding, dest_encoding, src, false)?;
+    if src.len() > 1_000_000 {
+        if result.len() >= MAX_ALLOC_SIZE {
+            return Err(too_long_error(src.len()));
+        }
+        result.shrink_to_fit();
     }
     Ok(Some(result))
 }

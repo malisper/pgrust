@@ -118,9 +118,16 @@ pub fn init_seams() {
         let Some(value) = newval.as_deref() else {
             return Ok(true);
         };
-        let list = config::check_backtrace_functions(value)?;
-        *extra = list.map(|l| Box::new(l) as GucHookExtra);
-        Ok(true)
+        match config::check_backtrace_functions(value) {
+            Ok(list) => {
+                *extra = list.map(|l| Box::new(l) as GucHookExtra);
+                Ok(true)
+            }
+            Err(detail) => {
+                guc_seams::guc_check_errdetail::call(detail);
+                Ok(false)
+            }
+        }
     });
     hooks::assign_backtrace_functions.install(|_newval, extra| {
         config::assign_backtrace_functions(
@@ -134,9 +141,16 @@ pub fn init_seams() {
         let Some(value) = newval.as_deref() else {
             return Ok(true);
         };
-        let dest = config::check_log_destination(value)?;
-        *extra = Some(Box::new(dest));
-        Ok(true)
+        match config::check_log_destination(value) {
+            Ok(dest) => {
+                *extra = Some(Box::new(dest));
+                Ok(true)
+            }
+            Err(detail) => {
+                guc_seams::guc_check_errdetail::call(detail);
+                Ok(false)
+            }
+        }
     });
     hooks::assign_log_destination.install(|_newval, extra| {
         let dest = extra

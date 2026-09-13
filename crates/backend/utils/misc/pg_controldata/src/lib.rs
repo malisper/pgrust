@@ -5,6 +5,10 @@
 use datum::Datum;
 use types_error::{PgError, PgResult};
 use types_fmgr::{varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use types_tuple::TupleDescData;
+
+use core::ffi::c_void;
+use core::ptr::NonNull;
 
 use controldata_utils::{get_controlfile, ControlFileData};
 use lwlock::{LWLockAcquire, LWLockRelease, LW_SHARED};
@@ -36,19 +40,32 @@ fn read_controlfile() -> PgResult<ControlFileData> {
     Ok(control_file)
 }
 
-fn composite_result(
+// C: get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE,
+// checked before pg_control is read; rsinfo->expectedDesc lets a RECORD
+// declaration take its descriptor from the caller's column list.
+fn result_tupdesc<'a>(
     flinfo: &FmgrInfo,
-    fcinfo: &mut Fcinfo,
+    fcinfo: &'a Fcinfo,
+    expected_desc: Option<NonNull<c_void>>,
+) -> PgResult<TupleDescData<'a>> {
+    // SAFETY: expectedDesc contract — the executor armed it with the scan
+    // tupdesc, live for the duration of this call.
+    let expected = expected_desc.map(|p| unsafe { p.cast::<TupleDescData<'_>>().as_ref() });
+    let resolved = funcapi::get_call_result_type(fcinfo.result_mcx(), flinfo, expected)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(Box::new(PgError::error("return type must be a row type")));
+    }
+    Ok(resolved.result_tuple_desc.expect("composite result has tupdesc"))
+}
+
+fn composite_result(
+    fcinfo: &Fcinfo,
+    tupdesc: &TupleDescData<'_>,
     values: &[Datum],
     isnull: &[bool],
 ) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
-    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
-    if resolved.class != funcapi::TypeFuncClass::Composite {
-        return Err(Box::new(PgError::error("return type must be a row type")));
-    }
-    let tupdesc = resolved.result_tuple_desc.expect("composite result has tupdesc");
-    let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, values, isnull)?;
+    let tup = heaptuple::heap_form_tuple(mcx, tupdesc, values, isnull)?;
     let d = Datum::from_usize(tup.header_ptr() as usize);
     core::mem::forget(tup); // leak into the arming context (C palloc ownership)
     Ok(d)
@@ -63,6 +80,8 @@ pub fn fc_pg_control_system(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("pg_control_system: NULL flinfo");
+    let expected = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    let tupdesc = result_tupdesc(flinfo, fcinfo, expected)?;
     let cf = read_controlfile()?;
     let values = [
         Datum::from_i32(cf.pg_control_version as i32),
@@ -70,7 +89,7 @@ pub fn fc_pg_control_system(
         Datum::from_i64(cf.system_identifier as i64),
         Datum::from_i64(time_t_to_timestamptz(cf.time)),
     ];
-    composite_result(flinfo, fcinfo, &values, &[false; 4])
+    composite_result(fcinfo, &tupdesc, &values, &[false; 4])
 }
 
 pub fn fc_pg_control_checkpoint(
@@ -78,6 +97,8 @@ pub fn fc_pg_control_checkpoint(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("pg_control_checkpoint: NULL flinfo");
+    let expected = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    let tupdesc = result_tupdesc(flinfo, fcinfo, expected)?;
     let cf = read_controlfile()?;
     let cp = &cf.checkPointCopy;
 
@@ -105,7 +126,7 @@ pub fn fc_pg_control_checkpoint(
         Datum::from_transaction_id(cp.newestCommitTsXid),
         Datum::from_i64(time_t_to_timestamptz(cp.time)),
     ];
-    composite_result(flinfo, fcinfo, &values, &[false; 18])
+    composite_result(fcinfo, &tupdesc, &values, &[false; 18])
 }
 
 pub fn fc_pg_control_recovery(
@@ -113,6 +134,8 @@ pub fn fc_pg_control_recovery(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("pg_control_recovery: NULL flinfo");
+    let expected = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    let tupdesc = result_tupdesc(flinfo, fcinfo, expected)?;
     let cf = read_controlfile()?;
     let values = [
         Datum::from_u64(cf.minRecoveryPoint),
@@ -121,7 +144,7 @@ pub fn fc_pg_control_recovery(
         Datum::from_u64(cf.backupEndPoint),
         Datum::from_bool(cf.backupEndRequired),
     ];
-    composite_result(flinfo, fcinfo, &values, &[false; 5])
+    composite_result(fcinfo, &tupdesc, &values, &[false; 5])
 }
 
 pub fn fc_pg_control_init(
@@ -129,6 +152,8 @@ pub fn fc_pg_control_init(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("pg_control_init: NULL flinfo");
+    let expected = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    let tupdesc = result_tupdesc(flinfo, fcinfo, expected)?;
     let cf = read_controlfile()?;
     let values = [
         Datum::from_i32(cf.maxAlign as i32),
@@ -144,7 +169,7 @@ pub fn fc_pg_control_init(
         Datum::from_i32(cf.data_checksum_version as i32),
         Datum::from_bool(cf.default_char_signedness),
     ];
-    composite_result(flinfo, fcinfo, &values, &[false; 12])
+    composite_result(fcinfo, &tupdesc, &values, &[false; 12])
 }
 
 pub const PG_CONTROLDATA_BUILTINS: &[FmgrBuiltin] = &[

@@ -1,0 +1,36 @@
+-- bugs/batch-49-backend-utils-misc: SQL-visible fixes in utils, expected
+-- captured from C 18.6.
+\set VERBOSITY verbose
+-- elog.c:2172 check_backtrace_functions and :2213 check_log_destination
+-- fail through GUC_check_errdetail: 22023 with the parameter wrapper.
+SET backtrace_functions = 'bad-name';
+ERROR:  22023: invalid value for parameter "backtrace_functions": "bad-name"
+DETAIL:  Invalid character.
+ALTER SYSTEM SET log_destination = 'nowhere';
+ERROR:  22023: invalid value for parameter "log_destination": "nowhere"
+DETAIL:  Unrecognized key word: "nowhere".
+ALTER SYSTEM SET log_destination = 'stderr,';
+ERROR:  22023: invalid value for parameter "log_destination": "stderr,"
+DETAIL:  List syntax is invalid.
+SET backtrace_functions = 'b49_ok, b49_also_ok';
+SHOW backtrace_functions;
+ backtrace_functions 
+---------------------
+ b49_ok, b49_also_ok
+(1 row)
+
+RESET backtrace_functions;
+-- pg_controldata.c:41: a RECORD-declared alias takes its descriptor from
+-- the column definition list; a scalar alias is the row-type elog.
+CREATE FUNCTION b49_control_record() RETURNS record LANGUAGE internal AS 'pg_control_system';
+SELECT pg_control_version, catalog_version_no FROM b49_control_record() AS t(pg_control_version integer, catalog_version_no integer, system_identifier bigint, pg_control_last_modified timestamptz);
+ pg_control_version | catalog_version_no 
+--------------------+--------------------
+               1800 |          202506291
+(1 row)
+
+CREATE FUNCTION b49_control_int() RETURNS integer LANGUAGE internal AS 'pg_control_system';
+SELECT b49_control_int();
+ERROR:  XX000: return type must be a row type
+DROP FUNCTION b49_control_record();
+DROP FUNCTION b49_control_int();

@@ -262,6 +262,26 @@ fn missing_strict_include_fails_and_if_exists_skips() {
 }
 
 #[test]
+fn unreadable_include_after_open_is_a_scanner_error_even_if_exists() {
+    // guc-file.l:372: the include opened, so a read failure is the flex
+    // fatal arm and rejects the file; include_if_exists only forgives open.
+    setup();
+    let dir = scratch_dir("unreadable");
+    std::fs::create_dir_all(dir.join("bad.conf")).unwrap();
+    let main = dir.join("main.conf");
+    std::fs::write(&main, "include_if_exists 'bad.conf'\nwork_mem = 8MB\n").unwrap();
+    let mut vars = Vec::new();
+    let ok = ParseConfigFile(main.to_str().unwrap(), true, None, 0, 0, LOG, &mut vars).unwrap();
+    assert!(!ok);
+    let err = vars.iter().find(|v| v.ignore).unwrap();
+    assert_eq!(err.errmsg.as_deref(), Some("input in flex scanner failed"));
+    assert_eq!(err.filename.as_deref(), Some(dir.join("bad.conf").as_path()));
+    assert_eq!(err.sourceline, 1);
+    // guc-file.l:462 keeps scanning the includer after the failed include.
+    assert_eq!(settings(&vars), vec![("work_mem".into(), "8MB".into())]);
+}
+
+#[test]
 fn empty_file_name_rejected() {
     setup();
     let mut vars = Vec::new();

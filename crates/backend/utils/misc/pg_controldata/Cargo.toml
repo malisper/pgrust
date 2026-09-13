@@ -19,3 +19,4 @@ controldata_utils = { path = "../../../../common/controldata_utils" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 init_small = { path = "../../init/init_small" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

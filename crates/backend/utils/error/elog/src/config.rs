@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use ::types_core::NAMEDATALEN;
 use ::types_dest::CommandDest;
 use ::types_error::{
-    ErrorLevel, PGErrorVerbosity, PgError, PgResult, ERROR, LOG_DESTINATION_CSVLOG,
+    ErrorLevel, PGErrorVerbosity, ERROR, LOG_DESTINATION_CSVLOG,
     LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, NOTICE, WARNING,
 };
 
@@ -259,7 +259,8 @@ impl BacktraceFunctionList {
 
 thread_local! { static BACKTRACE_FUNCTION_LIST: RefCell<Option<BacktraceFunctionList>> = const { RefCell::new(None) }; }
 
-pub fn check_backtrace_functions(newval: &str) -> PgResult<Option<BacktraceFunctionList>> {
+// Err carries C's GUC_check_errdetail text; the hook then returns false.
+pub fn check_backtrace_functions(newval: &str) -> Result<Option<BacktraceFunctionList>, String> {
     let valid = |b: u8| {
         b.is_ascii_digit()
             || b == b'_'
@@ -268,7 +269,7 @@ pub fn check_backtrace_functions(newval: &str) -> PgResult<Option<BacktraceFunct
             || matches!(b, b',' | b' ' | b'\n' | b'\t')
     };
     if !newval.bytes().all(valid) {
-        return Err(PgError::error("Invalid character.").into());
+        return Err("Invalid character.".into());
     }
 
     if newval.is_empty() {
@@ -301,7 +302,7 @@ pub fn matches_backtrace_functions(funcname: &str) -> bool {
     })
 }
 
-pub fn check_log_destination(newval: &str) -> PgResult<i32> {
+pub fn check_log_destination(newval: &str) -> Result<i32, String> {
     let identifiers = split_identifier_string(newval, ',')?;
     let mut newlogdest = 0;
 
@@ -319,7 +320,7 @@ pub fn check_log_destination(newval: &str) -> PgResult<i32> {
         } else if tok.eq_ignore_ascii_case("syslog") {
             newlogdest |= LOG_DESTINATION_SYSLOG;
         } else {
-            return Err(PgError::error(format!("Unrecognized key word: \"{}\".", tok)).into());
+            return Err(format!("Unrecognized key word: \"{}\".", tok));
         }
     }
 
@@ -354,8 +355,8 @@ fn scanner_isspace(ch: char) -> bool {
     matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c')
 }
 
-fn split_identifier_string(raw: &str, separator: char) -> PgResult<Vec<String>> {
-    let syntax_error = || PgError::error("List syntax is invalid.");
+fn split_identifier_string(raw: &str, separator: char) -> Result<Vec<String>, String> {
+    let syntax_error = || "List syntax is invalid.".to_string();
     let mut chars = raw.char_indices().peekable();
     let mut identifiers = Vec::new();
 

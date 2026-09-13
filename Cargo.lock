@@ -5404,6 +5404,7 @@ version = "0.0.0"
 dependencies = [
  "elog_seams",
  "error_small_seams",
+ "guc_seams",
  "guc_tables",
  "init_small",
  "init_small_seams",
@@ -12407,6 +12408,7 @@ dependencies = [
  "transam_xlog",
  "types_error",
  "types_fmgr",
+ "types_tuple",
  "varlena",
 ]
 

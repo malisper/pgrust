@@ -576,6 +576,21 @@ fn log_status_format_applies_padding_and_percent_escape() {
 }
 
 #[test]
+fn log_status_format_padding_wraps_like_c_int() {
+    let _guard = lock();
+    let previous = set_backend_log_context(Some(&TEST_CONTEXT));
+    let error = PgError::error("boom");
+
+    // elog.c:2801 accumulates the width in a wrapping int: 2^32 is 0 and
+    // 2^32 + 8 is 8, not a saturated i32::MAX of padding.
+    let mut buf = String::new();
+    log_status_format(&mut buf, Some("%4294967296p|%4294967304p|%-4294967304p"), &error);
+    assert_eq!(buf, "1234|    1234|1234    ");
+
+    set_backend_log_context(previous);
+}
+
+#[test]
 fn log_status_format_q_stops_without_client_port() {
     let _guard = lock();
     let previous = set_backend_log_context(None);
@@ -702,7 +717,7 @@ fn backtrace_functions_check_splits_and_empty_entry_terminates() {
     assert!(!parsed.matches("bar"));
 
     assert_eq!(
-        check_backtrace_functions("valid-name").unwrap_err().message,
+        check_backtrace_functions("valid-name").unwrap_err(),
         "Invalid character."
     );
     assert!(check_backtrace_functions("").unwrap().is_none());
@@ -733,11 +748,11 @@ fn log_destination_check_accepts_postgres_keywords() {
         LOG_DESTINATION_STDERR
     );
     assert_eq!(
-        check_log_destination("stderr,,syslog").unwrap_err().message,
+        check_log_destination("stderr,,syslog").unwrap_err(),
         "List syntax is invalid."
     );
     assert_eq!(
-        check_log_destination("stderr,unknown").unwrap_err().message,
+        check_log_destination("stderr,unknown").unwrap_err(),
         "Unrecognized key word: \"unknown\"."
     );
     assert!(check_log_destination("eventlog").is_err());

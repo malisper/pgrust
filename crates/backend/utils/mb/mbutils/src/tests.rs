@@ -528,3 +528,28 @@ fn gb18030_cannot_be_a_database_encoding() {
     assert!(SetDatabaseEncoding(wchar::PG_GB18030).is_err());
     assert!(!wchar::pg_valid_be_encoding(wchar::PG_GB18030));
 }
+
+#[test]
+fn conversion_scratch_buffer_is_a_huge_allocation() {
+    // mbutils.c:414 sizes the worst-case buffer with MemoryContextAllocHuge:
+    // a 256 MiB input needs 1 GiB + 1 of scratch, above MaxAllocSize.
+    fn fake_conv(
+        _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+        fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        let dest = fcinfo.arg(3).as_usize() as *mut u8;
+        // SAFETY: dest is the scratch buffer of at least two bytes.
+        unsafe {
+            dest.write(b'a');
+            dest.add(1).write(0);
+        }
+        Ok(Datum::from_i32(fcinfo.arg(4).as_i32()))
+    }
+    let ctx = MemoryContext::new("test");
+    let src = vec![0u8; 268_435_456];
+    let proc = ResolvedConvProc { fn_addr: fake_conv };
+    let (consumed, out) =
+        convert_with_proc(ctx.mcx(), proc, PG_UTF8, PG_LATIN1, &src, false).unwrap();
+    assert_eq!(consumed, 268_435_456);
+    assert_eq!(&out[..], b"a");
+}

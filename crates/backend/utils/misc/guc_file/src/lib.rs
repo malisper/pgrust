@@ -137,9 +137,10 @@ pub fn ParseConfigFile(
     }
 
     // The scanner is %option 8bit (high-bit bytes are LETTERs): read raw
-    // bytes, not UTF-8.
-    let contents = match std::fs::read(&abs_path) {
-        Ok(contents) => contents,
+    // bytes, not UTF-8. AllocateFile failing is the open arm below; a read
+    // failure after a successful open is the flex fatal arm (guc-file.l:372).
+    let mut file = match std::fs::File::open(&abs_path) {
+        Ok(file) => file,
         Err(error) if strict => {
             let mut builder = ereport(elevel);
             if let Some(errno) = error.raw_os_error() {
@@ -171,6 +172,18 @@ pub fn ParseConfigFile(
             return Ok(true);
         }
     };
+
+    let mut contents = Vec::new();
+    if std::io::Read::read_to_end(&mut file, &mut contents).is_err() {
+        let error = ereport(elevel)
+            .errmsg(format!(
+                "input in flex scanner failed at file \"{}\" line 1",
+                abs_path.display()
+            ))
+            .into_error();
+        record_or_throw(elevel, error, "input in flex scanner failed", Some(&abs_path), 1, variables)?;
+        return Ok(false);
+    }
 
     ParseConfigFp(&contents, &abs_path, depth, elevel, variables)
 }
