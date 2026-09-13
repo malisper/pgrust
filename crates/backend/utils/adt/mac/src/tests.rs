@@ -62,21 +62,28 @@ fn in_sscanf_quirks_match_c() {
     );
 }
 
-// Task #75 witness for the scan_hex wrapping_neg arms (lib.rs 147/170):
-// sscanf's %x accumulates with unsigned wraparound and applies '-' as a
-// two's-complement wrap. Sixteen hex digits "-8000000000000000" accumulate
-// to exactly i64::MIN, the one value whose strict negation panics under the
-// overflow-checked profiles `cargo test` builds with (the mac_diff fuzz
-// finding of 2026-07-30). With wrapping_neg the value survives to the octet
-// range check and errors like C; without it, this test aborts on the panic.
+// sscanf's %x is strtoul stored into an int: the accumulator saturates at
+// ULONG_MAX, '-' negates in the unsigned domain, and the store keeps the low
+// 32 bits (C 18.6 measured 2026-09-13: "-8000000000000000" and 2^32 read as
+// octet 0; 2^64 and 0x1ffffffff read as -1 and 22003).
 #[test]
-fn in_hex_accumulator_i64_min_negation_wraps_like_c() {
-    // Plain wide-scan arm (lib.rs 170).
-    let err = macaddr_in("-8000000000000000:0:0:0:0:0", None).unwrap_err();
-    assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
-    // 0x-prefixed wide-scan arm (lib.rs 147).
-    let err = macaddr_in("-0x8000000000000000:0:0:0:0:0", None).unwrap_err();
-    assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+fn in_hex_accumulator_overflows_like_sscanf() {
+    let zero = macaddr_in("00:00:00:00:00:00", None).unwrap();
+    assert_eq!(macaddr_in("-8000000000000000:0:0:0:0:0", None).unwrap(), zero);
+    assert_eq!(macaddr_in("-0x8000000000000000:0:0:0:0:0", None).unwrap(), zero);
+    assert_eq!(macaddr_in("100000000:00:00:00:00:00", None).unwrap(), zero);
+    assert_eq!(
+        macaddr_in("-fffffffe:00:00:00:00:00", None).unwrap(),
+        macaddr_in("02:00:00:00:00:00", None).unwrap()
+    );
+    for s in [
+        "10000000000000000:00:00:00:00:00",
+        "1ffffffff:00:00:00:00:00",
+        "ffffffff:00:00:00:00:00",
+    ] {
+        let err = macaddr_in(s, None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, "{s}");
+    }
 }
 
 #[test]

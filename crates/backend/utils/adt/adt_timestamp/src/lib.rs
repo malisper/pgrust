@@ -684,12 +684,15 @@ fn require_session_timezone() -> &'static PgTz {
 }
 
 // C text_to_cstring_buffer(zone, buf, TZ_STRLEN_MAX + 1): at most
-// TZ_STRLEN_MAX bytes, C-string semantics end at an embedded NUL.
-// DIVERGENCE: C clips at a multibyte character boundary; zone names past 255
-// bytes are already unresolvable, so byte truncation only changes the error
-// text.
+// TZ_STRLEN_MAX bytes, clipped at a character boundary, C-string semantics
+// end at an embedded NUL.
 fn text_to_tzname(zone: &[u8]) -> &[u8] {
-    let z = &zone[..zone.len().min(TZ_STRLEN_MAX)];
+    let n = if zone.len() > TZ_STRLEN_MAX {
+        mbutils::pg_mbcliplen(zone, zone.len() as i32, TZ_STRLEN_MAX as i32) as usize
+    } else {
+        zone.len()
+    };
+    let z = &zone[..n];
     match z.iter().position(|&b| b == 0) {
         Some(i) => &z[..i],
         None => z,
@@ -697,11 +700,15 @@ fn text_to_tzname(zone: &[u8]) -> &[u8] {
 }
 
 // C downcase_truncate_identifier to NAMEDATALEN-1.
-// DIVERGENCE: C also tolower()s high-bit bytes under single-byte encodings
-// and clips multibyte-aware; unit/zone keywords are ASCII, so only error
-// text for non-ASCII garbage input can differ.
+// DIVERGENCE: C also tolower()s high-bit bytes under single-byte encodings;
+// unit/zone keywords are ASCII, so only error text for non-ASCII garbage
+// input can differ.
 pub fn downcase_ident<'a>(src: &[u8], out: &'a mut [u8; 64]) -> &'a [u8] {
-    let n = src.len().min(63);
+    let n = if src.len() >= 64 {
+        mbutils::pg_mbcliplen(src, src.len() as i32, 63) as usize
+    } else {
+        src.len()
+    };
     for (dst, b) in out.iter_mut().zip(&src[..n]) {
         *dst = b.to_ascii_lowercase();
     }

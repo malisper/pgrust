@@ -135,7 +135,7 @@ fn drop_msg_entry(kind: u8) -> Option<&'static DropMsgStrings> {
 
 fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, rightkind: u8, missing_ok: bool) -> PgResult<()> {
     if let Some(schemaname) = rel.schemaname {
-        if catalog_namespace::get_namespace_oid(schemaname, true)? == InvalidOid {
+        if catalog_namespace::LookupNamespaceNoError(schemaname)? == InvalidOid {
             if !missing_ok {
                 return Err(Box::new(
                     PgError::new(ERROR, format!("schema \"{schemaname}\" does not exist"))

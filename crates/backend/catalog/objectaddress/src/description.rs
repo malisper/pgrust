@@ -78,7 +78,7 @@ fn name_str(name: &NameData) -> &str {
     core::str::from_utf8(name.name_str()).expect("catalog NameData is valid UTF-8")
 }
 
-fn get_namespace_name(nspid: Oid) -> PgResult<Option<String>> {
+pub(crate) fn get_namespace_name(nspid: Oid) -> PgResult<Option<String>> {
     Ok(syscache_seams::pg_namespace_nspname::call(nspid)?.map(|n| name_str(&n).to_string()))
 }
 

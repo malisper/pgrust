@@ -317,9 +317,10 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
     apply_armed_parser_errposition();
     run_emit_context_callbacks();
 
-    emit_top_frame();
+    let emitted = emit_top_frame();
 
     let _ = pop_top_frame();
+    emitted?;
 
     // Perform error recovery action as specified by elevel.
     if elevel == FATAL {
@@ -372,7 +373,7 @@ fn pop_top_frame() -> PgError {
 
 #[cold]
 #[inline(never)]
-fn emit_top_frame() {
+fn emit_top_frame() -> PgResult<()> {
     let (error, mut output_to_server, output_to_client) = STACK.with(|s| {
         let st = s.borrow();
         let top = st.frames.last().expect("emit_top_frame on empty stack");
@@ -395,8 +396,9 @@ fn emit_top_frame() {
     }
 
     if output_to_client {
-        report::send_message_to_frontend(&error);
+        return report::send_message_to_frontend(&error);
     }
+    Ok(())
 }
 
 #[cold]
@@ -413,9 +415,9 @@ pub fn EmitErrorReport() -> PgResult<()> {
     if !has_frame {
         return Err(errstart_not_called().into());
     }
-    emit_top_frame();
+    let emitted = emit_top_frame();
     STACK.with(|s| s.borrow_mut().recursion_depth -= 1);
-    Ok(())
+    emitted
 }
 
 #[cold]
@@ -431,7 +433,11 @@ pub fn emit_error_report_for(error: &PgError) {
         report::send_message_to_server_log(error);
     }
     if output_to_client {
-        report::send_message_to_frontend(error);
+        // The client-encoding conversion failure is what C's PG_CATCH then
+        // reports in place of the original error (its text is ASCII).
+        if let Err(e) = report::send_message_to_frontend(error) {
+            let _ = report::send_message_to_frontend(&e);
+        }
     }
 }
 

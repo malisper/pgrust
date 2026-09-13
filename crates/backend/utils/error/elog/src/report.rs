@@ -737,11 +737,12 @@ std::thread_local! {
 }
 
 // C err_sendstring: pq_sendstring (client-encoding conversion) unless already
-// in error recursion. Divergences: an uninstalled seam (unit tests, early
-// startup) and a conversion failure both fall back to the raw
-// server-encoding bytes instead of re-entering ereport.
-pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
-    err_sendbytes(buf, s.as_bytes());
+// in error recursion; a conversion failure is the error the client gets
+// instead (elog.c:3527 pq_sendstring's ereport replaces the report being
+// sent). Divergence: an uninstalled seam (unit tests, early startup) falls
+// back to the raw server-encoding bytes.
+pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) -> PgResult<()> {
+    err_sendbytes(buf, s.as_bytes())
 }
 
 // Byte-level body shared with the raw-message lane. C's error fields are
@@ -749,7 +750,7 @@ pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
 // String CAN carry an embedded NUL (e.g. a formatted '\0' char), and sending
 // it verbatim breaks 'E'-message framing ("message contents do not agree
 // with length"); truncate exactly where C's cstring would end.
-pub fn err_sendbytes(buf: &mut Vec<u8>, s: &[u8]) {
+pub fn err_sendbytes(buf: &mut Vec<u8>, s: &[u8]) -> PgResult<()> {
     let s = match s.iter().position(|&b| b == 0) {
         Some(n) => &s[..n],
         None => s,
@@ -758,7 +759,7 @@ pub fn err_sendbytes(buf: &mut Vec<u8>, s: &[u8]) {
         && ::mbutils_seams::pg_server_to_client::is_installed()
         && ERR_CONVERT_CX.with(|cell| {
             let Ok(mut slot) = cell.try_borrow_mut() else {
-                return false;
+                return Ok(false);
             };
             let cx = slot.get_or_insert_with(|| {
                 // First client-bound send on this session: build the scratch
@@ -775,39 +776,45 @@ pub fn err_sendbytes(buf: &mut Vec<u8>, s: &[u8]) {
                 }));
                 std::mem::ManuallyDrop::new(::mcx::MemoryContext::new("error conversion"))
             });
-            let done = {
-                match ::mbutils_seams::pg_server_to_client::call(cx.mcx(), s) {
-                    Ok(Some(conv)) => {
-                        buf.extend_from_slice(&conv);
-                        true
-                    }
-                    Ok(None) | Err(_) => false,
+            let done = match ::mbutils_seams::pg_server_to_client::call(cx.mcx(), s) {
+                Ok(Some(conv)) => {
+                    buf.extend_from_slice(&conv);
+                    Ok(true)
                 }
+                Ok(None) => Ok(false),
+                // Raised at recursion depth 3 in C (errfinish, EmitErrorReport,
+                // errstart), where error_context_stack is abandoned.
+                Err(e) => Err(Box::new((*e).with_hide_context(true))),
             };
             cx.reset();
             done
-        });
+        })?;
     if !converted {
         buf.extend_from_slice(s);
     }
     buf.push(0);
+    Ok(())
 }
 
-fn send_field(buf: &mut Vec<u8>, code: ::types_error::ErrorField, value: &str) {
+fn send_field(buf: &mut Vec<u8>, code: ::types_error::ErrorField, value: &str) -> PgResult<()> {
     buf.push(code.0 as u8);
-    err_sendstring(buf, value);
+    err_sendstring(buf, value)
 }
 
-fn send_field_bytes(buf: &mut Vec<u8>, code: ::types_error::ErrorField, value: &[u8]) {
+fn send_field_bytes(
+    buf: &mut Vec<u8>,
+    code: ::types_error::ErrorField,
+    value: &[u8],
+) -> PgResult<()> {
     buf.push(code.0 as u8);
-    err_sendbytes(buf, value);
+    err_sendbytes(buf, value)
 }
 
 #[cold]
 #[inline(never)]
-pub fn send_message_to_frontend(edata: &PgError) {
+pub fn send_message_to_frontend(edata: &PgError) -> PgResult<()> {
     if crate::sink::call_frontend_redirect(edata) {
-        return;
+        return Ok(());
     }
     use ::types_error::{
         PG_DIAG_COLUMN_NAME, PG_DIAG_CONSTRAINT_NAME, PG_DIAG_CONTEXT, PG_DIAG_DATATYPE_NAME,
@@ -826,69 +833,69 @@ pub fn send_message_to_frontend(edata: &PgError) {
         let mut body: Vec<u8> = Vec::new();
         let sev = error_severity(edata.level);
 
-        send_field(&mut body, PG_DIAG_SEVERITY, sev);
-        send_field(&mut body, PG_DIAG_SEVERITY_NONLOCALIZED, sev);
+        send_field(&mut body, PG_DIAG_SEVERITY, sev)?;
+        send_field(&mut body, PG_DIAG_SEVERITY_NONLOCALIZED, sev)?;
         send_field(
             &mut body,
             PG_DIAG_SQLSTATE,
             &unpack_sql_state(edata.sqlstate),
-        );
+        )?;
 
         if let Some(raw) = &edata.message_raw {
             // C messages are byte strings; this carries C's exact bytes when
             // they are not valid UTF-8 (e.g. elog %c of a high "char" byte).
-            send_field_bytes(&mut body, PG_DIAG_MESSAGE_PRIMARY, raw);
+            send_field_bytes(&mut body, PG_DIAG_MESSAGE_PRIMARY, raw)?;
         } else if !edata.message.is_empty() {
-            send_field(&mut body, PG_DIAG_MESSAGE_PRIMARY, &edata.message);
+            send_field(&mut body, PG_DIAG_MESSAGE_PRIMARY, &edata.message)?;
         } else {
-            send_field(&mut body, PG_DIAG_MESSAGE_PRIMARY, "missing error text");
+            send_field(&mut body, PG_DIAG_MESSAGE_PRIMARY, "missing error text")?;
         }
 
         if let Some(detail) = &edata.detail {
-            send_field(&mut body, PG_DIAG_MESSAGE_DETAIL, detail);
+            send_field(&mut body, PG_DIAG_MESSAGE_DETAIL, detail)?;
         }
         // detail_log is intentionally not used here
         if let Some(hint) = &edata.hint {
-            send_field(&mut body, PG_DIAG_MESSAGE_HINT, hint);
+            send_field(&mut body, PG_DIAG_MESSAGE_HINT, hint)?;
         }
         if let Some(context) = &edata.context {
-            send_field(&mut body, PG_DIAG_CONTEXT, context);
+            send_field(&mut body, PG_DIAG_CONTEXT, context)?;
         }
         if let Some(schema_name) = &edata.schema_name {
-            send_field(&mut body, PG_DIAG_SCHEMA_NAME, schema_name);
+            send_field(&mut body, PG_DIAG_SCHEMA_NAME, schema_name)?;
         }
         if let Some(table_name) = &edata.table_name {
-            send_field(&mut body, PG_DIAG_TABLE_NAME, table_name);
+            send_field(&mut body, PG_DIAG_TABLE_NAME, table_name)?;
         }
         if let Some(column_name) = &edata.column_name {
-            send_field(&mut body, PG_DIAG_COLUMN_NAME, column_name);
+            send_field(&mut body, PG_DIAG_COLUMN_NAME, column_name)?;
         }
         if let Some(datatype_name) = &edata.datatype_name {
-            send_field(&mut body, PG_DIAG_DATATYPE_NAME, datatype_name);
+            send_field(&mut body, PG_DIAG_DATATYPE_NAME, datatype_name)?;
         }
         if let Some(constraint_name) = &edata.constraint_name {
-            send_field(&mut body, PG_DIAG_CONSTRAINT_NAME, constraint_name);
+            send_field(&mut body, PG_DIAG_CONSTRAINT_NAME, constraint_name)?;
         }
         if edata.cursor_position.unwrap_or(0) > 0 {
             send_field(
                 &mut body,
                 PG_DIAG_STATEMENT_POSITION,
                 &edata.cursor_position.unwrap().to_string(),
-            );
+            )?;
         }
         if edata.internal_position.unwrap_or(0) > 0 {
             send_field(
                 &mut body,
                 PG_DIAG_INTERNAL_POSITION,
                 &edata.internal_position.unwrap().to_string(),
-            );
+            )?;
         }
         if let Some(internal_query) = &edata.internal_query {
-            send_field(&mut body, PG_DIAG_INTERNAL_QUERY, internal_query);
+            send_field(&mut body, PG_DIAG_INTERNAL_QUERY, internal_query)?;
         }
         let location = edata.location.as_ref();
         if let Some(filename) = location.and_then(|l| l.filename.as_deref()) {
-            send_field(&mut body, PG_DIAG_SOURCE_FILE, filename);
+            send_field(&mut body, PG_DIAG_SOURCE_FILE, filename)?;
         }
         // C's ereport/elog macros always pass __LINE__, so every server
         // message carries PG_DIAG_SOURCE_LINE and clients treat it as
@@ -900,10 +907,10 @@ pub fn send_message_to_frontend(edata: &PgError) {
         // yet. A 0 there means exactly that — unknown, and greppable — rather
         // than a fabricated plausible-looking line number.
         if let Some(l) = location {
-            send_field(&mut body, PG_DIAG_SOURCE_LINE, &l.lineno.to_string());
+            send_field(&mut body, PG_DIAG_SOURCE_LINE, &l.lineno.to_string())?;
         }
         if let Some(funcname) = location.and_then(|l| l.funcname.as_deref()) {
-            send_field(&mut body, PG_DIAG_SOURCE_FUNCTION, funcname);
+            send_field(&mut body, PG_DIAG_SOURCE_FUNCTION, funcname)?;
         }
 
         body.push(0); // terminator
@@ -926,6 +933,7 @@ pub fn send_message_to_frontend(edata: &PgError) {
     }
 
     let _ = pqcomm_seams::pq_flush::call();
+    Ok(())
 }
 
 pub fn write_stderr(message: &str) {

@@ -64,6 +64,13 @@ pub fn is_c_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
+// sscanf %x into an int: strtoul saturates at ULONG_MAX, negates in the
+// unsigned domain, and the store truncates to int.
+fn strtoul_to_int(value: u64, negative: bool) -> i64 {
+    let v = if negative { value.wrapping_neg() } else { value };
+    (v as u32 as i32) as i64
+}
+
 #[inline]
 fn hex_value(byte: u8) -> u8 {
     match byte {
@@ -128,34 +135,33 @@ impl<'a> Scanner<'a> {
                     self.pos -= 1;
                     return Some(0);
                 }
-                let mut value: i64 = 0;
+                let mut value: u64 = 0;
                 while consumed < max {
                     match self.peek() {
                         Some(byte) if byte.is_ascii_hexdigit() => {
-                            value = value.wrapping_mul(16).wrapping_add(hex_value(byte) as i64);
+                            value = value
+                                .saturating_mul(16)
+                                .saturating_add(hex_value(byte) as u64);
                             self.pos += 1;
                             consumed += 1;
                         }
                         _ => break,
                     }
                 }
-                // C parity: sscanf's %x accumulates with unsigned wraparound and the
-                // sign apply is two's-complement wrap; plain `-value` panics on an
-                // accumulator of exactly i64::MIN under overflow-checked builds
-                // (found by mac_diff fuzzing 2026-07-30). Release wrapped already —
-                // wrapping_neg makes the C-parity semantics explicit in all profiles.
-                return Some(if negative { value.wrapping_neg() } else { value });
+                return Some(strtoul_to_int(value, negative));
             }
             self.pos = save_pos;
             consumed = save_consumed;
         }
 
-        let mut value: i64 = 0;
+        let mut value: u64 = 0;
         let mut any = false;
         while consumed < max {
             match self.peek() {
                 Some(byte) if byte.is_ascii_hexdigit() => {
-                    value = value.wrapping_mul(16).wrapping_add(hex_value(byte) as i64);
+                    value = value
+                        .saturating_mul(16)
+                        .saturating_add(hex_value(byte) as u64);
                     self.pos += 1;
                     consumed += 1;
                     any = true;
@@ -166,8 +172,7 @@ impl<'a> Scanner<'a> {
         if !any {
             return None;
         }
-        // Same wrapping_neg rationale as the wide-scan arm above (C sscanf parity).
-        Some(if negative { value.wrapping_neg() } else { value })
+        Some(strtoul_to_int(value, negative))
     }
 
     fn scan_literal(&mut self, expected: u8) -> bool {

@@ -1647,6 +1647,8 @@ fn coerce_function_result_tuple(
             } else {
                 td.tdtypmod = -1;
             }
+            let mut values = values;
+            crate::exec::detoast_external_fields(out_mcx, &td, &mut values, &nulls)?;
             let tup = heaptuple::heap_form_tuple(out_mcx, &td, &values, &nulls)?;
             let img = tup.header_ptr();
             core::mem::forget(tup);
@@ -1662,7 +1664,9 @@ fn coerce_function_result_tuple(
             if td.tdtypmod < 0 {
                 typcache::assign_record_type_typmod(&mut td)?;
             }
-            let tup = heaptuple::heap_form_tuple(out_mcx, &td, &rv.values, &rv.nulls)?;
+            let mut values = rv.values.clone();
+            crate::exec::detoast_external_fields(out_mcx, &td, &mut values, &rv.nulls)?;
+            let tup = heaptuple::heap_form_tuple(out_mcx, &td, &values, &rv.nulls)?;
             let img = tup.header_ptr();
             core::mem::forget(tup);
             Ok(Datum::from_usize(img as usize))
@@ -2034,6 +2038,8 @@ fn plpgsql_exec_trigger(
     };
 
     let out_mcx = fcinfo.result_mcx();
+    let mut values = values;
+    crate::exec::detoast_external_fields(out_mcx, &tupdesc, &mut values, &nulls)?;
     let tup = heaptuple::heap_form_tuple(out_mcx, &tupdesc, &values, &nulls)?;
     let (img, t_len) = (tup.header_ptr(), tup.t_len);
     core::mem::forget(tup);

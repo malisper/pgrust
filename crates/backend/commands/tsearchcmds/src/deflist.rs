@@ -58,7 +58,7 @@ pub fn def_item_from_defelem<'mcx>(
         } else if let Some(s) = arg.as_string() {
             DefValue::Str(s.sval)
         } else if let Some(t) = arg.as_type_name() {
-            DefValue::Str(join_names(mcx, &t.names)?)
+            DefValue::Str(alloc_str(mcx, &commands_define::TypeNameToString(mcx, t)?)?)
         } else if let Some(l) = arg.as_list() {
             DefValue::Str(join_names(mcx, l)?)
         } else {

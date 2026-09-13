@@ -348,6 +348,12 @@ fn compute_function_attributes<'mcx>(
         *slot = Some(defel);
     }
 
+    let proconfig = if set_items.is_empty() {
+        None
+    } else {
+        update_proconfig_value(None, &set_items)?
+    };
+
     let procost = match cost_item {
         Some(d) => {
             let v = defel_numeric(d)?;
@@ -373,12 +379,6 @@ fn compute_function_attributes<'mcx>(
             v
         }
         None => -1.0,
-    };
-
-    let proconfig = if set_items.is_empty() {
-        None
-    } else {
-        update_proconfig_value(None, &set_items)?
     };
 
     Ok(FunctionAttrs {

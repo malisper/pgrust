@@ -755,6 +755,41 @@ define_calls! {
     function_call9_coll direct_function_call9_coll function_call9_coll_in direct_function_call9_coll_in 9 (arg1 0, arg2 1, arg3 2, arg4 3, arg5 4, arg6 5, arg7 6, arg8 7, arg9 8);
 }
 
+// FunctionCallInvoke on a LOCAL_FCINFO frame (rowtypes.c record_cmp / record_eq /
+// hash_record, arrayfuncs.c array_eq / array_cmp / hash_array): a NULL result
+// is not an error; C reads the returned Datum, which is 0.
+#[inline]
+pub fn function_call1_coll_in_nullok(
+    flinfo: &mut FmgrInfo,
+    collation: Oid,
+    mcx: Mcx<'_>,
+    arg1: Datum,
+) -> PgResult<Datum> {
+    let mut fcinfo = LocalFcinfo::<1>::fresh(collation);
+    // SAFETY: `mcx` outlives this stack frame's single call.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    fcinfo.set_arg(0, arg1);
+    let result = flinfo.invoke(&mut fcinfo)?;
+    Ok(if fcinfo.isnull { Datum::from_usize(0) } else { result })
+}
+
+#[inline]
+pub fn function_call2_coll_in_nullok(
+    flinfo: &mut FmgrInfo,
+    collation: Oid,
+    mcx: Mcx<'_>,
+    arg1: Datum,
+    arg2: Datum,
+) -> PgResult<Datum> {
+    let mut fcinfo = LocalFcinfo::<2>::fresh(collation);
+    // SAFETY: `mcx` outlives this stack frame's single call.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    fcinfo.set_arg(0, arg1);
+    fcinfo.set_arg(1, arg2);
+    let result = flinfo.invoke(&mut fcinfo)?;
+    Ok(if fcinfo.isnull { Datum::from_usize(0) } else { result })
+}
+
 // `func` referees the registration: `thin` is handed out only for a carrier
 // whose fn_addr is exactly `func`; any diverging resolution falls back.
 #[derive(Clone, Copy)]

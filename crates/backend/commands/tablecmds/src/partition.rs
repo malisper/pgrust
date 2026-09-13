@@ -27,15 +27,6 @@ pub(crate) fn compute_partition_key<'mcx>(
     query_string: &str,
 ) -> PgResult<PartKeyInfo<'mcx>> {
     let strategy = partspec.strategy;
-    if strategy == PartitionStrategy::List && partspec.partParams.len() != 1 {
-        return Err(Box::new(
-            PgError::new(
-                ERROR,
-                "cannot use \"list\" partition strategy with more than one column".to_string(),
-            )
-            .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
-        ));
-    }
     if partspec.partParams.len() > partcache::PARTITION_MAX_KEYS {
         return Err(Box::new(
             PgError::new(
@@ -46,6 +37,15 @@ pub(crate) fn compute_partition_key<'mcx>(
                 ),
             )
             .with_sqlstate(types_error::ERRCODE_TOO_MANY_COLUMNS),
+        ));
+    }
+    if strategy == PartitionStrategy::List && partspec.partParams.len() != 1 {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot use \"list\" partition strategy with more than one column".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
         ));
     }
 
@@ -69,6 +69,25 @@ pub(crate) fn compute_partition_key<'mcx>(
         true,
     )?;
     parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, true, true, true)?;
+
+    let mut transformed_exprs: mcx::PgVec<'_, Option<Node<'mcx>>> =
+        mcx::vec_with_capacity_in(mcx, n)?;
+    for pnode in partspec.partParams.iter() {
+        let pelem = pnode.as_variant::<PartitionElem>().expect("PartitionElem");
+        transformed_exprs.push(match (pelem.name, pelem.expr) {
+            (None, Some(raw)) => {
+                let transformed = parse_expr::transformExpr(
+                    mcx,
+                    &mut pstate,
+                    raw,
+                    parser_small1::ParseExprKind::EXPR_KIND_PARTITION_EXPRESSION,
+                )?;
+                parse_collate::assign_expr_collations(mcx, &mut pstate, transformed)?;
+                Some(transformed)
+            }
+            _ => None,
+        });
+    }
 
     for (attn, pnode) in partspec.partParams.iter().enumerate() {
         let pelem = pnode.as_variant::<PartitionElem>().expect("PartitionElem");
@@ -133,15 +152,8 @@ pub(crate) fn compute_partition_key<'mcx>(
             }
             info.partattrs.push(attnum);
         } else {
-            // transformPartitionSpec's transformExpr pass, fused here.
-            let raw = pelem.expr.expect("PartitionElem without name or expr");
-            let transformed = parse_expr::transformExpr(
-                mcx,
-                &mut pstate,
-                raw,
-                parser_small1::ParseExprKind::EXPR_KIND_PARTITION_EXPRESSION,
-            )?;
-            parse_collate::assign_expr_collations(mcx, &mut pstate, transformed)?;
+            let transformed =
+                transformed_exprs[attn].expect("PartitionElem without name or expr");
             atttype = nodes_core::expr_type(transformed);
             attcollation = nodes_core::expr_collation(transformed);
             let mut rowtypes: mcx::PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, 1)?;

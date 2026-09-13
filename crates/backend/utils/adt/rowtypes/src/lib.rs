@@ -15,7 +15,8 @@ use ::pg_string::isspace_c_locale;
 use ::types_core::{InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::types_fmgr::{
-    cstring_result, function_call1_coll_in, function_call2_coll_in, FmgrBuiltin, FmgrInfo,
+    cstring_result, function_call1_coll_in, function_call1_coll_in_nullok,
+    function_call2_coll_in_nullok, FmgrBuiltin, FmgrInfo,
     FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 use ::types_tuple::{
@@ -310,10 +311,12 @@ fn hash_record_common(
                 // C hash_record: the column hash proc detoasts its by-ref arg
                 // via DirectFunctionCall, pallocing in the caller's context.
                 Some(s) => {
-                    function_call2_coll_in(proc, att.attcollation, mcx, values[i], s)?.as_u64()
+                    function_call2_coll_in_nullok(proc, att.attcollation, mcx, values[i], s)?
+                        .as_u64()
                 }
                 None => {
-                    function_call1_coll_in(proc, att.attcollation, mcx, values[i])?.as_u32() as u64
+                    function_call1_coll_in_nullok(proc, att.attcollation, mcx, values[i])?
+                        .as_u32() as u64
                 }
             }
         };
@@ -746,7 +749,7 @@ impl RecordColumnCmp for FmgrRecordOps<'_, '_> {
         let e =
             self.flinfo.fn_extra_ref::<RecordCompareData>().unwrap().columns[j].clone().unwrap();
         let mut finfo = e.cmp_proc_finfo();
-        let d = ::types_fmgr::function_call2_coll_in(&mut finfo, collation, self.mcx, d1, d2)?;
+        let d = function_call2_coll_in_nullok(&mut finfo, collation, self.mcx, d1, d2)?;
         Ok(d.as_i32())
     }
 }
@@ -774,7 +777,7 @@ impl RecordColumnEq for FmgrRecordOps<'_, '_> {
         let e =
             self.flinfo.fn_extra_ref::<RecordCompareData>().unwrap().columns[j].clone().unwrap();
         let mut finfo = e.eq_opr_finfo();
-        let d = ::types_fmgr::function_call2_coll_in(&mut finfo, collation, self.mcx, d1, d2)?;
+        let d = function_call2_coll_in_nullok(&mut finfo, collation, self.mcx, d1, d2)?;
         Ok(d.as_bool())
     }
 }

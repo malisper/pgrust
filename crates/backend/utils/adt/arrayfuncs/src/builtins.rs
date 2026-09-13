@@ -776,7 +776,7 @@ fn array_eq_internal(
         if nulls1[i] || nulls2[i] {
             return Ok(false);
         }
-        let r = ::types_fmgr::function_call2_coll_in(
+        let r = ::types_fmgr::function_call2_coll_in_nullok(
             &mut st.finfo,
             collation,
             mcx,
@@ -826,7 +826,7 @@ fn array_cmp_internal(
         if nulls2[i] {
             return Ok(-1);
         }
-        let c = ::types_fmgr::function_call2_coll_in(
+        let c = ::types_fmgr::function_call2_coll_in_nullok(
             &mut st.finfo,
             collation,
             mcx,

@@ -1452,9 +1452,9 @@ pub fn get_object_address<'mcx>(
                     .and_then(|n| n.as_type_name())
                     .expect("cast target TypeName");
                 let sourcetypeid =
-                    parse_utilcmd::LookupTypeNameOidExtended(mcx, source, missing_ok)?;
+                    parse_utilcmd::LookupTypeNameOidExtendedAllowShell(mcx, source, missing_ok)?;
                 let targettypeid =
-                    parse_utilcmd::LookupTypeNameOidExtended(mcx, target, missing_ok)?;
+                    parse_utilcmd::LookupTypeNameOidExtendedAllowShell(mcx, target, missing_ok)?;
                 let oid = lsyscache::get_cast_oid(sourcetypeid, targettypeid, missing_ok)?;
                 (ObjectAddress::set(CastRelationId, oid), None)
             }

@@ -446,6 +446,7 @@ pub fn getObjectIdentityParts<'mcx>(
                 return identity_vanished(object, missing_ok);
             };
             let schema = namespace_name_or_temp(mcx, row.namespace)?;
+            let nspname = crate::description::get_namespace_name(row.namespace)?;
             let mut args = String::new();
             let mut objargs = Vec::with_capacity(row.argtypes.len());
             for (i, &t) in row.argtypes.iter().enumerate() {
@@ -456,7 +457,8 @@ pub fn getObjectIdentityParts<'mcx>(
                 args.push_str(&tn);
                 objargs.push(tn);
             }
-            let identity = format!("{}({})", quote_qualified(schema.as_deref(), &row.name), args);
+            let identity =
+                format!("{}({})", quote_qualified(nspname.as_deref(), &row.name), args);
             Ok(Some(ObjectIdentity {
                 identity,
                 objname: qualified_objname(schema, row.name),
@@ -533,7 +535,7 @@ pub fn getObjectIdentityParts<'mcx>(
             };
             let schema = namespace_name_or_temp(mcx, op.namespace)?;
             // format_operator_extended (regproc.c): "%s." only with a namespace.
-            let mut identity = match &schema {
+            let mut identity = match &crate::description::get_namespace_name(op.namespace)? {
                 Some(schema) => format!("{}.{}(", quote_identifier(schema), op.name),
                 None => format!("{}(", op.name),
             };

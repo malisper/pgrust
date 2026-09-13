@@ -570,10 +570,12 @@ pub fn range<'mcx>(mcx: Mcx<'mcx>, a: chr, b: chr, cases: i32) -> RegResult<Cvec
         nchrs_i as i32
     };
 
-    let mut cv = getcvec(mcx, None, nchrs, 1)?;
+    // C's transient cvec (regcomp.c:449 newcvec(100, 20)) never has fewer
+    // than 100 chr slots, so getcvec hands range() at least that many.
+    let chrspace = nchrs.max(100) as usize;
+    let mut cv = getcvec(mcx, None, chrspace as i32, 1)?;
     addrange(&mut cv, a, b);
 
-    let chrspace = nchrs as usize;
     let mut c = a;
     loop {
         let cc = pg_wc_tolower(c);

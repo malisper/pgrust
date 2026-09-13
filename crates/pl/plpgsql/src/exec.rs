@@ -209,6 +209,32 @@ fn compatible_tupdescs(src: &types_tuple::TupleDescData<'_>, dst: &types_tuple::
     })
 }
 
+// ER_get_flat_size / ER_flatten_into (expandedrecord.c:698-725): a record
+// flattened into a composite datum carries no external toast pointers.
+pub(crate) fn detoast_external_fields(
+    mcx: Mcx<'_>,
+    td: &types_tuple::TupleDescData<'_>,
+    values: &mut [Datum],
+    nulls: &[bool],
+) -> PgResult<()> {
+    for i in 0..(td.natts as usize).min(values.len()) {
+        let att = td.attr(i);
+        if nulls[i] || att.attbyval || att.attlen != -1 {
+            continue;
+        }
+        let p = values[i].as_usize() as *const u8;
+        // SAFETY: non-null by-ref varlena datum.
+        unsafe {
+            if types_tuple::varatt::varatt_is_1b_e(p) {
+                let attr = core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p));
+                let out = detoast::detoast_external_attr(mcx, attr)?;
+                values[i] = Datum::from_usize(out.leak().as_ptr() as usize);
+            }
+        }
+    }
+    Ok(())
+}
+
 // A deconstructed expanded record (values always deconstructed; src_desc
 // keeps the physical tupdesc so the record can re-materialize as a
 // composite Datum, dropped columns included).
@@ -814,10 +840,7 @@ fn spi_ctx_err(
     if e.context.as_deref().and_then(|c| c.lines().last()) == Some(line.as_str()) {
         return e;
     }
-    match e.context.take() {
-        Some(prev) => e.context = Some(format!("{prev}\n{line}")),
-        None => e.context = Some(line),
-    }
+    e.add_context_line(line);
     e
 }
 
@@ -1411,10 +1434,11 @@ impl<'a> Estate<'a> {
             .src_desc
             .clone()
             .expect("RecValue carries its source tupdesc");
-        let values = rv.values.clone();
+        let mut values = rv.values.clone();
         let nulls = rv.nulls.clone();
         let origin = RecOrigin { recno, sys: rv.sys.clone(), fvalue_valid: rv.fvalue_valid };
         let mcx = self.eval_ctx.mcx();
+        detoast_external_fields(mcx, &src, &mut values, &nulls)?;
         let mut td = tupdesc::CreateTupleDescCopy(mcx, &src)?;
         if rectypeid != RECORDOID {
             // C: the expanded record's tupdesc carries er_typeid = the BASE
@@ -5789,10 +5813,7 @@ fn attach_frame_line(
     estate: &Estate<'_>,
 ) -> Box<types_error::PgError> {
     let line = frame_context_line(estate);
-    match e.context.take() {
-        Some(prev) => e.context = Some(format!("{prev}\n{line}")),
-        None => e.context = Some(line),
-    }
+    e.add_context_line(line);
     e
 }
 

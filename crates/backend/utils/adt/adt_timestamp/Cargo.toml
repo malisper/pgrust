@@ -33,6 +33,7 @@ funcapi = { path = "../../fmgr/funcapi" }
 heaptuple = { path = "../../../access/common/heaptuple" }
 types_nodes = { path = "../../../../_support/types/nodes" }
 nodes_core = { path = "../../../nodes/nodes_core" }
+mbutils = { path = "../../mb/mbutils" }
 libc = "0.2"
 
 [dev-dependencies]

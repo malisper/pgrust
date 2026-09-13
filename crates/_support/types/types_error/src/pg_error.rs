@@ -330,9 +330,13 @@ impl PgError {
         self
     }
 
-    /// Appends to any existing context, newline-separated (C `errcontext()`).
+    /// Appends to any existing context, newline-separated (C `errcontext()`);
+    /// a hidden-context error (errhidecontext, or elog's depth>2 recursion
+    /// that abandons error_context_stack) takes none.
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
-        self.context = append_context(self.context.take(), context.into());
+        if !self.hide_context {
+            self.context = append_context(self.context.take(), context.into());
+        }
         self
     }
 
@@ -344,7 +348,9 @@ impl PgError {
     }
 
     pub fn add_context_line(&mut self, line: impl Into<String>) {
-        self.context = append_context(self.context.take(), line.into());
+        if !self.hide_context {
+            self.context = append_context(self.context.take(), line.into());
+        }
     }
 
     pub fn with_backtrace(mut self, backtrace: impl Into<String>) -> Self {

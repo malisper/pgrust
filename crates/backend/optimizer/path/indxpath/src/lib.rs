@@ -1414,11 +1414,17 @@ fn get_index_clause_from_support<'mcx>(
         }
         // network_subset_support (network.c): SupportRequestIndexCondition.
         1173 => {
-            let op = clause.as_op_expr().expect("support request over an OpExpr");
+            let args = if let Some(op) = clause.as_op_expr() {
+                &op.args
+            } else if let Some(f) = clause.as_func_expr() {
+                &f.args
+            } else {
+                return Ok(None);
+            };
             match_network_function(
                 run,
-                op.args.nth(0),
-                op.args.nth(1),
+                args.nth(0),
+                args.nth(1),
                 indexarg,
                 funcid,
                 index.opfamily[indexcol],

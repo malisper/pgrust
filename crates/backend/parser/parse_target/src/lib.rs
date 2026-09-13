@@ -91,10 +91,9 @@ pub fn transformTargetEntry<'mcx>(
     let colname = match colname {
         // C's transformSubLink scribbles the transformed Query into the raw
         // SubLink in place; the transformed expr carries that state here.
-        None if !resjunk => Some(FigureColname(if node.node_tag() == NodeTag::T_SubLink {
-            expr
-        } else {
-            node
+        None if !resjunk => Some(FigureColname(match transformed_sublink(node, expr)? {
+            Some(sl) => sl,
+            None => node,
         })),
         other => other,
     };
@@ -1196,6 +1195,42 @@ fn star_with_no_tables(
             .into_error()
             .with_error_location(ErrorLocation::new(file!(), line!() as i32, "ExpandAllTables")),
     )
+}
+
+// C's transformSubLink scribbles the transformed Query into the raw SubLink,
+// so FigureColname reads the sub-select's real target names through any
+// TypeCast / CollateClause wrapper (both defer to an EXPR_SUBLINK's strength-2
+// name). Our transform builds fresh nodes: find that SubLink in the transformed
+// expression instead.
+fn transformed_sublink<'mcx>(raw: Node<'mcx>, expr: Node<'mcx>) -> PgResult<Option<Node<'mcx>>> {
+    let mut raw = raw;
+    loop {
+        raw = match raw.node_tag() {
+            NodeTag::T_SubLink => break,
+            NodeTag::T_TypeCast => match raw.as_type_cast().unwrap().arg {
+                Some(arg) => arg,
+                None => return Ok(None),
+            },
+            NodeTag::T_CollateClause => match raw.as_collate_clause().unwrap().arg {
+                Some(arg) => arg,
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+    }
+    struct FirstSubLink<'mcx>(Option<Node<'mcx>>);
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for FirstSubLink<'mcx> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == NodeTag::T_SubLink {
+                self.0 = Some(node);
+                return Ok(true);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let mut w = FirstSubLink(None);
+    nodes_core::NodeWalker::visit(&mut w, expr)?;
+    Ok(w.0)
 }
 
 pub fn FigureColname<'mcx>(node: Node<'mcx>) -> &'mcx str {

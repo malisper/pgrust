@@ -347,9 +347,13 @@ pub(crate) fn hash_array_core(
     let (ndims, dims, _lbs) = read_dims_lbounds(array);
     let nitems = ::arrayutils::array_get_n_items(ndims, &dims)?;
     let mut iter = FlatIter::new(array);
-    let mut lfc = LocalFcinfo::<2>::fresh(collation);
+    let mut lfc1 = LocalFcinfo::<1>::fresh(collation);
+    let mut lfc2 = LocalFcinfo::<2>::fresh(collation);
     // SAFETY: mcx outlives every invoke through this stack frame.
-    unsafe { lfc.set_result_mcx(mcx) };
+    unsafe {
+        lfc1.set_result_mcx(mcx);
+        lfc2.set_result_mcx(mcx);
+    }
 
     let mut result: u64 = 1;
     let mask: u64 = if seed.is_some() { u64::MAX } else { u32::MAX as u64 };
@@ -357,13 +361,17 @@ pub(crate) fn hash_array_core(
         let (elt, isnull) = iter.next(meta.typlen, meta.typbyval, meta.typalign);
         let elthash = if isnull {
             0
+        } else if let Some(s) = seed {
+            lfc2.rearm(collation);
+            lfc2.set_arg(0, elt);
+            lfc2.set_arg(1, s);
+            let h = hashfn.invoke(&mut lfc2)?;
+            if lfc2.isnull { 0 } else { h.as_u64() & mask }
         } else {
-            lfc.rearm(collation);
-            lfc.set_arg(0, elt);
-            if let Some(s) = seed {
-                lfc.set_arg(1, s);
-            }
-            hashfn.invoke(&mut lfc)?.as_u64() & mask
+            lfc1.rearm(collation);
+            lfc1.set_arg(0, elt);
+            let h = hashfn.invoke(&mut lfc1)?;
+            if lfc1.isnull { 0 } else { h.as_u64() & mask }
         };
         result = ((result << 5).wrapping_sub(result).wrapping_add(elthash)) & mask;
     }

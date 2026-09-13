@@ -782,7 +782,7 @@ fn formatted_timestamps_cache_and_reset() {
 #[test]
 fn frontend_message_requires_seam_owner() {
     let result = std::panic::catch_unwind(|| {
-        send_message_to_frontend(&PgError::error("boom"));
+        let _ = send_message_to_frontend(&PgError::error("boom"));
     });
     assert!(result.is_err());
 }
@@ -795,7 +795,7 @@ fn frontend_message_requires_seam_owner() {
 #[test]
 fn err_sendstring_truncates_at_embedded_nul() {
     let mut buf = Vec::new();
-    report::err_sendstring(&mut buf, "unrecognized weight: \0tail");
+    report::err_sendstring(&mut buf, "unrecognized weight: \0tail").unwrap();
     assert_eq!(buf, b"unrecognized weight: \0");
 }
 
@@ -805,7 +805,7 @@ fn err_sendstring_truncates_at_embedded_nul() {
 #[test]
 fn err_sendbytes_passes_raw_high_bytes() {
     let mut buf = Vec::new();
-    report::err_sendbytes(&mut buf, b"unrecognized weight: \xE5");
+    report::err_sendbytes(&mut buf, b"unrecognized weight: \xE5").unwrap();
     assert_eq!(buf, b"unrecognized weight: \xE5\0");
 
     let e = ::types_error::PgError::error_raw_message(b"unrecognized weight: \xE5".to_vec());
