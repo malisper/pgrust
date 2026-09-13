@@ -115,14 +115,14 @@ fn process_postgres_switches_inner(
             break;
         }
 
-        let mut chars = &tok[1..];
+        let mut chars: &[u8] = &tok.as_bytes()[1..];
         while !chars.is_empty() {
-            let flag = chars.as_bytes()[0];
+            let flag = chars[0];
             chars = &chars[1..];
             let optarg: &str;
             if ARG_TAKING_FLAGS.contains(&flag) {
                 if !chars.is_empty() {
-                    optarg = chars;
+                    optarg = core::str::from_utf8(chars).expect("rest after an ASCII flag");
                 } else if i < argv.len() && flag != b'-' {
                     optarg = argv[i].as_str();
                     i += 1;
@@ -131,7 +131,7 @@ fn process_postgres_switches_inner(
                     bad = Some(tok);
                     continue 'outer;
                 }
-                chars = "";
+                chars = &[];
             } else {
                 optarg = "";
             }
@@ -283,6 +283,13 @@ mod tests {
     fn unknown_switch_is_fatal() {
         setup();
         let _ = process_postgres_switches(&av(&["-Z"]), GucContext::PGC_BACKEND as u8);
+    }
+
+    #[test]
+    #[should_panic(expected = "proc_exit(1)")]
+    fn multibyte_switch_is_fatal_not_a_panic() {
+        setup();
+        let _ = process_postgres_switches(&av(&["-é"]), GucContext::PGC_BACKEND as u8);
     }
 
     #[test]

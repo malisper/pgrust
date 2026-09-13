@@ -1373,7 +1373,9 @@ fn invoke_hash_support(
     call.set_arg(0, val);
     call.set_arg(1, seed);
     let hash = supfunc.invoke(&mut call)?;
-    assert!(!call.isnull, "partition hash support function returned NULL");
+    if call.isnull {
+        return Err(crate::function_returned_null(supfunc.fn_oid));
+    }
     Ok(hash.as_u64())
 }
 

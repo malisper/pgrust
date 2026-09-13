@@ -258,11 +258,13 @@ fn preprocessNamespacePath(searchPath: &str, roleid: Oid) -> PgResult<(Vec<Oid>,
     Ok((oidlist, temp_missing))
 }
 
-fn finalNamespacePath(oidlist: &[Oid]) -> (Vec<Oid>, Oid) {
+fn finalNamespacePath(oidlist: &[Oid]) -> PgResult<(Vec<Oid>, Oid)> {
     let mut finalPath: Vec<Oid> = Vec::with_capacity(oidlist.len() + 2);
 
     for &namespaceId in oidlist {
-        if !finalPath.contains(&namespaceId) {
+        if !finalPath.contains(&namespaceId)
+            && objectaccess::InvokeNamespaceSearchHook(namespaceId, false)?
+        {
             finalPath.push(namespaceId);
         }
     }
@@ -277,7 +279,7 @@ fn finalNamespacePath(oidlist: &[Oid]) -> (Vec<Oid>, Oid) {
         finalPath.insert(0, mtn);
     }
 
-    (finalPath, firstNS)
+    Ok((finalPath, firstNS))
 }
 
 fn cachedNamespacePath<R>(
@@ -302,16 +304,28 @@ fn cachedNamespacePath<R>(
         })?;
     }
 
-    with_spcache_mcx(|m, c| {
-        if c.entries[idx].final_path.len == 0 || c.entries[idx].force_recompute {
-            // Transient owned list: the pool cannot be read and grown at once.
-            let (final_path, first_ns) = finalNamespacePath(c.oid_span(c.entries[idx].oidlist));
+    // If a hook is set, finalPath is recomputed from the oidlist each time
+    // (the hook may affect the result), and once more on the next use even if
+    // the hook is gone by then.
+    let hook_set = objectaccess::object_access_hook().is_some();
+    let need_final = with_spcache(|c| {
+        c.entries[idx].final_path.len == 0 || hook_set || c.entries[idx].force_recompute
+    });
+    if need_final {
+        // Computed outside the spcache borrow: the hook may reenter.
+        let oidlist: Vec<Oid> = with_spcache(|c| c.oid_span(c.entries[idx].oidlist).to_vec());
+        let (final_path, first_ns) = finalNamespacePath(&oidlist)?;
+        with_spcache_mcx(|m, c| {
             let span = append_oids(m, &mut c.oids, &final_path)?;
             let e = &mut c.entries[idx];
             e.final_path = span;
             e.first_ns = first_ns;
-            e.force_recompute = false;
-        }
+            e.force_recompute = hook_set;
+            Ok(())
+        })?;
+    }
+
+    with_spcache_mcx(|_m, c| {
         let e = c.entries[idx];
         consume(&e, c.oid_span(e.final_path))
     })

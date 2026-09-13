@@ -482,3 +482,12 @@ fn huge_pages_on_is_refused_like_c() {
     assert_eq!(huge_pages_startup_gate(HUGE_PAGES_ON, SHMEM_TYPE_MMAP, true), Err(PLATFORM));
     assert_eq!(MAP_HUGETLB_AVAILABLE, cfg!(any(target_os = "linux", target_os = "android")));
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn undersized_foreign_segment_advances_the_walk() {
+    assert_eq!(super::probe_failure_state(libc::EINVAL), Some(super::IpcMemoryState::Foreign));
+    assert_eq!(super::probe_failure_state(libc::EACCES), Some(super::IpcMemoryState::Foreign));
+    assert_eq!(super::probe_failure_state(libc::ENOENT), None);
+    assert_eq!(super::probe_failure_state(libc::ENOSYS), None);
+}

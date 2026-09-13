@@ -20,12 +20,10 @@ const LINELEN: usize = 78;
 const INDENTSTOP: i32 = 3;
 const MAXINDENT: i32 = 60;
 
-fn line_str(line: &[u8]) -> &str {
-    core::str::from_utf8(line).expect("node dump is ASCII")
-}
-
+// C emits the raw bytes; a wrap inside a multibyte character leaves a
+// partial sequence on each side, rendered lossily here.
 fn emit(out: &mut PgString<'_>, line: &[u8]) {
-    push(out, line_str(line));
+    push(out, &String::from_utf8_lossy(line));
     push(out, "\n");
 }
 

@@ -684,28 +684,28 @@ pub fn ProcedureCreateWithTransforms<'mcx>(
         if !old_argnames_null {
             let (d, _) = getattr(Anum_pg_proc_proargnames);
             // pg_detoast_datum: catalog arrays are inline, but may carry a
-            // short (1-byte) header — expand to the plain image shape.
+            // short (1-byte) header or be compressed — expand to the plain
+            // image shape.
             // SAFETY: d points at a live inline varlena in the pinned tuple.
-            let plain: mcx::PgVec<'mcx, u8>;
-            let image: &[u8] = unsafe {
+            let raw: &[u8] = unsafe {
                 let p = d.as_usize() as *const u8;
-                if types_tuple::varatt::varatt_is_1b(p) {
-                    assert!(
-                        !types_tuple::varatt::varatt_is_1b_e(p),
-                        "pg_proc.proargnames: external varlena"
-                    );
-                    let raw = types_tuple::varatt::varsize_1b(p);
-                    let payload = core::slice::from_raw_parts(p.add(1), raw - 1);
-                    let total = raw - 1 + 4;
+                core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p))
+            };
+            let plain: mcx::PgVec<'mcx, u8>;
+            let image: &[u8] = match varlena::open_image(mcx, raw)? {
+                varlena::VarPayload::Detoasted(v) => {
+                    plain = v;
+                    &plain
+                }
+                varlena::VarPayload::Inline(payload) if raw.len() == payload.len() + 4 => raw,
+                varlena::VarPayload::Inline(payload) => {
+                    let total = payload.len() + 4;
                     let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
                     let hdr = types_tuple::varatt::set_varsize_4b_word(total as u32);
                     mcx::vec_append_bytes(&mut v, &hdr.to_ne_bytes())?;
                     mcx::vec_append_bytes(&mut v, payload)?;
                     plain = v;
                     &plain
-                } else {
-                    let raw = types_tuple::varatt::varsize_4b(p);
-                    core::slice::from_raw_parts(p, raw)
                 }
             };
             let olds = datum::array_build::deconstruct_array_image(mcx, image, -1, false, b'i')?;

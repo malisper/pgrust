@@ -944,7 +944,13 @@ fn storeObjectDescription<'mcx>(
     descs: &mut PgString<'mcx>,
     obj: &ShDependObjectInfo,
 ) -> PgResult<()> {
-    let objdesc = getObjectDescription(mcx, obj.classId, obj.objectId, obj.objectSubId)?;
+    // An object being dropped concurrently doesn't need to be reported.
+    let Some(objdesc) = objectaddress_seams::get_object_description::call(
+        mcx, obj.classId, obj.objectId, obj.objectSubId, false,
+    )?
+    else {
+        return Ok(());
+    };
 
     if !descs.is_empty() {
         descs.try_push('\n')?;

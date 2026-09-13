@@ -631,10 +631,17 @@ pub fn compute_partition_hash_value(
         fcinfo.set_arg(0, values[i]);
         fcinfo.set_arg(1, seed);
         let hash = partsupfunc[i].invoke(&mut fcinfo)?;
-        assert!(!fcinfo.isnull, "partition hash support function returned NULL");
+        if fcinfo.isnull {
+            return Err(function_returned_null(partsupfunc[i].fn_oid));
+        }
         row_hash = hash_combine64(row_hash, hash.as_u64());
     }
     Ok(row_hash)
+}
+
+// fmgr.c:1165 FunctionCall2Coll: elog(ERROR, "function %u returned NULL").
+pub(crate) fn function_returned_null(fn_oid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("function {fn_oid} returned NULL")))
 }
 
 pub fn get_hash_partition_greatest_modulus(bound: &PartitionBoundInfoData<'_>) -> i32 {

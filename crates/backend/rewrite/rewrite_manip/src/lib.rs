@@ -1800,15 +1800,16 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for SetVarReturningTypeWalker {
                 }
                 Ok(false)
             }
-            NodeTag::T_Query => {
-                self.sublevels_up += 1;
-                let r =
-                    nodes_core::query_tree_walker(node.as_query().expect("Query"), self, 0)?;
-                self.sublevels_up -= 1;
-                Ok(r)
-            }
+            NodeTag::T_Query => self.visit_query_ref(node.as_query().expect("Query")),
             _ => nodes_core::expression_tree_walker(node, self),
         }
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.sublevels_up += 1;
+        let r = nodes_core::query_tree_walker(q, self, 0)?;
+        self.sublevels_up -= 1;
+        Ok(r)
     }
 }
 

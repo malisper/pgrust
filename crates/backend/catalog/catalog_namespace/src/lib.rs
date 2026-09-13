@@ -6,9 +6,8 @@
 // (RangeVarGetCreationNamespace family, CheckSetNamespace), and the
 // non-relation object lookups except OpernameGetOprid (Funcname/
 // OpernameGetCandidates/Type/visibility family).
-// C divergences: objectaccess is unported, so InvokeNamespaceSearchHook passes
-// and object_access_hook is never set (forceRecompute stays false); the
-// active*/base* variable pairs always alias after PG16, so one set is kept.
+// C divergences: the active*/base* variable pairs always alias after PG16,
+// so one set is kept.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 

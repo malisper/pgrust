@@ -9,6 +9,7 @@ name = "catalog_namespace"
 path = "src/lib.rs"
 
 [dependencies]
+objectaccess = { path = "../objectaccess" }
 pg_string = { path = "../../../common/string" }
 mcx = { path = "../../../_support/mcx" }
 array = { package = "types_array", path = "../../../_support/types/array" }

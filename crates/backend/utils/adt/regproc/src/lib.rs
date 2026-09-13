@@ -297,6 +297,7 @@ fn lookup_explicit_namespace(nspname: &str, missing_ok: bool) -> PgResult<Oid> {
     if aclresult != ACLCHECK_OK {
         aclchk_seams::aclcheck_error::call(aclresult, OBJECT_SCHEMA, nspname)?;
     }
+    objectaccess::InvokeNamespaceSearchHook(namespace_id, true)?;
     Ok(namespace_id)
 }
 

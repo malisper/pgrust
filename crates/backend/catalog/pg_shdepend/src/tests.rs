@@ -75,3 +75,24 @@ fn comparator_orders_oid_class_subid_deptype() {
     );
 }
 
+
+// pg_shdepend.c:1287 storeObjectDescription: an object being dropped
+// concurrently (getObjectDescription NULL, e.g. a vanished large object)
+// is skipped, not reported.
+#[test]
+fn store_object_description_skips_a_vanished_object() {
+    objectaddress_seams::get_object_description::set(|_mcx, class_id, object_id, _sub, _mok| {
+        Ok((class_id == RELATION_RELATION_ID).then(|| format!("table t{object_id}")))
+    });
+    let root = mcx::MemoryContext::new("shdep-test");
+    let mcx = root.mcx();
+    let mut descs = PgString::new_in(mcx);
+    let gone = info(2613, 4242, 0, b'o');
+    storeObjectDescription(mcx, &mut descs, &gone).unwrap();
+    assert_eq!(descs.as_str(), "");
+    let here = info(RELATION_RELATION_ID, 7, 0, b'o');
+    storeObjectDescription(mcx, &mut descs, &here).unwrap();
+    storeObjectDescription(mcx, &mut descs, &gone).unwrap();
+    storeObjectDescription(mcx, &mut descs, &here).unwrap();
+    assert_eq!(descs.as_str(), "owner of table t7\nowner of table t7");
+}

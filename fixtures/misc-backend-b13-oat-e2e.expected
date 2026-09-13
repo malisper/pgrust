@@ -1,0 +1,78 @@
+-- bugs/batch-13-misc-backend: InvokeNamespaceSearchHook sites C reaches from
+-- namespace.c (LookupExplicitNamespace 3415, LookupNamespaceNoError 3365,
+-- finalNamespacePath 4212) and regproc's inlined LookupExplicitNamespace,
+-- witnessed through the test_oat_hooks recorder. The C oracle install
+-- carries no test modules, so the expected file is captured from pgrust; the
+-- NOTICE sequence for CREATE TABLE / SELECT matches
+-- src/test/modules/test_oat_hooks/expected/alter_table.out.
+SET debug_discard_caches = 0;
+LOAD 'test_oat_hooks';
+CREATE SCHEMA b13_oat_schema;
+CREATE TABLE b13_oat_schema.b13_oat_tab (c1 int);
+CREATE TEMP TABLE b13_oat_temp (c1 int);
+SET test_oat_hooks.audit = on;
+CREATE TABLE b13_oat_schema.b13_oat_tab2 (c1 int);
+NOTICE:  in object access: superuser attempting namespace search (subId=0x0) [report on violation, allowed]
+NOTICE:  in object access: superuser finished namespace search (subId=0x0) [report on violation, allowed]
+NOTICE:  in object access: superuser attempting namespace search (subId=0x0) [report on violation, allowed]
+NOTICE:  in object access: superuser finished namespace search (subId=0x0) [report on violation, allowed]
+NOTICE:  in object access: superuser attempting create (subId=0x0) [explicit]
+NOTICE:  in object access: superuser finished create (subId=0x0) [explicit]
+NOTICE:  in object access: superuser attempting create (subId=0x0) [explicit]
+NOTICE:  in object access: superuser finished create (subId=0x0) [explicit]
+NOTICE:  in object access: superuser attempting create (subId=0x0) [explicit]
+NOTICE:  in object access: superuser finished create (subId=0x0) [explicit]
+SELECT * FROM b13_oat_schema.b13_oat_tab;
+NOTICE:  in object access: superuser attempting namespace search (subId=0x0) [report on violation, allowed]
+LINE 1: SELECT * FROM b13_oat_schema.b13_oat_tab;
+                      ^
+NOTICE:  in object access: superuser finished namespace search (subId=0x0) [report on violation, allowed]
+LINE 1: SELECT * FROM b13_oat_schema.b13_oat_tab;
+                      ^
+ c1 
+----
+(0 rows)
+
+SELECT 'b13_oat_schema.b13_oat_tab'::regclass;
+NOTICE:  in object access: superuser attempting namespace search (subId=0x0) [no report on violation, allowed]
+NOTICE:  in object access: superuser finished namespace search (subId=0x0) [no report on violation, allowed]
+NOTICE:  in object access: superuser attempting namespace search (subId=0x0) [report on violation, allowed]
+LINE 1: SELECT 'b13_oat_schema.b13_oat_tab'::regclass;
+               ^
+NOTICE:  in object access: superuser finished namespace search (subId=0x0) [report on violation, allowed]
+LINE 1: SELECT 'b13_oat_schema.b13_oat_tab'::regclass;
+               ^
+          regclass          
+----------------------------
+ b13_oat_schema.b13_oat_tab
+(1 row)
+
+SELECT * FROM pg_temp.b13_oat_temp;
+ c1 
+----
+(0 rows)
+
+SET search_path = b13_oat_schema, public;
+SELECT * FROM b13_oat_tab;
+NOTICE:  in object access: superuser attempting namespace search (subId=0x0) [no report on violation, allowed]
+LINE 1: SELECT * FROM b13_oat_tab;
+                      ^
+NOTICE:  in object access: superuser finished namespace search (subId=0x0) [no report on violation, allowed]
+LINE 1: SELECT * FROM b13_oat_tab;
+                      ^
+NOTICE:  in object access: superuser attempting namespace search (subId=0x0) [no report on violation, allowed]
+LINE 1: SELECT * FROM b13_oat_tab;
+                      ^
+NOTICE:  in object access: superuser finished namespace search (subId=0x0) [no report on violation, allowed]
+LINE 1: SELECT * FROM b13_oat_tab;
+                      ^
+ c1 
+----
+(0 rows)
+
+SET test_oat_hooks.audit = off;
+RESET search_path;
+DROP SCHEMA b13_oat_schema CASCADE;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to table b13_oat_schema.b13_oat_tab
+drop cascades to table b13_oat_schema.b13_oat_tab2

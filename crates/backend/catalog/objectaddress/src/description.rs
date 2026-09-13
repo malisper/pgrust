@@ -435,7 +435,7 @@ pub fn getObjectDescription(
                 }
                 return Ok(None);
             };
-            Ok(Some(format!("language {}", quote_qualified(None, &lanname))))
+            Ok(Some(format!("language {lanname}")))
         }
         OPERATOR_CLASS_RELATION_ID => {
             let Some((opcmethod, opcname, opcnamespace)) = opclass_or_opfamily_row(

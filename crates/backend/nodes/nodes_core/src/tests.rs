@@ -1918,3 +1918,19 @@ fn expr_collation_next_value_expr_is_invalid_oid() {
     assert_eq!(node_funcs::expr_type(nve), 23);
     assert_eq!(node_funcs::expr_collation(nve), types_core::InvalidOid);
 }
+
+// print.c wraps at byte 78 regardless of character boundaries; a multibyte
+// identifier straddling the wrap must not panic the formatter.
+#[test]
+fn node_dump_wrap_inside_a_multibyte_char_does_not_panic() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let dump = format!("{}é{}", "x".repeat(77), "y".repeat(10));
+    let flat = print::format_node_dump(mcx, &dump).unwrap();
+    let lines: Vec<&str> = flat.as_str().lines().collect();
+    assert_eq!(lines.len(), 2, "{flat}");
+    assert_eq!(lines[0], format!("{}\u{FFFD}", "x".repeat(77)));
+    assert_eq!(lines[1], format!("\u{FFFD}{}", "y".repeat(10)));
+    let pretty = print::pretty_format_node_dump(mcx, &format!("{{A :b {dump}}}")).unwrap();
+    assert!(pretty.as_str().lines().all(|l| l.len() <= 78 + 3), "{pretty}");
+}

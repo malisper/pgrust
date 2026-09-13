@@ -95,6 +95,7 @@ pub fn get_namespace_oid(nspname: &str, missing_ok: bool) -> PgResult<Oid> {
 pub fn LookupNamespaceNoError(nspname: &str) -> PgResult<Oid> {
     if nspname == "pg_temp" {
         if OidIsValid(my_temp_namespace()) {
+            objectaccess::InvokeNamespaceSearchHook(my_temp_namespace(), true)?;
             return Ok(my_temp_namespace());
         }
         // Lookups of existing objects never create the temp namespace.
@@ -125,6 +126,8 @@ pub fn LookupExplicitNamespace(nspname: &str, missing_ok: bool) -> PgResult<Oid>
     if aclresult != ACLCHECK_OK {
         aclchk_seams::aclcheck_error::call(aclresult, OBJECT_SCHEMA, nspname)?;
     }
+    objectaccess::InvokeNamespaceSearchHook(namespaceId, true)?;
+
     Ok(namespaceId)
 }
 

@@ -270,6 +270,20 @@ pub fn PGSharedMemoryCreate(dsm_cleanup: fn(u32) -> PgResult<()>) -> PgResult<()
     probe_key_space(datadir, statbuf.ino, dsm_cleanup)
 }
 
+/// How a failed probe `shmget(key, sizeof(PGShmemHeader), 0)` classifies.
+/// ENOENT: no segment behind this key — C's InternalIpcMemoryCreate succeeds
+/// there and its loop ends. EACCES or EINVAL (an existing segment smaller
+/// than the header): C's SHMSTATE_FOREIGN, the walk advances. Anything else
+/// (ENOSYS: no System V IPC at all) means no Postgres segment can exist for
+/// this key space; C would fail creating its own, pgrust needs none.
+#[cfg(not(target_family = "wasm"))]
+fn probe_failure_state(errnum: i32) -> Option<IpcMemoryState> {
+    match errnum {
+        libc::EACCES | libc::EINVAL => Some(IpcMemoryState::Foreign),
+        _ => None,
+    }
+}
+
 /// The key-space walk of C `PGSharedMemoryCreate` (sysv_shmem.c:764-855),
 /// seeded with DataDir's inode. See [`PGSharedMemoryCreate`].
 #[cfg(not(target_family = "wasm"))]
@@ -284,16 +298,9 @@ pub fn probe_key_space(datadir: &str, ino: u64, dsm_cleanup: fn(u32) -> PgResult
         let shmid = unsafe { libc::shmget(next_key, std::mem::size_of::<PGShmemHeader>(), 0) };
         let (state, oldaddr) = if shmid < 0 {
             let errnum = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            match errnum {
-                // No segment behind this key: C's InternalIpcMemoryCreate
-                // succeeds here and its loop ends.
-                libc::ENOENT => break,
-                // C: "shmget() failure is typically EACCES, hence SHMSTATE_FOREIGN".
-                libc::EACCES => (IpcMemoryState::Foreign, std::ptr::null_mut()),
-                // Any other failure (ENOSYS: no System V IPC at all) means no
-                // Postgres segment can exist for this key space; C would fail
-                // creating its own, pgrust needs none.
-                _ => break,
+            match probe_failure_state(errnum) {
+                Some(state) => (state, std::ptr::null_mut()),
+                None => break,
             }
         } else {
             PGSharedMemoryAttach(shmid)

@@ -138,47 +138,15 @@ fn fc_overpaid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
 
 /* ===================== widget: in / out / pt_in_widget =================== */
 
-// C atof(): the longest valid leading floating-point prefix, else 0.0.
+// C atof(): strtod's longest valid leading prefix (hex floats, inf, nan
+// included), else 0.0.
 fn c_atof(bytes: &[u8]) -> f64 {
-    let mut i = 0;
-    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
-        i += 1;
-    }
-    let start = i;
-    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-        i += 1;
-    }
-    let mut saw_digit = false;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-        saw_digit = true;
-    }
-    if i < bytes.len() && bytes[i] == b'.' {
-        i += 1;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-            saw_digit = true;
-        }
-    }
-    if !saw_digit {
+    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let Ok(c) = std::ffi::CString::new(&bytes[..nul]) else {
         return 0.0;
-    }
-    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
-        let mut j = i + 1;
-        if j < bytes.len() && (bytes[j] == b'+' || bytes[j] == b'-') {
-            j += 1;
-        }
-        if j < bytes.len() && bytes[j].is_ascii_digit() {
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            i = j;
-        }
-    }
-    core::str::from_utf8(&bytes[start..i])
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0)
+    };
+    // SAFETY: NUL-terminated buffer; strtod reads within it.
+    unsafe { libc::strtod(c.as_ptr(), core::ptr::null_mut()) }
 }
 
 // C "%g" (precision 6): %e when the decimal exponent is < -4 or >= 6, else
@@ -1074,12 +1042,7 @@ fn fc_test_mblen_func(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
 
     let result: i32 = match func.as_str() {
         "pg_mblen_unbounded" => mbutils::pg_mblen(at_offset),
-        // pg_mblen_cstr bounds the char at the first NUL; the bounded-range
-        // walk over the NUL-clipped window raises the same invalid-char error.
-        "pg_mblen_cstr" => {
-            let nul = at_offset.iter().position(|&b| b == 0).unwrap_or(at_offset.len());
-            mbutils::pg_mblen_range(&at_offset[..nul])?
-        }
+        "pg_mblen_cstr" => mblen_cstr(at_offset)?,
         "pg_mblen_with_len" => mbutils::pg_mblen_with_len(at_offset, (size - offset) as i32)?,
         "pg_mblen_range" => mbutils::pg_mblen_range(at_offset)?,
         "pg_encoding_mblen" => {
@@ -1088,6 +1051,17 @@ fn fc_test_mblen_func(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
         _ => return Err(err("unknown function".to_string())),
     };
     Ok(Datum::from_i32(result))
+}
+
+// pg_mblen_cstr (mbutils.c): the .mblen functions return 1 for a pointer to
+// the terminator; otherwise the char is bounded at the first NUL, and the
+// bounded-range walk over that window raises the same invalid-char error.
+fn mblen_cstr(bytes: &[u8]) -> PgResult<i32> {
+    if bytes.first().is_none_or(|&b| b == 0) {
+        return Ok(1);
+    }
+    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    mbutils::pg_mblen_range(&bytes[..nul])
 }
 
 /* ================== test_text_to_wchars(text, text) ====================== */
@@ -1339,6 +1313,17 @@ mod tests {
         assert_eq!(c_atof(b"1e"), 1.0);
         assert_eq!(c_atof(b"junk"), 0.0);
         assert_eq!(c_atof(b".5"), 0.5);
+        assert_eq!(c_atof(b"0x1p2,0,1)"), 4.0);
+        assert_eq!(c_atof(b"Infinity)"), f64::INFINITY);
+        assert_eq!(c_atof(b"-inf"), f64::NEG_INFINITY);
+        assert!(c_atof(b"nan").is_nan());
+    }
+
+    #[test]
+    fn mblen_cstr_returns_one_at_the_terminator() {
+        assert_eq!(mblen_cstr(b"").unwrap(), 1);
+        assert_eq!(mblen_cstr(b"\0abc").unwrap(), 1);
+        assert_eq!(mblen_cstr(b"abc").unwrap(), 1);
     }
 
     #[test]
