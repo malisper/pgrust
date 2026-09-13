@@ -31,6 +31,7 @@ pub(crate) struct SubPlanState<'mcx> {
     sub_link_type: SubLinkType,
     first_col_type: ::types_core::Oid,
     set_param: PgVec<'mcx, i32>,
+    plan_id: i32,
     /// The subplan's PlanState (es_subplanstates cell); taken out for the
     /// duration of a run so same-plan re-entry is a loud panic, not aliasing.
     ps_cell: core::ptr::NonNull<Option<PlanStateNode<'mcx>>>,
@@ -116,6 +117,7 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
             sub_link_type: subplan.subLinkType,
             first_col_type: subplan.firstColType,
             set_param,
+            plan_id: subplan.plan_id,
             ps_cell: cell.cast(),
         },
     )?;
@@ -189,7 +191,24 @@ fn exec_set_param_plan<'mcx>(
     let saved_dir = estate.es_direction;
     estate.es_direction = ScanDirection::ForwardScanDirection;
 
-    let result = run_subplan(sstate, &mut ps, estate);
+    // ExecProcNode's chgParam check: the rescan execami deferred.
+    let idx = (sstate.plan_id - 1) as usize;
+    let result = if estate.es_subplan_chg[idx].is_empty() {
+        Ok(())
+    } else {
+        let chg = core::mem::replace(
+            &mut estate.es_subplan_chg[idx],
+            ::types_nodes::bitmapset::Bitmapset::empty(),
+        );
+        let plan = estate
+            .es_plannedstmt
+            .expect("es_plannedstmt set before ExecSetParamPlan")
+            .subplans
+            .nth(idx)
+            .expect("initplan references a transferred subplan");
+        crate::execami::exec_re_scan_with_chg(&mut ps, plan, estate, &chg)
+    }
+    .and_then(|()| run_subplan(sstate, &mut ps, estate));
 
     estate.es_direction = saved_dir;
     *cell = Some(ps);

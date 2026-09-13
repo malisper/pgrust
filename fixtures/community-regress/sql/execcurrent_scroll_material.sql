@@ -1,0 +1,17 @@
+-- execCurrent.c: a SCROLL cursor whose plan cannot run backwards is
+-- topped with Material (planner.c), which search_plan_tree does not
+-- descend through, so CURRENT OF is rejected.
+CREATE TABLE cur_t (id int);
+INSERT INTO cur_t VALUES (1);
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT * FROM cur_t TABLESAMPLE SYSTEM (100);
+FETCH NEXT FROM c;
+UPDATE cur_t SET id = 2 WHERE CURRENT OF c;
+ROLLBACK;
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT * FROM cur_t;
+FETCH NEXT FROM c;
+UPDATE cur_t SET id = 2 WHERE CURRENT OF c;
+COMMIT;
+SELECT * FROM cur_t;
+DROP TABLE cur_t;

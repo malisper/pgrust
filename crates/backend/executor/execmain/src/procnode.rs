@@ -96,6 +96,9 @@ pub struct AppendNode<'mcx> {
     pub substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
     /// Original appendplans index per substate (initial pruning skips some).
     pub subplan_origin: ::mcx::PgVec<'mcx, i32>,
+    /// C appendplans[i]->chgParam: pending child rescans, applied at the
+    /// child's first pull / async request.
+    pub pending_chg: ::mcx::PgVec<'mcx, ::types_nodes::bitmapset::Bitmapset<'mcx>>,
     /// Lane-executor-v2 append verdict, memoized at first offer (verdict
     /// stability: a lane-driven child carries a staged-batch cursor across
     /// the Volcano boundary); the dynamic gates (EPQ, direction, parallel
@@ -1403,12 +1406,15 @@ pub fn exec_init_node<'mcx>(
                         asyncplans,
                         nasyncplans,
                     )?;
+                    let mut pending_chg = ::mcx::PgVec::new_in(mcx);
+                    pending_chg.resize_with(substates.len(), ::types_nodes::bitmapset::Bitmapset::empty);
                     PlanStateNode::Append(::mcx::alloc_in(
                         mcx,
                         AppendNode {
                             state,
                             substates,
                             subplan_origin,
+                            pending_chg,
                             lane_fusible: None,
                         },
                     )?)
@@ -2749,15 +2755,47 @@ fn append_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let AppendNode {
-        state, substates, ..
+        state,
+        substates,
+        subplan_origin,
+        pending_chg,
+        ..
     } = &mut **a;
-    ::nodeappend::exec_append(state, estate, &mut AppendChildrenDriver { substates })
+    let plan: &'mcx ::types_nodes::plannodes::Append<'mcx> = state.plan;
+    ::nodeappend::exec_append(
+        state,
+        estate,
+        &mut AppendChildrenDriver {
+            substates,
+            pending_chg,
+            subplan_origin,
+            subplans: &plan.appendplans,
+        },
+    )
 }
 
 // The host half of nodeappend's AppendAsyncDriver: sync pulls recurse through
 // exec_proc_node; async dispatch goes through execasync (execAsync.c).
 pub(crate) struct AppendChildrenDriver<'a, 'mcx> {
     pub(crate) substates: &'a mut ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
+    pub(crate) pending_chg: &'a mut ::mcx::PgVec<'mcx, ::types_nodes::bitmapset::Bitmapset<'mcx>>,
+    pub(crate) subplan_origin: &'a ::mcx::PgVec<'mcx, i32>,
+    pub(crate) subplans: &'mcx ::types_nodes::NodeList<'mcx>,
+}
+
+impl<'a, 'mcx> AppendChildrenDriver<'a, 'mcx> {
+    // ExecProcNode's chgParam check for one Append child.
+    fn apply_pending(&mut self, estate: &mut EStateData<'mcx>, i: usize) -> PgResult<()> {
+        if self.pending_chg[i].is_empty() {
+            return Ok(());
+        }
+        let chg = core::mem::replace(
+            &mut self.pending_chg[i],
+            ::types_nodes::bitmapset::Bitmapset::empty(),
+        );
+        let plan = self.subplans.nth(self.subplan_origin[i] as usize);
+        crate::execami::exec_re_scan_with_chg(&mut self.substates[i], plan, estate, &chg)
+    }
 }
 
 impl<'a, 'mcx> ::nodeappend::AppendAsyncDriver<'mcx> for AppendChildrenDriver<'a, 'mcx> {
@@ -2766,6 +2804,7 @@ impl<'a, 'mcx> ::nodeappend::AppendAsyncDriver<'mcx> for AppendChildrenDriver<'a
         estate: &mut EStateData<'mcx>,
         i: usize,
     ) -> PgResult<Option<ExecSlotId>> {
+        self.apply_pending(estate, i)?;
         exec_proc_node(&mut self.substates[i], estate)
     }
     fn async_request(
@@ -2773,6 +2812,7 @@ impl<'a, 'mcx> ::nodeappend::AppendAsyncDriver<'mcx> for AppendChildrenDriver<'a
         estate: &mut EStateData<'mcx>,
         areq: &mut ::executils::AsyncRequest,
     ) -> PgResult<()> {
+        self.apply_pending(estate, areq.request_index as usize)?;
         crate::execasync::exec_async_request(
             &mut self.substates[areq.request_index as usize],
             estate,
@@ -4236,7 +4276,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     MemoizeNode<'_> { state, outer, outer_chg },
     SortNode<'_> { state, outer, lane_fusible, rd_shape_refused; outer_desc },
     IncrementalSortNode<'_> { state, outer },
-    AppendNode<'_> { state, substates, subplan_origin, lane_fusible },
+    AppendNode<'_> { state, substates, subplan_origin, pending_chg, lane_fusible },
     MergeAppendNode<'_> { state, substates, subplan_origin },
     SubqueryScanNode<'_> { ss, subplan },
     SetOpNode<'_> { state, outer, inner },

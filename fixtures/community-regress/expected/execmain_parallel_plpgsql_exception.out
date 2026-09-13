@@ -1,0 +1,48 @@
+-- A nested query erroring under a PARALLEL SAFE plpgsql EXCEPTION block
+-- must release only its own parallel contexts, not the outer Gather's.
+CREATE TABLE ppe_t(a int);
+INSERT INTO ppe_t SELECT g FROM generate_series(1,100000) g;
+ANALYZE ppe_t;
+CREATE FUNCTION ppe_f(i int) RETURNS int LANGUAGE plpgsql PARALLEL SAFE AS $$
+DECLARE r int;
+BEGIN
+  SELECT count(*) INTO r FROM ppe_t WHERE a < 50 AND 1/(a - a) = i;
+  RETURN r;
+EXCEPTION WHEN division_by_zero THEN
+  RETURN -1;
+END $$;
+SET max_parallel_workers_per_gather = 2;
+SET min_parallel_table_scan_size = 0;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+EXPLAIN (COSTS OFF) SELECT sum(ppe_f(a)) FROM ppe_t WHERE a <= 300;
+                  QUERY PLAN                  
+----------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Partial Aggregate
+               ->  Parallel Seq Scan on ppe_t
+                     Filter: (a <= 300)
+(6 rows)
+
+SELECT sum(ppe_f(a)) FROM ppe_t WHERE a <= 300;
+ sum  
+------
+ -300
+(1 row)
+
+SET max_parallel_workers = 0;
+SELECT sum(ppe_f(a)) FROM ppe_t WHERE a <= 300;
+ sum  
+------
+ -300
+(1 row)
+
+RESET max_parallel_workers;
+RESET max_parallel_workers_per_gather;
+RESET min_parallel_table_scan_size;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+DROP FUNCTION ppe_f(int);
+DROP TABLE ppe_t;

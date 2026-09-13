@@ -62,6 +62,7 @@ pub fn exec_current_of(
     }
 
     querydesc::with_qd(query_desc, |qd| -> PgResult<Option<ItemPointerData>> {
+        let scroll_ok = crate::execami::plan_implicit_scroll_ok(qd.plannedstmt().planTree);
         let Some(exec) = qd.exec.as_mut() else {
             return Err(invalid_cursor_state(format!(
                 "cursor \"{cursor_name}\" is held from a previous transaction"
@@ -107,6 +108,13 @@ pub fn exec_current_of(
                 Ok(None)
             }
         } else {
+            // C planner.c:460-463 tops a SCROLL cursor whose plan cannot run
+            // backwards with a Material node, which search_plan_tree does
+            // not descend through; the store-armed portal stands in for
+            // that node here.
+            if store_armed && !scroll_ok {
+                return Err(not_simply_updatable(cursor_name, table_name));
+            }
             let scanstate = planstate
                 .as_ref()
                 .and_then(|root| search_plan_tree(root, table_oid));
@@ -456,7 +464,10 @@ fn plan_has_capturable_scan(
 pub(crate) fn cursor_plan_current_of_eligible_seam(
     pstmt: &::types_nodes::plannodes::PlannedStmt<'_>,
 ) -> bool {
-    plan_has_capturable_scan(pstmt.planTree, &pstmt.rtable)
+    // A SCROLL plan C would top with Material (planner.c:460-463) is never
+    // simply updatable: no sidecar to capture.
+    crate::execami::plan_implicit_scroll_ok(pstmt.planTree)
+        && plan_has_capturable_scan(pstmt.planTree, &pstmt.rtable)
 }
 
 /// Seam impl (execmain_seams::cursor_plan_capture_batch_fill; SE-R41,

@@ -370,7 +370,7 @@ pub(crate) fn series_len(s: &SeriesSpec) -> Option<u64> {
     }
     let (start, finish, step) = (s.start as i128, s.finish as i128, s.step as i128);
     let n = if step > 0 { (finish - start) / step + 1 } else { (start - finish) / (-step) + 1 };
-    Some(n.max(0) as u64)
+    Some(n.clamp(0, u64::MAX as i128) as u64)
 }
 
 /// Materialize the series values (the adt series.rs law: overflow of the
@@ -415,6 +415,10 @@ mod tests {
         assert_eq!(series_len(&s(1, 5, 2)), Some(3));
         assert_eq!(series_len(&s(1, 5, 0)), None);
         assert_eq!(series_len(&s(5, 1, 1)), Some(0));
+        let full = SeriesSpec { start: i64::MIN, finish: i64::MAX, step: 1, int8: true, null_arg: false };
+        assert_eq!(series_len(&full), Some(u64::MAX));
+        let full_desc = SeriesSpec { start: i64::MAX, finish: i64::MIN, step: -1, int8: true, null_arg: false };
+        assert_eq!(series_len(&full_desc), Some(u64::MAX));
     }
 
     /// Adapt a whole-iteration step (rows in, rows out) to the sink

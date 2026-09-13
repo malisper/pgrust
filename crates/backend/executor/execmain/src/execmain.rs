@@ -1197,6 +1197,7 @@ pub(crate) fn init_plan<'mcx>(
                 unsafe { core::ptr::NonNull::new_unchecked(raw) }.cast(),
             );
             data.estate.es_subplanstates.push(cell);
+            data.estate.es_subplan_chg.push(::types_nodes::bitmapset::Bitmapset::empty());
             if is_aux_mt {
                 data.estate.es_auxmodifytables.push(cell);
             }

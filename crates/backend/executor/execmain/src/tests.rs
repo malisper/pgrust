@@ -4829,6 +4829,30 @@ fn lockrows_b079_epq_ended_at_outer_eof() {
             );
         }
 
+        // A rescanned LockRows rechecks again after that EOF: the re-Start
+        // must not inherit the consumed flags of the ended recheck
+        // (execMain.c:3161 memcpy from fresh relsubs_blocked).
+        {
+            let crate::PlanStateNode::LockRows(l) = &mut *ps else {
+                panic!("LockRows planstate");
+            };
+            let l = &mut **l;
+            let subs = l.state.epq_subs.as_mut().expect("EPQ subs survive EvalPlanQualEnd");
+            for i in 0..subs.relsubs_done.len() {
+                subs.relsubs_done[i] = !subs.relsubs_blocked[i];
+            }
+            estate.es_epq = l.state.epq_subs.take();
+            crate::epq::eval_plan_qual_start(&mut l.epq, estate).unwrap();
+            l.state.epq_subs = estate.es_epq.take();
+            let subs = l.state.epq_subs.as_ref().unwrap();
+            for i in 0..subs.relsubs_done.len() {
+                assert_eq!(
+                    subs.relsubs_done[i], subs.relsubs_blocked[i],
+                    "EvalPlanQualStart: relsubs_done[{i}] reloaded from relsubs_blocked"
+                );
+            }
+        }
+
         crate::exec_end_node(ps, estate).unwrap();
         estate.exec_reset_tuple_table(false);
         estate.exec_close_range_table_relations().unwrap();

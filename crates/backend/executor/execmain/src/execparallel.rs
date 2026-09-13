@@ -428,6 +428,7 @@ pub fn exec_init_parallel_plan<'mcx>(
 
     let pstmt = build_worker_pstmt(estate, child_plan)?;
     let pcxt = parallel::CreateParallelContext("postgres", "ParallelQueryMain", nworkers)?;
+    estate.es_parallel_pcxts.push(pcxt.raw());
     // Leader-panic containment injection: forced fault during parallel init,
     // env-gated so the surface is inert in production (crash-restart-design
     // pattern). The panic must unwind to an ERROR, abort the transaction, and
@@ -638,6 +639,7 @@ pub fn exec_parallel_cleanup(
         retrieve_instrumentation(estate, pei)?;
     }
     parallel::DestroyParallelContext(pei.pcxt)?;
+    estate.es_parallel_pcxts.retain(|&id| id != pei.pcxt.raw());
     pei.reader.clear();
     pei.tqueue.clear();
     Ok(())

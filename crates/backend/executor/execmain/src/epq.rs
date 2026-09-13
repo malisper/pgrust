@@ -209,6 +209,13 @@ pub(crate) fn eval_plan_qual_start<'mcx>(
     let inited = exec_init_node(Some(plan), estate, 0);
     estate.es_instrument = saved_instrument;
     epq.recheck = Some(inited?.expect("recheck subplan"));
+    // C palloc's fresh relsubs_done = relsubs_blocked here; a re-Start
+    // after EvalPlanQualEnd must not inherit the last recheck's consumed
+    // flags (a rescanned LockRows ends EPQ at every EOF).
+    let subs = estate.es_epq.as_mut().expect("EPQ state installed");
+    for i in 0..subs.relsubs_done.len() {
+        subs.relsubs_done[i] = subs.relsubs_blocked[i];
+    }
     Ok(())
 }
 

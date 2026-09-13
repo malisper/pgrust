@@ -33,10 +33,12 @@ impl Drop for ExecData<'_> {
         // Worker threads read this executor's arena by pointer (share-by-
         // pointer execParallel); C's estate memory survives until the abort
         // path has destroyed every parallel context (AtEOXact_Parallel), but
-        // a caller-owned QueryDesc drops on the unwind before that. Join the
-        // workers first so no worker outlives the memory it dereferences.
-        if parallel::ParallelContextActive() {
-            let _ = parallel::AtEOXact_Parallel(false);
+        // a caller-owned QueryDesc drops on the unwind before that. Join
+        // THIS executor's workers first so no worker outlives the memory it
+        // dereferences; an outer query's Gather (a nested SPI query erroring
+        // under a PARALLEL SAFE function's EXCEPTION block) keeps its own.
+        while let Some(id) = self.estate.es_parallel_pcxts.pop() {
+            let _ = parallel::DestroyParallelContextIfLive(parallel::ParallelContextId::from_raw(id));
         }
         for i in 0..self.estate.es_subplanstates.len() {
             let cell = self.estate.es_subplanstates[i];

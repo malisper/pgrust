@@ -244,6 +244,15 @@ pub struct ParallelContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParallelContextId(u64);
 
+impl ParallelContextId {
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+    pub fn from_raw(id: u64) -> Self {
+        ParallelContextId(id)
+    }
+}
+
 thread_local! {
     // Set only in ParallelWorkerMain; -1 in the leader and regular backends.
     static PARALLEL_WORKER_NUMBER: Cell<i32> = const { Cell::new(-1) };
@@ -1213,6 +1222,16 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
         clear_engagement_refs(shared);
     }
     result
+}
+
+/// DestroyParallelContext for an id that may already be gone (the abort
+/// path of an executor whose Gather was never cleaned up).
+pub fn DestroyParallelContextIfLive(id: ParallelContextId) -> PgResult<()> {
+    let live = PCXT_LIST.with(|l| l.borrow().iter().any(|p| p.id == id.0));
+    if live {
+        DestroyParallelContext(id)?;
+    }
+    Ok(())
 }
 
 pub fn ParallelContextActive() -> bool {

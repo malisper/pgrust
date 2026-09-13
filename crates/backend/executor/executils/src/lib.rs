@@ -961,6 +961,12 @@ pub struct EStateData<'mcx> {
     pub es_finished: bool,
     es_exprcontexts: PgVec<'mcx, Option<ExprContextData<'mcx>>>,
     pub es_subplanstates: PgVec<'mcx, SubplanStateCell>,
+    /// C es_subplanstates[i]->chgParam: pending initplan rescans, applied
+    /// at ExecSetParamPlan's first ExecProcNode.
+    pub es_subplan_chg: PgVec<'mcx, ::types_nodes::bitmapset::Bitmapset<'mcx>>,
+    /// Raw ParallelContext ids this executor created and has not destroyed
+    /// (ExecData's abort-path drop joins exactly these workers).
+    pub es_parallel_pcxts: PgVec<'mcx, u64>,
     /// paramid -> initplan SubPlanState (C's ParamExecData.execPlan pointer).
     pub es_param_subplans: PgVec<'mcx, Option<SubplanStateCell>>,
     pub es_subplan_hook: Option<SubplanHook>,
@@ -1389,6 +1395,8 @@ impl<'mcx> EStateData<'mcx> {
             es_finished: false,
             es_exprcontexts: PgVec::new_in(mcx),
             es_subplanstates: PgVec::new_in(mcx),
+            es_subplan_chg: PgVec::new_in(mcx),
+            es_parallel_pcxts: PgVec::new_in(mcx),
             es_param_subplans: PgVec::new_in(mcx),
             es_subplan_hook: None,
             es_subplan_init_hook: None,
@@ -1956,7 +1964,7 @@ mcx::forget_safe_struct!(
         es_trig_target_relations, es_insert_pending_result_relations,
         es_param_list_info, es_param_list_hooked, es_param_stable, es_queryEnv, es_processed,
         es_total_processed, es_direct_returning_slot,
-        es_top_eflags, es_instrument, es_finished, es_subplanstates,
+        es_top_eflags, es_instrument, es_finished, es_subplanstates, es_subplan_chg, es_parallel_pcxts,
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_scan_wired,
         es_parallel_workers_to_launch,

@@ -307,10 +307,16 @@ pub fn exec_re_scan<'mcx>(
         PlanStateNode::Append(a) => {
             let a = &mut **a;
             // Async requests are reset (drained) before the subplans rescan.
+            let append_plan: &'mcx types_nodes::plannodes::Append<'mcx> = a.state.plan;
             ::nodeappend::exec_rescan_append(
                 &mut a.state,
                 estate,
-                &mut crate::procnode::AppendChildrenDriver { substates: &mut a.substates },
+                &mut crate::procnode::AppendChildrenDriver {
+                    substates: &mut a.substates,
+                    pending_chg: &mut a.pending_chg,
+                    subplan_origin: &a.subplan_origin,
+                    subplans: &append_plan.appendplans,
+                },
             )?;
             for sub in a.substates.iter_mut() {
                 exec_re_scan(sub, estate)?;
@@ -385,20 +391,40 @@ fn rescan_mark_initplans<'mcx>(
             // A shipped tree's initPlan SubPlans are parallel-safe: never a
             // NULL hole (an unsafe reference errors at ExecInitSubPlan).
             .expect("initPlan references a transferred subplan");
-        let ext = &init_plan.as_plan().expect("plan node").extParam;
+        let init_base = init_plan.as_plan().expect("plan node");
+        let idx = (sp.plan_id - 1) as usize;
+        // ExecReScanSetParamPlan: setParams join chgParam; the execPlan mark
+        // skips CTE_SUBLINK (nodeCtescan runs those, not param recalc).
+        let is_cte = sp.subLinkType == ::types_nodes::primnodes::SubLinkType::CTE_SUBLINK;
         // C tests against node->chgParam mid-walk, so an initplan that reads
         // an earlier sibling's output param sees that param as changed (the
         // one-pass ordering caveat in ExecReScan's comment).
-        if !chg_owned.as_ref().unwrap_or(chg).overlap(ext) {
-            continue;
-        }
-        // C: UpdateChangedParamSet(splan, chgParam) sets splan->chgParam; the
-        // rescan itself is deferred to ExecSetParamPlan's (or nodeCtescan's)
-        // first ExecProcNode. The param values are already bound here, so the
-        // eager rescan is the same rescan one call earlier. C snapshots
-        // splan->chgParam BEFORE this initplan's own setParams join
-        // node->chgParam, hence rescan-then-mark order.
-        {
+        if !is_cte {
+            // UpdateChangedParamSet(splan, chgParam): the rescan itself is
+            // deferred to ExecSetParamPlan's first ExecProcNode, so an
+            // initplan whose output is never read (an untaken CASE arm)
+            // never re-runs.
+            if !init_base.extParam.is_empty() {
+                let parm = chg_owned.as_ref().unwrap_or(chg);
+                let mcx = estate.es_query_cxt;
+                let mut x = parm.next_member(-1);
+                while x >= 0 {
+                    if init_base.allParam.is_member(x) {
+                        estate.es_subplan_chg[idx].add_member(mcx, x)?;
+                    }
+                    x = parm.next_member(x);
+                }
+            }
+            if estate.es_subplan_chg[idx].is_empty() {
+                continue;
+            }
+        } else {
+            if !chg_owned.as_ref().unwrap_or(chg).overlap(&init_base.extParam) {
+                continue;
+            }
+            // nodeCtescan drives this subplan itself: the eager rescan is
+            // the same rescan one call earlier.
+
             let cell = estate.es_subplanstates[(sp.plan_id - 1) as usize];
             // SAFETY: cell installed by InitPlan on this estate.
             let slot = unsafe { &mut *cell.0.cast::<Option<PlanStateNode<'mcx>>>().as_ptr() };
@@ -422,9 +448,6 @@ fn rescan_mark_initplans<'mcx>(
                 chg_owned.as_mut().unwrap()
             }
         };
-        // ExecReScanSetParamPlan: setParams join chgParam; the execPlan mark
-        // skips CTE_SUBLINK (nodeCtescan runs those, not param recalc).
-        let is_cte = sp.subLinkType == ::types_nodes::primnodes::SubLinkType::CTE_SUBLINK;
         for pid in sp.setParam.iter() {
             if !is_cte {
                 estate.es_param_exec_vals[pid as usize].exec_plan = true;
@@ -482,16 +505,17 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             ::instrument::instr_end_loop(&mut estate.es_instrumentation[w.instr_idx as usize]);
             return exec_re_scan_with_chg(&mut w.inner, plan, estate, chg);
         }
+        // ExecReScanResult: the outer rescan waits while its chgParam is
+        // pending, so a false one-time filter never runs the child.
         PlanStateNode::Result(rs) => {
             rs.rs_done = false;
             rs.rs_checkqual = rs.resconstantqual.is_some();
             if let Some(outer) = rs.outer.as_deref_mut() {
-                exec_re_scan_with_chg(
-                    outer,
-                    base.lefttree.expect("Result outer plan"),
-                    estate,
-                    chg,
-                )?;
+                let outer_plan = base.lefttree.expect("Result outer plan");
+                accumulate_outer_chg(&mut rs.outer_chg, outer_plan, estate, chg, -1)?;
+                if rs.outer_chg.is_empty() {
+                    exec_re_scan(outer, estate)?;
+                }
             }
         }
         PlanStateNode::ProjectSet(ps) => {
@@ -785,15 +809,33 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
         PlanStateNode::Append(a) => {
             let a = &mut **a;
             // Async requests are reset (drained) before the subplans rescan.
+            let append_plan: &'mcx types_nodes::plannodes::Append<'mcx> = a.state.plan;
             ::nodeappend::exec_rescan_append_chg(
                 &mut a.state,
                 estate,
-                &mut crate::procnode::AppendChildrenDriver { substates: &mut a.substates },
+                &mut crate::procnode::AppendChildrenDriver {
+                    substates: &mut a.substates,
+                    pending_chg: &mut a.pending_chg,
+                    subplan_origin: &a.subplan_origin,
+                    subplans: &append_plan.appendplans,
+                },
                 chg,
             )?;
+            // A child with pending chgParam is rescanned by its first
+            // ExecProcNode/ExecAsyncRequest, so a pruned child never
+            // evaluates its runtime keys.
             let subplans = &plan.as_append().expect("Append plan").appendplans;
-            for (sub, &origin) in a.substates.iter_mut().zip(a.subplan_origin.iter()) {
-                exec_re_scan_with_chg(sub, subplans.nth(origin as usize), estate, chg)?;
+            for ((sub, &origin), pending) in a
+                .substates
+                .iter_mut()
+                .zip(a.subplan_origin.iter())
+                .zip(a.pending_chg.iter_mut())
+            {
+                let sub_plan = subplans.nth(origin as usize);
+                accumulate_outer_chg(pending, sub_plan, estate, chg, -1)?;
+                if pending.is_empty() {
+                    exec_re_scan(sub, estate)?;
+                }
             }
         }
         PlanStateNode::MergeAppend(m) => {

@@ -28,6 +28,9 @@ pub struct ResultState<'mcx> {
     pub resconstantqual: Option<::mcx::PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>>,
     pub rs_done: bool,
     pub rs_checkqual: bool,
+    /// C outerPlan->chgParam: a pending child rescan, applied at the first
+    /// pull after the one-time filter passes.
+    pub outer_chg: ::types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 /// `ExecInitResult` (nodeResult.c).
@@ -94,6 +97,7 @@ pub fn exec_init_result<'mcx>(
         resconstantqual,
         rs_done: false,
         rs_checkqual,
+        outer_chg: ::types_nodes::bitmapset::Bitmapset::empty(),
     })
 }
 
@@ -119,6 +123,14 @@ pub fn exec_result<'mcx>(
     }
 
     if let Some(outer) = node.outer.as_deref_mut() {
+        if !node.outer_chg.is_empty() {
+            let chg = core::mem::replace(
+                &mut node.outer_chg,
+                ::types_nodes::bitmapset::Bitmapset::empty(),
+            );
+            let outer_plan = node.ps.plan.lefttree.expect("Result outer plan");
+            crate::execami::exec_re_scan_with_chg(outer, outer_plan, estate, &chg)?;
+        }
         let Some(outer_slot) = exec_proc_node(outer, estate)? else {
             return Ok(None);
         };
@@ -259,5 +271,5 @@ pub fn exec_end_result<'mcx>(
 
 // resconstantqual exempt: an ExprState (fn_extra memos); release_owned takes it.
 ::mcx::forget_safe_struct!(
-    ResultState<'_> { ps, outer, rs_done, rs_checkqual; resconstantqual },
+    ResultState<'_> { ps, outer, rs_done, rs_checkqual, outer_chg; resconstantqual },
 );
