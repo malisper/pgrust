@@ -163,7 +163,7 @@ pub(crate) fn plan_foreign_modify<'mcx>(
             values_end_len = deparse::deparse_insert_sql(
                 &mut sql,
                 mcx,
-                run,
+                Some(run),
                 rte,
                 rti,
                 &rel,
@@ -411,38 +411,13 @@ pub(crate) fn begin_foreign_modify<'mcx>(
         }
     }
 
-    // Snapshot what we need from the relation before touching connections.
-    let (rd_id, attin, attgenerated, out_fn_oids) = {
-        let rel = estate.es_relations[(rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let attin = AttInMeta::build(rel.name(), &rel.rd_att)?;
-        let mut gens = Vec::with_capacity(target_attrs.len());
-        let mut outs = Vec::new();
-        for &attnum in &target_attrs {
-            let att = rel.rd_att.attr(attnum as usize - 1);
-            debug_assert!(!att.attisdropped);
-            gens.push(att.attgenerated != 0);
-            if att.attgenerated == 0 {
-                outs.push(att.atttypid);
-            }
-        }
-        (rel.rd_id, attin, gens, outs)
-    };
-
-    let table = foreigncmds::foreign::GetForeignTable(mcx, rd_id)?;
-    let user = foreigncmds::foreign::GetUserMapping(mcx, userid, table.serverid)?;
-    let conn_key = connection::get_connection(mcx, &user, true)?;
-
+    let rel = estate.es_relations[(rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
     let operation = node.operation;
 
     // GetForeignModifyBatchSize (folded into begin: the option value, gated
     // by RETURNING / WCO / row triggers, clamped by the 65535-param limit).
-    let p_nums = target_attrs
-        .iter()
-        .zip(attgenerated.iter())
-        .filter(|&(_, &g)| !g)
-        .count();
     let batch_size = if operation != CmdType::CMD_INSERT {
         1
     } else {
@@ -453,20 +428,19 @@ pub(crate) fn begin_foreign_modify<'mcx>(
                 .as_list()
                 .map(|l| l.is_nil())
                 .unwrap_or(true);
-        let has_insert_row_triggers = {
-            let rel = estate.es_relations[(rti - 1) as usize]
-                .as_ref()
-                .expect("result relation opened");
-            rel.rd_hastriggers
-                && relcache_seams::relation_get_trigger_desc::call(rel.rd_id)?
-                    .is_some_and(|t| t.trig_insert_before_row || t.trig_insert_after_row)
-        };
+        let has_insert_row_triggers = rel.rd_hastriggers
+            && relcache_seams::relation_get_trigger_desc::call(rel.rd_id)?
+                .is_some_and(|t| t.trig_insert_before_row || t.trig_insert_after_row);
         // C gates on ri_projectReturning — any local RETURNING list, whether
         // or not the remote statement returns columns (postgres_fdw.c:2070).
         if local_returning || has_wco || has_insert_row_triggers || target_attrs.is_empty() {
             1
         } else {
-            let opt = get_batch_size_option(mcx, rd_id)?;
+            let p_nums = target_attrs
+                .iter()
+                .filter(|&&a| rel.rd_att.attr(a as usize - 1).attgenerated == 0)
+                .count();
+            let opt = get_batch_size_option(mcx, rel.rd_id)?;
             if p_nums > 0 {
                 opt.min((65535 / p_nums) as i32).max(1)
             } else {
@@ -474,16 +448,71 @@ pub(crate) fn begin_foreign_modify<'mcx>(
             }
         }
     };
+    let subplan_tlist = (operation == CmdType::CMD_UPDATE || operation == CmdType::CMD_DELETE)
+        .then(|| {
+            let subplan = node
+                .plan
+                .lefttree
+                .expect("ModifyTable has a subplan")
+                .as_plan()
+                .expect("plan node");
+            &subplan.targetlist
+        });
+    Ok(Some(create_foreign_modify(
+        mcx,
+        userid,
+        rel,
+        rti,
+        operation,
+        subplan_tlist,
+        query,
+        target_attrs,
+        values_end,
+        has_returning,
+        retrieved_attrs,
+        batch_size,
+        node.canSetTag,
+    )?))
+}
+
+// create_foreign_modify (postgres_fdw.c:3891): the per-relation modify state
+// shared by BeginForeignModify and BeginForeignInsert.
+#[allow(clippy::too_many_arguments)]
+fn create_foreign_modify<'mcx>(
+    mcx: Mcx<'mcx>,
+    userid: Oid,
+    rel: &types_rel::Relation<'mcx>,
+    rti: u32,
+    operation: CmdType,
+    subplan_tlist: Option<&NodeList<'mcx>>,
+    query: String,
+    target_attrs: Vec<i32>,
+    values_end: i32,
+    has_returning: bool,
+    retrieved_attrs: Vec<i32>,
+    batch_size: i32,
+    can_set_tag: bool,
+) -> PgResult<Box<dyn core::any::Any>> {
+    let attin = AttInMeta::build(rel.name(), &rel.rd_att)?;
+    let mut attgenerated = Vec::with_capacity(target_attrs.len());
+    let mut out_fn_oids = Vec::new();
+    for &attnum in &target_attrs {
+        let att = rel.rd_att.attr(attnum as usize - 1);
+        debug_assert!(!att.attisdropped);
+        attgenerated.push(att.attgenerated != 0);
+        if att.attgenerated == 0 {
+            out_fn_oids.push(att.atttypid);
+        }
+    }
+    let table = foreigncmds::foreign::GetForeignTable(mcx, rel.rd_id)?;
+    let user = foreigncmds::foreign::GetUserMapping(mcx, userid, table.serverid)?;
+    let conn_key = connection::get_connection(mcx, &user, true)?;
+    let p_nums = attgenerated.iter().filter(|&&g| !g).count();
     let mut p_flinfo: Vec<FmgrInfo> = Vec::with_capacity(out_fn_oids.len() + 1);
     let mut ctid_attno: i16 = 0;
     if operation == CmdType::CMD_UPDATE || operation == CmdType::CMD_DELETE {
-        let subplan = node
-            .plan
-            .lefttree
-            .expect("ModifyTable has a subplan")
-            .as_plan()
-            .expect("plan node");
-        ctid_attno = exec_find_junk_attribute_in_tlist(&subplan.targetlist, "ctid");
+        let tlist = subplan_tlist.expect("UPDATE/DELETE has a subplan");
+        ctid_attno = exec_find_junk_attribute_in_tlist(tlist, "ctid");
         if ctid_attno <= 0 {
             return Err(Box::new(PgError::error("could not find junk ctid column")));
         }
@@ -497,8 +526,7 @@ pub(crate) fn begin_foreign_modify<'mcx>(
             p_flinfo.push(fmgr_seams::fmgr_info::call(out_fn)?);
         }
     }
-
-    Ok(Some(Box::new(PgFdwModifyState {
+    Ok(Box::new(PgFdwModifyState {
         conn_key,
         rti,
         p_name: None,
@@ -515,12 +543,114 @@ pub(crate) fn begin_foreign_modify<'mcx>(
         has_returning,
         retrieved_attrs,
         attin: has_returning.then_some(attin),
-        can_set_tag: node.canSetTag,
+        can_set_tag,
         ctid_attno,
         p_flinfo,
         temp_mcx: mcx::MemoryContext::new_bump("postgres_fdw temporary data"),
         returning_mcx: mcx::MemoryContext::new_bump("postgres_fdw returning data"),
-    })))
+    }))
+}
+
+// postgresBeginForeignInsert (postgres_fdw.c:2157): a routed foreign
+// partition transmits every non-dropped column; the INSERT is deparsed
+// against a copy of the routing root's RTE naming the leaf. Batching is not
+// modeled on this path (batch_size = 1).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn begin_foreign_insert<'mcx>(
+    node: &'mcx ModifyTable<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    rte_rti: u32,
+    var_rti: u32,
+    returning_list: &NodeList<'mcx>,
+    wco_list: &NodeList<'mcx>,
+    is_update_target: bool,
+) -> PgResult<Option<Box<dyn core::any::Any>>> {
+    let mcx = estate.es_query_cxt;
+    if node.operation == CmdType::CMD_UPDATE && is_update_target {
+        return Err(Box::new(
+            PgError::error(format!(
+                "cannot route tuples into foreign table to be updated \"{}\"",
+                rel.name()
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    let mut target_attrs: Vec<i32> = Vec::new();
+    for attnum in 1..=rel.rd_att.natts as usize {
+        if !rel.rd_att.attr(attnum - 1).attisdropped {
+            target_attrs.push(attnum as i32);
+        }
+    }
+    let do_nothing = if node.onConflictAction == OnConflictAction::ONCONFLICT_NOTHING as u32 {
+        true
+    } else if node.onConflictAction == OnConflictAction::ONCONFLICT_NONE as u32
+        || node.onConflictAction == 0
+    {
+        false
+    } else {
+        // postgres_fdw.c:2202, elog(ERROR).
+        return Err(Box::new(PgError::error(format!(
+            "unexpected ON CONFLICT specification: {}",
+            node.onConflictAction
+        ))));
+    };
+    let rte = estate.exec_rt_fetch(rte_rti);
+    let mut userid = miscinit::GetUserId();
+    if rte.perminfoindex > 0 {
+        if let Some(pis) = estate.es_rteperminfos {
+            let pi = pis
+                .nth(rte.perminfoindex as usize - 1)
+                .as_rte_permission_info()
+                .expect("permInfos cell");
+            if pi.checkAsUser != InvalidOid {
+                userid = pi.checkAsUser;
+            }
+        }
+    }
+    // SAFETY: shallow copy of the arena RTE; only relid/relkind change and
+    // its shared subtrees are read-only (rewriteHandler's view-arm idiom).
+    let mut leaf_rte = core::mem::ManuallyDrop::new(unsafe { core::ptr::read(rte) });
+    leaf_rte.relid = rel.rd_id;
+    leaf_rte.relkind = types_rel::RELKIND_FOREIGN_TABLE;
+    let trig_after_row = rel.rd_hastriggers
+        && relcache_seams::relation_get_trigger_desc::call(rel.rd_id)?
+            .is_some_and(|t| t.trig_insert_after_row);
+    let wco: Vec<Node<'mcx>> = wco_list.iter().collect();
+    let returning: Vec<Node<'mcx>> = returning_list.iter().collect();
+    let mut sql: PgString<'mcx> = PgString::new_in(mcx);
+    let mut retrieved_attrs: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    let values_end_len = deparse::deparse_insert_sql(
+        &mut sql,
+        mcx,
+        None,
+        &leaf_rte,
+        var_rti as i32,
+        rel,
+        &target_attrs,
+        do_nothing,
+        trig_after_row,
+        &wco,
+        &returning,
+        &mut retrieved_attrs,
+    )?;
+    let retrieved: Vec<i32> = retrieved_attrs.iter().copied().collect();
+    let has_returning = !retrieved.is_empty();
+    Ok(Some(create_foreign_modify(
+        mcx,
+        userid,
+        rel,
+        rte_rti,
+        CmdType::CMD_INSERT,
+        None,
+        sql.as_str().to_string(),
+        target_attrs,
+        values_end_len,
+        has_returning,
+        retrieved,
+        1,
+        node.canSetTag,
+    )?))
 }
 
 // OutputFunctionCall through the per-call scratch, copied out as a String.

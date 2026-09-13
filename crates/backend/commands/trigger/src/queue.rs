@@ -44,6 +44,10 @@ struct AfterTriggerEvent {
     event: u32,
     ctid1: ItemPointerData,
     ctid2: ItemPointerData,
+    // C ate_flags' AFTER_TRIGGER_FDW_FETCH (1) / AFTER_TRIGGER_FDW_REUSE (2):
+    // a foreign table's row event reads its tuples from the FDW spool, not
+    // by ctid; 0 = heap event.
+    fdw: u8,
     tgoid: Oid,
     relid: Oid,
     firing_id: CommandId,
@@ -354,6 +358,96 @@ thread_local! {
     static TRANS_STACK: RefCell<Vec<SavedTrans>> = const { RefCell::new(Vec::new()) };
     // AfterTriggersQueryData.tables, per query depth.
     static TRANS_TABLES: RefCell<Vec<Vec<TransTable>>> = const { RefCell::new(Vec::new()) };
+    // AfterTriggersQueryData.fdw_tuplestore per query depth: the foreign-table
+    // row images FDW_FETCH events consume in queue order (C spools them
+    // through a work_mem tuplestore; these stay in memory until query end).
+    static FDW_TUPLES: RefCell<Vec<std::collections::VecDeque<FdwImage>>> =
+        const { RefCell::new(Vec::new()) };
+    // C trig_tuple_slot1/2 across one firing loop: the last FDW_FETCH result,
+    // reused by the FDW_REUSE events queued for the same row.
+    static FDW_LAST: RefCell<Option<(FdwImage, Option<FdwImage>)>> = const { RefCell::new(None) };
+}
+
+// A foreign row's heap-tuple image, 8-byte aligned (the tuplestore's minimal
+// tuple loses system columns; so does this — t_self stays invalid).
+#[derive(Clone)]
+struct FdwImage {
+    words: Vec<u64>,
+    t_len: u32,
+    tableoid: Oid,
+}
+
+impl FdwImage {
+    fn capture(t: &HeapTupleData<'_>) -> Self {
+        let len = t.t_len as usize;
+        let mut words = vec![0u64; len.div_ceil(8)];
+        // SAFETY: t_len bytes live at header_ptr; words holds at least len bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(t.header_ptr(), words.as_mut_ptr().cast::<u8>(), len)
+        };
+        FdwImage { words, t_len: t.t_len, tableoid: t.t_tableOid }
+    }
+
+    fn tuple(&self) -> HeapTupleData<'_> {
+        // SAFETY: a t_len-byte heap tuple image, MAXALIGN'd in words.
+        unsafe {
+            HeapTupleData::from_raw_parts(
+                self.words.as_ptr().cast::<u8>(),
+                self.t_len,
+                ItemPointerData::default(),
+                self.tableoid,
+            )
+        }
+    }
+}
+
+fn spool_fdw_tuples(
+    d: usize,
+    old_tup: Option<&HeapTupleData<'_>>,
+    new_tup: Option<&HeapTupleData<'_>>,
+) {
+    FDW_TUPLES.with(|t| {
+        let mut v = t.borrow_mut();
+        while v.len() <= d {
+            v.push(std::collections::VecDeque::new());
+        }
+        if let Some(o) = old_tup {
+            v[d].push_back(FdwImage::capture(o));
+        }
+        if let Some(n) = new_tup {
+            v[d].push_back(FdwImage::capture(n));
+        }
+    });
+}
+
+// AfterTriggerExecute's AFTER_TRIGGER_FDW_FETCH / FDW_REUSE arms
+// (trigger.c:4387-4402): FETCH consumes one image (two for UPDATE) from this
+// depth's spool; REUSE takes the previous FETCH's.
+fn fdw_event_tuples(fdw: u8, is_update: bool) -> PgResult<(FdwImage, Option<FdwImage>)> {
+    if fdw == 1 {
+        let d = QUERY_DEPTH.with(|c| c.get()).max(0) as usize;
+        let got = FDW_TUPLES.with(|t| {
+            let mut v = t.borrow_mut();
+            let q = v.get_mut(d)?;
+            let t1 = q.pop_front()?;
+            let t2 = if is_update { Some(q.pop_front()?) } else { None };
+            Some((t1, t2))
+        });
+        let Some(pair) = got else {
+            return Err(fetch_failed(if is_update { 2 } else { 1 }));
+        };
+        FDW_LAST.with(|l| *l.borrow_mut() = Some(pair.clone()));
+        return Ok(pair);
+    }
+    FDW_LAST.with(|l| l.borrow().clone()).ok_or_else(|| fetch_failed(1))
+}
+
+fn free_fdw_tuples(d: usize) {
+    FDW_TUPLES.with(|t| {
+        if let Some(q) = t.borrow_mut().get_mut(d) {
+            q.clear();
+        }
+    });
 }
 
 fn stmt_cmd_type(op: u32) -> CmdType {
@@ -525,6 +619,7 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> PgResu
                         event: ev.event,
                         ctid1: ev.ctid1,
                         ctid2: ev.ctid2,
+                        fdw: ev.fdw,
                         tgoid: ev.tgoid,
                         relid: ev.relid,
                         firing_id: 0,
@@ -585,7 +680,7 @@ fn invoke_events(
                 let ev = &evs[i];
                 if ev.flags & AFTER_TRIGGER_IN_PROGRESS != 0 && ev.firing_id == firing_id {
                     return Some((
-                        ev.ctid1, ev.ctid2, ev.event, ev.tgoid, ev.relid, ev.table_idx,
+                        ev.ctid1, ev.ctid2, ev.fdw, ev.event, ev.tgoid, ev.relid, ev.table_idx,
                         ev.src_part, ev.dst_part, ev.rolid,
                         ev.modifiedcols.clone(),
                         ev.desc.clone(),
@@ -596,8 +691,8 @@ fn invoke_events(
             None
         });
         let Some((
-            ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part, rolid, modifiedcols,
-            desc,
+            ctid1, ctid2, fdw, event, tgoid, relid, table_idx, src_part, dst_part, rolid,
+            modifiedcols, desc,
         )) = next
         else {
             break;
@@ -607,7 +702,7 @@ fn invoke_events(
         // set live only for one firing. Nothing AfterTriggerExecute returns
         // points into the scratch, so the reset follows the call.
         AfterTriggerExecute(
-            scratch.mcx(), ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part,
+            scratch.mcx(), ctid1, ctid2, fdw, event, tgoid, relid, table_idx, src_part, dst_part,
             rolid, modifiedcols.as_deref(), desc.as_ref(), instr.as_deref_mut(),
         )?;
         scratch.reset();
@@ -691,6 +786,7 @@ pub fn AfterTriggerEndQuery(mut instr: Option<&mut (dyn AfterTriggerInstrSink + 
         st.truncate(d);
     });
     free_tables_at_depth(d);
+    free_fdw_tuples(d);
     QUERY_DEPTH.with(|c| c.set(depth - 1));
     Ok(())
 }
@@ -789,6 +885,7 @@ pub fn AfterTriggerEndSubXact(is_commit: bool) -> PgResult<()> {
     let keep = (saved.query_depth + 1).max(0) as usize;
     for d in keep..ndepths {
         free_tables_at_depth(d);
+        free_fdw_tuples(d);
     }
     XACT_EVENTS.with(|s| s.borrow_mut().truncate(saved.events_len));
     if saved.state_saved {
@@ -858,6 +955,7 @@ fn AfterTriggerExecute<'mcx>(
     mcx: Mcx<'mcx>,
     ctid1: ItemPointerData,
     ctid2: ItemPointerData,
+    fdw: u8,
     event: u32,
     tgoid: Oid,
     relid: Oid,
@@ -971,19 +1069,36 @@ fn AfterTriggerExecute<'mcx>(
         None => (&rel, &rel),
     };
     let snap = SnapshotData::sentinel(mcx, SNAPSHOT_ANY);
-    let r1 = heapam::heap_fetch(fetch1_rel, &snap, ctid1, false)?;
-    if !r1.found {
-        return Err(fetch_failed(1));
-    }
-    let mut t1 = r1.tuple().expect("found fetch has a tuple");
     let is_update = event & TRIGGER_EVENT_OPMASK == TRIGGER_EVENT_UPDATE;
-    let r2;
-    let mut t2 = if is_update {
-        r2 = heapam::heap_fetch(fetch2_rel, &snap, ctid2, false)?;
-        if !r2.found {
-            return Err(fetch_failed(2));
+    let (r1, r2, fdw_imgs) = if fdw == 0 {
+        let r1 = heapam::heap_fetch(fetch1_rel, &snap, ctid1, false)?;
+        if !r1.found {
+            return Err(fetch_failed(1));
         }
-        Some(r2.tuple().expect("found fetch has a tuple"))
+        let r2 = if is_update {
+            let r2 = heapam::heap_fetch(fetch2_rel, &snap, ctid2, false)?;
+            if !r2.found {
+                return Err(fetch_failed(2));
+            }
+            Some(r2)
+        } else {
+            None
+        };
+        (Some(r1), r2, None)
+    } else {
+        (None, None, Some(fdw_event_tuples(fdw, is_update)?))
+    };
+    let mut t1 = match (&r1, &fdw_imgs) {
+        (Some(r), _) => r.tuple().expect("found fetch has a tuple"),
+        (None, Some((i1, _))) => i1.tuple(),
+        _ => unreachable!("AfterTriggerExecute: no tuple source"),
+    };
+    let mut t2 = if is_update {
+        Some(match (&r2, &fdw_imgs) {
+            (Some(r), _) => r.tuple().expect("found fetch has a tuple"),
+            (None, Some((_, Some(i2)))) => i2.tuple(),
+            _ => unreachable!("AfterTriggerExecute: no tuple2 source"),
+        })
     } else {
         None
     };
@@ -1099,6 +1214,8 @@ fn after_trigger_save_event<'mcx>(
     }
     let d = depth as usize;
     let partitioned = rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE;
+    let foreign = rel.rd_rel.relkind == RELKIND_FOREIGN_TABLE;
+    let mut fdw_queued = false;
     for (tgindx, trigger) in trigdesc.triggers.iter().enumerate() {
         if !trigger_type_matches(trigger.tgtype, tgtype_event) {
             continue;
@@ -1171,11 +1288,22 @@ fn after_trigger_save_event<'mcx>(
             u32::MAX
         };
         let (src_part, dst_part) = cp_parts.unwrap_or_default();
+        // trigger.c:6430-6440: the first event of a foreign row fetches its
+        // spooled tuples, the rest of the row's events reuse them.
+        let fdw = if !foreign {
+            0
+        } else if fdw_queued {
+            2
+        } else {
+            fdw_queued = true;
+            1
+        };
         with_list(EvList::Query(d), |evs| {
             evs.push(AfterTriggerEvent {
                 flags: 0,
                 ctid1,
                 ctid2,
+                fdw,
                 event: ats_event,
                 tgoid: trigger.tgoid,
                 relid: rel.rd_id,
@@ -1190,7 +1318,51 @@ fn after_trigger_save_event<'mcx>(
             });
         });
     }
+    // trigger.c:6575-6580: spool the foreign tuple(s) behind the events.
+    if fdw_queued {
+        spool_fdw_tuples(d, old_tup, new_tup);
+    }
     Ok(())
+}
+
+// ExecAR{Insert,Update,Delete}Triggers for a foreign table: no ctid to
+// refetch, the executor hands the row images (C's oldslot/newslot) and
+// AfterTriggerSaveEvent spools them. Transition capture on a foreign table
+// is refused by the caller (check_foreign_transition_capture).
+#[allow(clippy::too_many_arguments)]
+pub fn ExecARRowTriggersFdw<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    trigdesc: &Rc<TriggerDesc<'static>>,
+    event: u32,
+    old_tup: Option<&HeapTupleData<'_>>,
+    new_tup: Option<&HeapTupleData<'_>>,
+    when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
+) -> PgResult<()> {
+    let tgtype_event = match event {
+        TRIGGER_EVENT_INSERT => TRIGGER_TYPE_INSERT,
+        TRIGGER_EVENT_UPDATE => TRIGGER_TYPE_UPDATE,
+        TRIGGER_EVENT_DELETE => TRIGGER_TYPE_DELETE,
+        other => unreachable!("ExecARRowTriggersFdw: event {other:#x}"),
+    };
+    after_trigger_save_event(
+        mcx,
+        rel,
+        trigdesc,
+        event,
+        tgtype_event,
+        ItemPointerData::default(),
+        ItemPointerData::default(),
+        old_tup,
+        new_tup,
+        &[],
+        None,
+        when,
+        false,
+        None,
+        modified_cols,
+    )
 }
 
 // cancel_prior_stmt_triggers (trigger.c:2929-3010): cancel the AS set this
@@ -1310,6 +1482,7 @@ fn save_stmt_event<'mcx>(
                 flags: 0,
                 ctid1: ItemPointerData::default(),
                 ctid2: ItemPointerData::default(),
+                fdw: 0,
                 event: ats_event,
                 tgoid: trigger.tgoid,
                 relid: rel.rd_id,
@@ -1759,6 +1932,7 @@ mod tests {
                 flags: 0,
                 ctid1: ItemPointerData::default(),
                 ctid2: ItemPointerData::default(),
+                fdw: 0,
                 event: TRIGGER_EVENT_UPDATE
                     | TRIGGER_EVENT_ROW
                     | AFTER_TRIGGER_DEFERRABLE

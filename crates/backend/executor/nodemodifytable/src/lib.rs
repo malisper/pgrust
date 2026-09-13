@@ -76,7 +76,26 @@ pub struct FdwModifyRoutine {
     /// Flush provider-buffered batch inserts (C ExecPendingInserts' per-rel
     /// half); None = provider never buffers.
     pub flush: Option<for<'mcx> fn(&mut dyn core::any::Any, &mut EStateData<'mcx>) -> PgResult<()>>,
+    /// BeginForeignInsert: a routed foreign partition's insert state; None =
+    /// the provider routes with no ri_FdwState (C's NULL callback).
+    pub begin_insert: Option<FdwBeginInsert>,
 }
+
+/// BeginForeignInsert's arguments: the plan, the routed foreign leaf, the RT
+/// index whose entry (copied, relid swapped) describes the leaf and carries
+/// the perminfo, the RT index the leaf's RETURNING/WCO Vars use, those lists
+/// translated to leaf attnos, and whether the leaf is also an UPDATE subplan
+/// result relation (postgresBeginForeignInsert's aux_fmstate guard).
+pub type FdwBeginInsert = for<'mcx> fn(
+    &'mcx ModifyTable<'mcx>,
+    &mut EStateData<'mcx>,
+    &Relation<'mcx>,
+    u32,
+    u32,
+    &types_nodes::list::NodeList<'mcx>,
+    &types_nodes::list::NodeList<'mcx>,
+    bool,
+) -> PgResult<Option<Box<dyn core::any::Any>>>;
 
 /// ExplainForeignModify surface: (fdwPrivLists[j], relid, has_wco, flags,
 /// emit). Plan-level — callable from EXPLAIN without executor state.
@@ -174,9 +193,10 @@ pub struct ResultRelExec<'mcx> {
     // C ri_ChildToRootMap + ri_ChildToRootMapValid (ExecGetChildToRootMap):
     // outer None = unresolved, inner None = no conversion needed.
     child_to_root: Option<Option<mcx::PgVec<'mcx, i16>>>,
-    // ri_GeneratedExprsI/U collapsed to one set: the UPDATE updatedCols skip
-    // is perf-only (values are immutable functions of non-generated columns).
+    // ri_GeneratedExprsI / ri_GeneratedExprsU: the UPDATE set skips generated
+    // columns depending on no target column (ExecInitGenerated).
     generated_exprs: Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
+    generated_exprs_u: Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
     // ri_GenVirtualNotNullConstraintExprs.
     virtual_nn_exprs: Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>,
     // ri_MergeActions + per-rel merge slots (ExecInitMerge).
@@ -252,6 +272,11 @@ pub struct ModifyTableState<'mcx> {
     leaf_virtual_nn: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>>,
     // ri_GeneratedExprsI per leaf: partitions may override generation exprs.
     leaf_generated: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>>,
+    leaf_generated_u: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>>,
+    // C ExecInitRoutingInfo: a foreign leaf's ri_FdwRoutine and (once begun,
+    // outer Some) its BeginForeignInsert ri_FdwState; ended with the node.
+    leaf_fdw_kind: mcx::PgVec<'mcx, Option<types_nodes::FdwKind>>,
+    leaf_fdw_state: mcx::PgVec<'mcx, Option<Option<Box<dyn core::any::Any>>>>,
     // ri_PartitionTupleSlot per remapped leaf (estate slot, leaf layout) and
     // the leaf's ri_PartitionCheckExpr.
     leaf_slots: mcx::PgVec<'mcx, Option<ExecSlotId>>,
@@ -902,6 +927,9 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_checks: mcx::PgVec::new_in(qcx),
         leaf_virtual_nn: mcx::PgVec::new_in(qcx),
         leaf_generated: mcx::PgVec::new_in(qcx),
+        leaf_generated_u: mcx::PgVec::new_in(qcx),
+        leaf_fdw_kind: mcx::PgVec::new_in(qcx),
+        leaf_fdw_state: mcx::PgVec::new_in(qcx),
         leaf_slots: mcx::PgVec::new_in(qcx),
         leaf_partition_check: mcx::PgVec::new_in(qcx),
         leaf_arbiters: mcx::PgVec::new_in(qcx),
@@ -970,30 +998,6 @@ fn init_result_rel<'mcx>(
         };
         if list_index.is_some() {
             check_valid_result_rel(mcx, rel, node, td.as_deref(), fdw_kind)?;
-        }
-        // C runs row triggers on foreign tables through the wholerow/slot
-        // machinery; that lane is unported — refuse cleanly, never mis-fire.
-        if fdw_kind.is_some() {
-            if let Some(td) = td.as_deref() {
-                let has_row_trigger = td.trig_insert_before_row
-                    || td.trig_insert_after_row
-                    || td.trig_insert_instead_row
-                    || td.trig_update_before_row
-                    || td.trig_update_after_row
-                    || td.trig_update_instead_row
-                    || td.trig_delete_before_row
-                    || td.trig_delete_after_row
-                    || td.trig_delete_instead_row;
-                if has_row_trigger {
-                    return Err(Box::new(
-                        PgError::error(format!(
-                            "row-level triggers on foreign table \"{}\" are not yet supported",
-                            rel.name()
-                        ))
-                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-                    ));
-                }
-            }
         }
         (td, rel.rd_rel.relkind, rel.rd_id)
     };
@@ -1326,6 +1330,7 @@ fn init_result_rel<'mcx>(
         all_updated_cols: None,
         child_to_root: None,
         generated_exprs: None,
+        generated_exprs_u: None,
         virtual_nn_exprs: None,
         merge,
         ri_FdwRoutine: fdw_kind,
@@ -1347,6 +1352,385 @@ fn exec_find_junk_attribute_in_tlist(tlist: &types_nodes::NodeList<'_>, attr_nam
 }
 
 // CheckValidResultRel (execMain.c), plain-table + view + matview arms.
+// CheckValidResultRel's foreign-table arm (execMain.c:1123): the FDW must
+// supply the operation's ExecForeign* callback and IsForeignRelUpdatable
+// must allow it. Shared with ExecInitPartitionInfo's
+// CheckValidResultRel(leaf, CMD_INSERT) for routed foreign leaves.
+fn check_valid_foreign_result_rel<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    operation: CmdType,
+    kind: types_nodes::FdwKind,
+) -> PgResult<()> {
+    // MERGE on a foreign target is rejected in parse analysis / createplan,
+    // so the per-operation arms are exhaustive here (C's default: elog).
+    let (verb, not_allowed) = match operation {
+        CmdType::CMD_INSERT => ("insert into", "does not allow inserts"),
+        CmdType::CMD_UPDATE => ("update", "does not allow updates"),
+        CmdType::CMD_DELETE => ("delete from", "does not allow deletes"),
+        _ => panic!("CheckValidResultRel (execMain.c): {operation:?} on a foreign table"),
+    };
+    if fdw_modify_routine(kind).is_none() {
+        return Err(Box::new(
+            PgError::error(format!(
+                "cannot {verb} foreign table \"{}\"",
+                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    if let Some(mask) =
+        foreigncmds_seams::fdw_is_foreign_rel_updatable::call(mcx, kind, rel.rd_id)?
+    {
+        if mask & (1 << operation as i32) == 0 {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "foreign table \"{}\" {not_allowed}",
+                    String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+                ))
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ExecInitRoutingInfo's BeginForeignInsert leg (execPartition.c:1032): the
+// leaf's RETURNING list and WCO quals translated to its attnos, the RTE the
+// leaf's copy derives from (the routing root's, which carries the perminfo)
+// and the RT index those Vars use (the first subplan result relation's).
+fn begin_leaf_foreign_insert<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<()> {
+    let kind = mt.leaf_fdw_kind[idx].expect("foreign leaf");
+    let Some(begin) = fdw_modify_routine(kind).expect("admitted at init").begin_insert else {
+        mt.leaf_fdw_state[idx] = Some(None);
+        return Ok(());
+    };
+    let returning = leaf_returning_nodes(mt, estate, idx)?;
+    let wco = leaf_wco_quals(mt, estate, idx)?;
+    let var_rti = mt.rels[0].rti;
+    let rte_rti = mt.root.as_ref().map_or(var_rti, |r| r.rti);
+    let lrelid = mt.router.as_ref().expect("routed insert has a router").leaf_rel(idx).rd_id;
+    let is_update_target = mt
+        .rels
+        .iter()
+        .any(|r| r.rd_id == lrelid && (r.ri_FdwState.is_some() || r.ri_usesFdwDirectModify));
+    let node = mt.plan;
+    let state = {
+        let rel = mt.router.as_ref().expect("routed insert has a router").leaf_rel(idx);
+        begin(node, estate, rel, rte_rti, var_rti, &returning, &wco, is_update_target)?
+    };
+    mt.leaf_fdw_state[idx] = Some(state);
+    Ok(())
+}
+
+// ExecInitPartitionInfo's RETURNING leg as nodes: the first returningList
+// with Vars translated to the leaf's attnos (NIL without RETURNING).
+fn leaf_returning_nodes<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<types_nodes::list::NodeList<'mcx>> {
+    let node = mt.plan;
+    let mut mapped = types_nodes::list::NodeList::nil();
+    if node.returningLists.is_nil() {
+        return Ok(mapped);
+    }
+    let mcx = estate.es_query_cxt;
+    let first_rti = mt.rels[0].rti;
+    let first = estate.es_relations[(first_rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    let leaf = mt
+        .router
+        .as_ref()
+        .expect("routed insert has a router")
+        .leaf_rel(idx);
+    let attmap = tupdesc::build_attrmap_by_name_if_req(mcx, &leaf.rd_att, &first.rd_att, false)?;
+    let rlist = node
+        .returningLists
+        .nth(0)
+        .as_list()
+        .expect("returningLists cell is a List");
+    for tle_node in rlist {
+        let n = match &attmap {
+            None => tle_node,
+            Some(map) => {
+                rewrite_manip::map_variable_attnos(
+                    mcx,
+                    tle_node,
+                    first_rti as i32,
+                    0,
+                    map,
+                    leaf.rd_rel.reltype,
+                )?
+                .0
+            }
+        };
+        mapped.lappend(mcx, n)?;
+    }
+    Ok(mapped)
+}
+
+// The leaf-translated WITH CHECK OPTION quals (every clause of every
+// option): deparseInsertSql pulls their Vars into the remote RETURNING list.
+fn leaf_wco_quals<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<types_nodes::list::NodeList<'mcx>> {
+    let node = mt.plan;
+    let mut mapped = types_nodes::list::NodeList::nil();
+    if node.withCheckOptionLists.is_nil() {
+        return Ok(mapped);
+    }
+    let mcx = estate.es_query_cxt;
+    let first_rti = mt.rels[0].rti;
+    let first = estate.es_relations[(first_rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    let leaf = mt
+        .router
+        .as_ref()
+        .expect("routed insert has a router")
+        .leaf_rel(idx);
+    let attmap = tupdesc::build_attrmap_by_name_if_req(mcx, &leaf.rd_att, &first.rd_att, false)?;
+    let wlist = node
+        .withCheckOptionLists
+        .nth(0)
+        .as_list()
+        .expect("withCheckOptionLists cell is a List");
+    for wco_node in wlist {
+        let wco = wco_node.as_with_check_option().expect("WCO cell");
+        let qual = wco
+            .qual
+            .expect("planned WCO has a qual")
+            .as_list()
+            .expect("WCO qual is an implicit-AND List after preprocessing");
+        for q in qual {
+            let n = match &attmap {
+                None => q,
+                Some(map) => {
+                    rewrite_manip::map_variable_attnos(
+                        mcx,
+                        q,
+                        first_rti as i32,
+                        0,
+                        map,
+                        leaf.rd_rel.reltype,
+                    )?
+                    .0
+                }
+            };
+            mapped.lappend(mcx, n)?;
+        }
+    }
+    Ok(mapped)
+}
+
+// ExecInsert's ri_FdwRoutine arm (nodeModifyTable.c:922-1105) for a routed
+// foreign leaf: no local constraints or partition check, the FDW inserts the
+// leaf-format row; then the common tail (AR triggers, WCO_VIEW_CHECK,
+// es_processed).
+fn exec_insert_foreign_leaf<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    idx: usize,
+    slot_id: ExecSlotId,
+    work_slot: ExecSlotId,
+) -> PgResult<Option<ExecSlotId>> {
+    let mcx = estate.es_query_cxt;
+    // ExecARInsertTriggers' first check (trigger.c:2555-2562).
+    {
+        let capturing = mt
+            .transition_capture
+            .as_ref()
+            .is_some_and(|tc| tc.tcs_insert_new_table);
+        let rel = mt
+            .router
+            .as_ref()
+            .expect("routed insert has a router")
+            .leaf_rel(idx);
+        ::trigger::check_foreign_transition_capture(rel, capturing)?;
+    }
+    let rd_id = {
+        let ModifyTableState {
+            router,
+            leaf_generated,
+            ..
+        } = &mut *mt;
+        let rel = router
+            .as_ref()
+            .expect("routed insert has a router")
+            .leaf_rel(idx);
+        let slot = &mut estate.es_tupleTable[work_slot.0 as usize];
+        slot.base_mut().tts_tableOid = rel.rd_id;
+        if rel
+            .rd_att
+            .constr
+            .as_deref()
+            .is_some_and(|c| c.has_generated_stored)
+        {
+            exec_compute_stored_generated(mcx, &mut leaf_generated[idx], None, rel, slot)?;
+        }
+        rel.rd_id
+    };
+    let kind = mt.leaf_fdw_kind[idx].expect("foreign leaf");
+    let routine = fdw_modify_routine(kind).expect("admitted at init");
+    let inserted = {
+        let state = mt.leaf_fdw_state[idx]
+            .as_mut()
+            .and_then(|s| s.as_deref_mut())
+            .expect("BeginForeignInsert ran");
+        (routine.exec_insert)(state, estate, work_slot, slot_id)?
+    };
+    if !inserted {
+        return Ok(None);
+    }
+    estate.es_tupleTable[work_slot.0 as usize].base_mut().tts_tableOid = rd_id;
+    if work_slot != slot_id {
+        estate.es_tupleTable[slot_id.0 as usize].base_mut().tts_tableOid = rd_id;
+    }
+    ar_insert_triggers(mt, estate, work_slot, &[], Some(idx))?;
+    if mt.leaf_wco[idx].as_ref().is_some_and(|w| !w.is_empty()) {
+        let target_rti = mt.rel().rti;
+        let ecxt = mt.node_ecxt;
+        let ModifyTableState {
+            router, leaf_wco, ..
+        } = &mut *mt;
+        let rel = router
+            .as_ref()
+            .expect("routed insert has a router")
+            .leaf_rel(idx);
+        exec_view_check_options(
+            mcx,
+            estate,
+            ecxt,
+            leaf_wco[idx].as_mut().expect("checked"),
+            work_slot,
+            WcoRel::Leaf {
+                rel,
+                root_rti: target_rti,
+            },
+        )?;
+    }
+    if mt.canSetTag {
+        estate.es_processed += 1;
+    }
+    Ok(Some(slot_id))
+}
+
+// ExecAR{Insert,Update,Delete}Triggers on a foreign result relation or a
+// routed foreign leaf: the row images come from the executor's slots (the
+// remote RETURNING row for new, the wholerow junk for old) and the queue
+// spools them — there is no ctid to refetch.
+fn fdw_ar_row_triggers<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    event_op: u32,
+    old_slot: Option<ExecSlotId>,
+    new_slot: Option<ExecSlotId>,
+    leaf: Option<usize>,
+) -> PgResult<()> {
+    let td = match leaf {
+        None => mt.rel().trigdesc.clone(),
+        Some(ix) => resolve_leaf_trigdesc(mt, ix)?,
+    };
+    let Some(td) = td else {
+        return Ok(());
+    };
+    let fires = match event_op {
+        types_trigger::TRIGGER_EVENT_INSERT => td.trig_insert_after_row,
+        types_trigger::TRIGGER_EVENT_UPDATE => td.trig_update_after_row,
+        types_trigger::TRIGGER_EVENT_DELETE => td.trig_delete_after_row,
+        _ => false,
+    };
+    if !fires {
+        return Ok(());
+    }
+    let mcx = estate.es_query_cxt;
+    let per_tuple: core::ptr::NonNull<mcx::MemoryContext> =
+        core::ptr::NonNull::from(estate.get_per_tuple_memory().context());
+    // SAFETY: the per-tuple ExprContext lives in the estate for the whole query.
+    let row_mcx: mcx::Mcx<'mcx> = unsafe { per_tuple.as_ref() }.mcx();
+    let (raw_old, _old_owned) = match old_slot {
+        Some(id) => {
+            let (raw, owned) = slot_raw_tuple(estate, row_mcx, id)?;
+            (Some(raw), owned)
+        }
+        None => (None, None),
+    };
+    let (raw_new, _new_owned) = match new_slot {
+        Some(id) => {
+            let (raw, owned) = slot_raw_tuple(estate, row_mcx, id)?;
+            (Some(raw), owned)
+        }
+        None => (None, None),
+    };
+    let leaf_updated_cols = if event_op == types_trigger::TRIGGER_EVENT_UPDATE {
+        match leaf {
+            Some(ix) => Some(leaf_all_updated_cols(mt, estate, ix)?),
+            None => {
+                ensure_all_updated_cols(mt, estate, false)?;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let ModifyTableState {
+        rels,
+        cur,
+        root,
+        insert_target_root,
+        router,
+        leaf_trig_when,
+        ..
+    } = &mut *mt;
+    let r = cur_rel(rels, root, *insert_target_root, *cur);
+    let (rel, cache) = match leaf {
+        None => (
+            estate.es_relations[(r.rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened"),
+            &mut r.trig_when,
+        ),
+        Some(ix) => (
+            router
+                .as_ref()
+                .expect("routed insert has a router")
+                .leaf_rel(ix),
+            &mut leaf_trig_when[ix],
+        ),
+    };
+    let modified_cols = leaf_updated_cols.as_ref().or(r.all_updated_cols.as_ref());
+    let mut when = ::trigger::TriggerWhenEval {
+        mcx,
+        cache,
+        modified_cols,
+    };
+    // SAFETY (both): per-tuple images; the slots are not written while these live.
+    let old_t = raw_old.map(|(img, len, tid, oid)| unsafe {
+        types_tuple::HeapTupleData::from_raw_parts(img, len, tid, oid)
+    });
+    let new_t = raw_new.map(|(img, len, tid, oid)| unsafe {
+        types_tuple::HeapTupleData::from_raw_parts(img, len, tid, oid)
+    });
+    ::trigger::ExecARRowTriggersFdw(
+        mcx,
+        rel,
+        &td,
+        event_op,
+        old_t.as_ref(),
+        new_t.as_ref(),
+        Some(&mut when),
+        modified_cols,
+    )
+}
+
 fn check_valid_result_rel<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -1412,39 +1796,8 @@ fn check_valid_result_rel<'mcx>(
         return Ok(());
     }
     if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        // C: okay only if the FDW supports the operation. MERGE on a foreign
-        // target is rejected in parse analysis / createplan, so the
-        // per-operation arms are exhaustive here (C's default: elog).
-        let (verb, not_allowed) = match operation {
-            CmdType::CMD_INSERT => ("insert into", "does not allow inserts"),
-            CmdType::CMD_UPDATE => ("update", "does not allow updates"),
-            CmdType::CMD_DELETE => ("delete from", "does not allow deletes"),
-            _ => panic!("CheckValidResultRel (execMain.c): {operation:?} on a foreign table"),
-        };
         let kind = fdw_kind.expect("caller resolved the FdwKind for a foreign result rel");
-        if fdw_modify_routine(kind).is_none() {
-            return Err(Box::new(
-                PgError::error(format!(
-                    "cannot {verb} foreign table \"{}\"",
-                    String::from_utf8_lossy(rel.rd_rel.relname.name_str())
-                ))
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-            ));
-        }
-        if let Some(mask) =
-            foreigncmds_seams::fdw_is_foreign_rel_updatable::call(mcx, kind, rel.rd_id)?
-        {
-            if mask & (1 << operation as i32) == 0 {
-                return Err(Box::new(
-                    PgError::error(format!(
-                        "foreign table \"{}\" {not_allowed}",
-                        String::from_utf8_lossy(rel.rd_rel.relname.name_str())
-                    ))
-                    .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                ));
-            }
-        }
-        return Ok(());
+        return check_valid_foreign_result_rel(mcx, rel, operation, kind);
     }
     if rel.rd_rel.relkind != RELKIND_RELATION
         && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
@@ -1867,8 +2220,34 @@ pub fn mt_accept_row<'mcx>(
                     )?;
                 }
                 let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
-                fdw_prepare_new_slot(mt, estate, slot)?;
-                if exec_foreign_modify_row(mt, estate, CmdType::CMD_UPDATE, slot, plan_slot)? {
+                // ExecBRUpdateTriggers with fdw_trigtuple = the wholerow OLD
+                // row (nodeModifyTable.c:2455); a NULL return consumes the row.
+                let br_ok = !mt
+                    .rel()
+                    .trigdesc
+                    .as_ref()
+                    .is_some_and(|t| t.trig_update_before_row)
+                    || br_row_triggers(
+                        mt,
+                        estate,
+                        types_trigger::TRIGGER_TYPE_UPDATE,
+                        types_trigger::TRIGGER_EVENT_UPDATE,
+                        Some(old_slot),
+                        Some(slot),
+                        None,
+                    )?;
+                if br_ok {
+                    fdw_prepare_new_slot(mt, estate, CmdType::CMD_UPDATE, slot)?;
+                }
+                if br_ok && exec_foreign_modify_row(mt, estate, CmdType::CMD_UPDATE, slot, plan_slot)? {
+                    fdw_ar_row_triggers(
+                        mt,
+                        estate,
+                        types_trigger::TRIGGER_EVENT_UPDATE,
+                        Some(old_slot),
+                        Some(slot),
+                        None,
+                    )?;
                     if mt.canSetTag {
                         estate.es_processed += 1;
                     }
@@ -1906,9 +2285,46 @@ pub fn mt_accept_row<'mcx>(
             CmdType::CMD_DELETE if mt.rel().ri_FdwRoutine.is_some() => {
                 // ExecARDeleteTriggers' first check (trigger.c:2816-2823).
                 foreign_transition_capture_check(mt, estate, CmdType::CMD_DELETE)?;
+                // ExecDelete's fdw_trigtuple: the wholerow OLD row feeds the
+                // BR and AR delete triggers (nodeModifyTable.c:1579, 1660).
+                let td = mt.rel().trigdesc.clone();
+                let old_slot = if td
+                    .as_ref()
+                    .is_some_and(|t| t.trig_delete_before_row || t.trig_delete_after_row)
+                {
+                    let old_tup = fetch_wholerow_tuple(mt, estate, plan_slot)?;
+                    let id = ensure_trig_old_slot(mt, estate);
+                    let mcx = estate.es_query_cxt;
+                    exectuples::exec_force_store_heap_tuple(
+                        old_tup,
+                        &mut estate.es_tupleTable[id.0 as usize],
+                        mcx,
+                    )?;
+                    Some(id)
+                } else {
+                    None
+                };
+                let br_ok = !td.as_ref().is_some_and(|t| t.trig_delete_before_row)
+                    || br_row_triggers(
+                        mt,
+                        estate,
+                        types_trigger::TRIGGER_TYPE_DELETE,
+                        types_trigger::TRIGGER_EVENT_DELETE,
+                        old_slot,
+                        None,
+                        None,
+                    )?;
                 let ret_slot = ensure_returning_slot(mt, estate);
                 clear_slot(estate, ret_slot);
-                if exec_foreign_modify_row(mt, estate, CmdType::CMD_DELETE, ret_slot, plan_slot)? {
+                if br_ok && exec_foreign_modify_row(mt, estate, CmdType::CMD_DELETE, ret_slot, plan_slot)? {
+                    fdw_ar_row_triggers(
+                        mt,
+                        estate,
+                        types_trigger::TRIGGER_EVENT_DELETE,
+                        old_slot,
+                        None,
+                        None,
+                    )?;
                     let rd_id = mt.rel().rd_id;
                     {
                         let mcx = estate.es_query_cxt;
@@ -2185,11 +2601,7 @@ fn ensure_all_updated_cols<'mcx>(
     estate: &EStateData<'mcx>,
     for_root: bool,
 ) -> PgResult<()> {
-    let (this_rti, is_child) = if for_root {
-        (mt.root_rel().rti, false)
-    } else {
-        (mt.rel().rti, mt.root.is_some())
-    };
+    let this_rti = if for_root { mt.root_rel().rti } else { mt.rel().rti };
     {
         let r = if for_root { mt.root_rel() } else { mt.rel() };
         if r.all_updated_cols.is_some() {
@@ -2197,9 +2609,45 @@ fn ensure_all_updated_cols<'mcx>(
         }
     }
     let mcx = estate.es_query_cxt;
-    // GetResultRTEPermissionInfo (execUtils.c): a child result relation reads
-    // the root parent's RTE — the only one carrying a perminfo — and maps the
-    // column numbers through the root-to-child attrmap (ExecGetUpdatedCols).
+    let mut cols = exec_get_updated_cols(mt, estate, for_root)?;
+    {
+        let rel = estate.es_relations[(this_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let trigdesc = if for_root {
+            &mt.root_rel().trigdesc
+        } else {
+            &mt.rel().trigdesc
+        };
+        let trig_update_before_row = trigdesc
+            .as_ref()
+            .is_some_and(|td| td.trig_update_before_row);
+        add_generated_extra_updated_cols(mcx, rel, trig_update_before_row, &mut cols)?;
+    }
+    let r = if for_root {
+        mt.root_rel_mut()
+    } else {
+        mt.rel_mut()
+    };
+    r.all_updated_cols = Some(cols);
+    Ok(())
+}
+
+// ExecGetUpdatedCols (execUtils.c): the perminfo updatedCols. A child result
+// relation reads the root parent's RTE — the only one carrying a perminfo —
+// and maps the column numbers through the root-to-child attrmap
+// (GetResultRTEPermissionInfo).
+fn exec_get_updated_cols<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+    for_root: bool,
+) -> PgResult<types_nodes::Bitmapset<'mcx>> {
+    let (this_rti, is_child) = if for_root {
+        (mt.root_rel().rti, false)
+    } else {
+        (mt.rel().rti, mt.root.is_some())
+    };
+    let mcx = estate.es_query_cxt;
     let perminfo_rti = if is_child {
         mt.root_rel().rti
     } else {
@@ -2237,27 +2685,22 @@ fn ensure_all_updated_cols<'mcx>(
             }
         }
     }
+    Ok(cols)
+}
+
+// ExecInitGenerated's updatedCols (nodeModifyTable.c:496-500): an UPDATE
+// without a BEFORE ROW UPDATE trigger recomputes only the generated columns
+// depending on a target column. None once the UPDATE set is compiled.
+fn generated_update_filter<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> PgResult<Option<types_nodes::Bitmapset<'mcx>>> {
+    if mt.rel().generated_exprs_u.is_some()
+        || mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row)
     {
-        let rel = estate.es_relations[(this_rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let trigdesc = if for_root {
-            &mt.root_rel().trigdesc
-        } else {
-            &mt.rel().trigdesc
-        };
-        let trig_update_before_row = trigdesc
-            .as_ref()
-            .is_some_and(|td| td.trig_update_before_row);
-        add_generated_extra_updated_cols(mcx, rel, trig_update_before_row, &mut cols)?;
+        return Ok(None);
     }
-    let r = if for_root {
-        mt.root_rel_mut()
-    } else {
-        mt.rel_mut()
-    };
-    r.all_updated_cols = Some(cols);
-    Ok(())
+    Ok(Some(exec_get_updated_cols(mt, estate, false)?))
 }
 
 /// ExecGetExtraUpdatedCols' leg of ExecGetAllUpdatedCols (execUtils.c) —
@@ -2314,29 +2757,20 @@ pub fn add_generated_extra_updated_cols<'mcx>(
     Ok(())
 }
 
-// ExecGetAllUpdatedCols for a ROUTED leaf (execUtils.c ExecGetUpdatedCols'
-// ri_RootResultRelInfo arm): the target's updated columns renumbered through
-// the root->leaf attrmap. C recomputes per call; so does this. Same
-// simplification as exec_update_lock_mode: leaf-local generated-column
-// extras aren't recomputed — the root's, mapped, stand in (partitions share
-// the parent's generation expressions).
-fn leaf_all_updated_cols<'mcx>(
-    mt: &mut ModifyTableState<'mcx>,
+// ExecGetUpdatedCols for a ROUTED leaf (execUtils.c's ri_RootResultRelInfo
+// arm): the target's updated columns renumbered through the root->leaf
+// attrmap. C recomputes per call; so does this.
+fn leaf_updated_cols<'mcx>(
+    mt: &ModifyTableState<'mcx>,
     estate: &EStateData<'mcx>,
     idx: usize,
 ) -> PgResult<types_nodes::Bitmapset<'mcx>> {
     let mcx = estate.es_query_cxt;
-    ensure_all_updated_cols(mt, estate, false)?;
     let rti = mt.rel().rti;
     let root_rel = estate.es_relations[(rti - 1) as usize]
         .as_ref()
         .expect("result relation opened");
-    let mut cols = mt
-        .rel()
-        .all_updated_cols
-        .as_ref()
-        .expect("resolved above")
-        .clone_in(mcx)?;
+    let mut cols = exec_get_updated_cols(mt, estate, false)?;
     let leaf_rel = mt.router.as_ref().expect("routed").leaf_rel(idx);
     if let Some(map) = tupdesc::build_attrmap_by_name_if_req(
         mcx,
@@ -2347,6 +2781,39 @@ fn leaf_all_updated_cols<'mcx>(
         cols = execute_attr_map_cols(mcx, &map, &cols)?;
     }
     Ok(cols)
+}
+
+// ExecGetAllUpdatedCols for a ROUTED leaf: the leaf's own generation
+// expressions (a partition may override the parent's) and BEFORE UPDATE
+// triggers decide the extraUpdatedCols leg (ExecInitGenerated on the leaf).
+fn leaf_all_updated_cols<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<types_nodes::Bitmapset<'mcx>> {
+    let mcx = estate.es_query_cxt;
+    let mut cols = leaf_updated_cols(mt, estate, idx)?;
+    let td = resolve_leaf_trigdesc(mt, idx)?;
+    let trig_update_before_row = td.as_ref().is_some_and(|t| t.trig_update_before_row);
+    let leaf_rel = mt.router.as_ref().expect("routed").leaf_rel(idx);
+    add_generated_extra_updated_cols(mcx, leaf_rel, trig_update_before_row, &mut cols)?;
+    Ok(cols)
+}
+
+// generated_update_filter for a routed leaf's ON CONFLICT DO UPDATE.
+fn leaf_generated_update_filter<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<Option<types_nodes::Bitmapset<'mcx>>> {
+    if mt.leaf_generated_u[idx].is_some() {
+        return Ok(None);
+    }
+    let td = resolve_leaf_trigdesc(mt, idx)?;
+    if td.as_ref().is_some_and(|t| t.trig_update_before_row) {
+        return Ok(None);
+    }
+    Ok(Some(leaf_updated_cols(mt, estate, idx)?))
 }
 
 // bms_union(ExecGetInsertedCols, ExecGetUpdatedCols) through the result
@@ -3576,6 +4043,7 @@ fn merge_update_act<'mcx>(
     let mut lockmode = LockTupleMode::LockTupleExclusive;
     let mut update_indexes = TU_UpdateIndexes::TU_None;
 
+    let gen_filter = generated_update_filter(mt, estate)?;
     let mut cross_part = false;
     {
         let EStateData {
@@ -3597,7 +4065,13 @@ fn merge_update_act<'mcx>(
             .as_deref()
             .is_some_and(|c| c.has_generated_stored)
         {
-            exec_compute_stored_generated(mcx, &mut mt.rel_mut().generated_exprs, rel, slot)?;
+            exec_compute_stored_generated(
+                mcx,
+                &mut mt.rel_mut().generated_exprs_u,
+                gen_filter.as_ref(),
+                rel,
+                slot,
+            )?;
         }
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
@@ -3761,7 +4235,8 @@ fn merge_update_act<'mcx>(
         }
     }
     let ar_new_tid = slot.base().tts_tid;
-    if let Some(td) = mt.rel().trigdesc.clone() {
+    let td = mt.rel().trigdesc.clone();
+    if td.is_some() || mt.transition_capture.is_some() {
         // Unconditional (C ExecARUpdateTriggers → ExecGetAllUpdatedCols):
         // every queued UPDATE event carries ats_modifiedcols, not just
         // UPDATE-OF filters.
@@ -3803,7 +4278,7 @@ fn merge_update_act<'mcx>(
         ::trigger::ExecARUpdateTriggers(
             mcx,
             rel,
-            Some(&td),
+            td.as_ref(),
             None,
             None,
             Some(*tupleid),
@@ -4043,6 +4518,20 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) -> PgResult<()> {
             (fdw_modify_routine(kind).expect("installed").end)(state)?;
         }
     }
+    // ExecCleanupTupleRouting's EndForeignInsert leg.
+    {
+        let ModifyTableState {
+            leaf_fdw_kind,
+            leaf_fdw_state,
+            ..
+        } = &mut *mt;
+        for (idx, st) in leaf_fdw_state.iter_mut().enumerate() {
+            if let Some(Some(state)) = st.take() {
+                let kind = leaf_fdw_kind[idx].expect("state implies a routine");
+                (fdw_modify_routine(kind).expect("installed").end)(state)?;
+            }
+        }
+    }
     for r in mt.rels.iter_mut().chain(mt.root.iter_mut()) {
         if let Some(indexes) = r.indexes.take() {
             execindexing::ExecCloseIndices(indexes).expect("ExecCloseIndices");
@@ -4059,6 +4548,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) -> PgResult<()> {
         r.trig_when = ::trigger::TriggerWhenCache::default();
         r.child_to_root = None;
         r.generated_exprs = None;
+        r.generated_exprs_u = None;
         r.virtual_nn_exprs = None;
         r.merge = None;
     }
@@ -4075,6 +4565,9 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) -> PgResult<()> {
     mt.leaf_checks.clear();
     mt.leaf_virtual_nn.clear();
     mt.leaf_generated.clear();
+    mt.leaf_generated_u.clear();
+    mt.leaf_fdw_kind.clear();
+    mt.leaf_fdw_state.clear();
     mt.leaf_slots.clear();
     mt.leaf_partition_check.clear();
     mt.leaf_arbiters.clear();
@@ -4661,6 +5154,7 @@ fn exec_update<'mcx>(
         // nodeModifyTable.c:2545: the tid the caller locked for this attempt.
         let lockedtid = *tupleid;
         let mcx = estate.es_query_cxt;
+        let gen_filter = generated_update_filter(mt, estate)?;
         let mut cross_part = false;
         {
             let EStateData {
@@ -4682,7 +5176,13 @@ fn exec_update<'mcx>(
                 .as_deref()
                 .is_some_and(|c| c.has_generated_stored)
             {
-                exec_compute_stored_generated(mcx, &mut mt.rel_mut().generated_exprs, rel, slot)?;
+                exec_compute_stored_generated(
+                    mcx,
+                    &mut mt.rel_mut().generated_exprs_u,
+                    gen_filter.as_ref(),
+                    rel,
+                    slot,
+                )?;
             }
             exectuples::exec_materialize_slot(slot, mcx)?;
             slot.base_mut().tts_tableOid = rel.rd_id;
@@ -5816,10 +6316,8 @@ fn ensure_returning_slot<'mcx>(
 
 // ExecAR{Insert,Update,Delete}Triggers' opening guard (trigger.c:2555-2562 /
 // 2816-2823 / 3162-3170): `ri_FdwRoutine && transition_capture &&
-// tcs_<op>_table` -> 0A000. The FDW arms here perform the modification and
-// never reach the AR trigger call (row triggers on foreign tables are
-// unported), so the guard is applied before the remote DML, where C's error
-// also precedes any AFTER trigger work and rolls the remote change back.
+// tcs_<op>_table` -> 0A000, applied before the remote DML: C's error also
+// precedes any AFTER trigger work and rolls the remote change back.
 fn foreign_transition_capture_check<'mcx>(
     mt: &ModifyTableState<'mcx>,
     estate: &EStateData<'mcx>,
@@ -5875,8 +6373,14 @@ fn exec_foreign_modify_row<'mcx>(
 fn fdw_prepare_new_slot<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
+    op: CmdType,
     slot_id: ExecSlotId,
 ) -> PgResult<()> {
+    let gen_filter = if op == CmdType::CMD_UPDATE {
+        generated_update_filter(mt, estate)?
+    } else {
+        None
+    };
     let EStateData {
         es_relations,
         es_tupleTable,
@@ -5896,7 +6400,12 @@ fn fdw_prepare_new_slot<'mcx>(
         .as_deref()
         .is_some_and(|c| c.has_generated_stored)
     {
-        exec_compute_stored_generated(*es_query_cxt, &mut r.generated_exprs, rel, slot)?;
+        let exprs = if op == CmdType::CMD_UPDATE {
+            &mut r.generated_exprs_u
+        } else {
+            &mut r.generated_exprs
+        };
+        exec_compute_stored_generated(*es_query_cxt, exprs, gen_filter.as_ref(), rel, slot)?;
     }
     Ok(())
 }
@@ -5937,6 +6446,7 @@ fn exec_delete_fetch_old<'mcx>(
 // the returned holder must stay live for as long as the raw parts are read.
 fn slot_raw_tuple<'mcx>(
     estate: &mut EStateData<'mcx>,
+    out_mcx: mcx::Mcx<'mcx>,
     slot_id: ExecSlotId,
 ) -> PgResult<(
     (*const u8, u32, ItemPointerData, types_core::Oid),
@@ -5944,7 +6454,7 @@ fn slot_raw_tuple<'mcx>(
 )> {
     let mcx = estate.es_query_cxt;
     let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
-    let fetched = exectuples::exec_fetch_slot_heap_tuple(slot, true, mcx, mcx)?;
+    let fetched = exectuples::exec_fetch_slot_heap_tuple(slot, true, mcx, out_mcx)?;
     Ok(match fetched {
         exectuples::FetchedHeapTuple::Slot(t) => {
             ((t.header_ptr(), t.t_len, t.t_self, t.t_tableOid), None)
@@ -6033,16 +6543,23 @@ fn row_triggers_common<'mcx>(
         TRIGGER_TYPE_TIMING_MASK,
     };
     let mcx = estate.es_query_cxt;
+    // C ExecCallTriggerFunc runs in the per-tuple context: the trigger's
+    // result tuple, the materialized slot images and the replacement copy
+    // die at the next row's reset instead of accumulating in es_query_cxt.
+    let per_tuple: core::ptr::NonNull<mcx::MemoryContext> =
+        core::ptr::NonNull::from(estate.get_per_tuple_memory().context());
+    // SAFETY: the per-tuple ExprContext lives in the estate for the whole query.
+    let row_mcx: mcx::Mcx<'mcx> = unsafe { per_tuple.as_ref() }.mcx();
     let (raw_old, _old_owned) = match old_slot {
         Some(id) => {
-            let (raw, owned) = slot_raw_tuple(estate, id)?;
+            let (raw, owned) = slot_raw_tuple(estate, row_mcx, id)?;
             (Some(raw), owned)
         }
         None => (None, None),
     };
     let (mut raw_new, mut _new_owned) = match new_slot {
         Some(id) => {
-            let (raw, owned) = slot_raw_tuple(estate, id)?;
+            let (raw, owned) = slot_raw_tuple(estate, row_mcx, id)?;
             (Some(raw), owned)
         }
         None => (None, None),
@@ -6200,7 +6717,7 @@ fn row_triggers_common<'mcx>(
             );
             tdata.tg_updatedcols = updatedcols_ptr;
             (
-                ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo, instr)?,
+                ::trigger::ExecCallTriggerFunc(row_mcx, &mut tdata, finfo, instr)?,
                 tupdesc,
             )
         };
@@ -6220,16 +6737,18 @@ fn row_triggers_common<'mcx>(
                 // before the store (trigger.c:2513, 3108): a trigger-set
                 // non-null value in a virtual generated column reverts to
                 // null so it is never stored.
-                let nulled = check_modified_virtual_generated(mcx, &rel_tupdesc, returned)?;
+                let nulled = check_modified_virtual_generated(row_mcx, &rel_tupdesc, returned)?;
                 let returned = nulled.as_ref().map_or(returned, |t| t.as_tuple());
                 let img = unsafe {
                     core::slice::from_raw_parts(returned.header_ptr(), returned.t_len as usize)
                 };
-                let mut buf = mcx::vec_with_capacity_in(mcx, img.len())?;
+                let mut buf = mcx::vec_with_capacity_in(row_mcx, img.len())?;
                 mcx::vec_append_bytes(&mut buf, img)?;
                 let ptr = buf.as_ptr();
                 core::mem::forget(buf);
-                // SAFETY: fresh query-context copy of the returned image.
+                // SAFETY: fresh per-tuple copy of the returned image; the
+                // slot consumes it within this row cycle (C stores the
+                // trigger's own per-tuple tuple without copying).
                 let copy = unsafe {
                     types_tuple::HeapTupleData::from_raw_parts(
                         ptr,
@@ -6282,7 +6801,7 @@ fn row_triggers_common<'mcx>(
                         return Err(moved_row_before_trigger(mcx, trigger, rel));
                     }
                 }
-                let (raw, owned) = slot_raw_tuple(estate, slot_id)?;
+                let (raw, owned) = slot_raw_tuple(estate, row_mcx, slot_id)?;
                 raw_new = Some(raw);
                 _new_owned = owned;
             }
@@ -7230,6 +7749,27 @@ fn ar_insert_triggers<'mcx>(
     if td.is_none() && mt.transition_capture.is_none() {
         return Ok(());
     }
+    let foreign = match leaf {
+        Some(ix) => {
+            mt.router
+                .as_ref()
+                .expect("routed insert has a router")
+                .leaf_rel(ix)
+                .rd_rel
+                .relkind
+        }
+        None => mt.rel().relkind,
+    } == types_rel::RELKIND_FOREIGN_TABLE;
+    if foreign {
+        return fdw_ar_row_triggers(
+            mt,
+            estate,
+            types_trigger::TRIGGER_EVENT_INSERT,
+            None,
+            Some(slot_id),
+            leaf,
+        );
+    }
     let new_tid = estate.es_tupleTable[slot_id.0 as usize].base().tts_tid;
     let result_rti = mt.rel().rti;
     match leaf {
@@ -7433,10 +7973,11 @@ fn exec_insert<'mcx>(
     if mt.rel().ri_FdwRoutine.is_some() {
         // ExecARInsertTriggers' first check (trigger.c:2555-2562).
         foreign_transition_capture_check(mt, estate, CmdType::CMD_INSERT)?;
-        fdw_prepare_new_slot(mt, estate, slot_id)?;
+        fdw_prepare_new_slot(mt, estate, CmdType::CMD_INSERT, slot_id)?;
         if !exec_foreign_modify_row(mt, estate, CmdType::CMD_INSERT, slot_id, slot_id)? {
             return Ok(None);
         }
+        fdw_ar_row_triggers(mt, estate, types_trigger::TRIGGER_EVENT_INSERT, None, Some(slot_id), None)?;
         if !mt.rel().wco_exprs.is_empty() {
             let ecxt = mt.node_ecxt;
             let r = &mut mt.rels[mt.cur];
@@ -7538,6 +8079,9 @@ fn exec_insert<'mcx>(
                 mt.leaf_checks.push(None);
                 mt.leaf_virtual_nn.push(None);
                 mt.leaf_generated.push(None);
+                mt.leaf_generated_u.push(None);
+                mt.leaf_fdw_kind.push(None);
+                mt.leaf_fdw_state.push(None);
                 mt.leaf_slots.push(None);
                 mt.leaf_partition_check.push(None);
                 mt.leaf_arbiters.push(None);
@@ -7553,7 +8097,7 @@ fn exec_insert<'mcx>(
             // C ExecInitPartitionInfo's CheckValidResultRel(leaf, CMD_INSERT,
             // onConflictAction): ONCONFLICT_UPDATE requires the leaf to also
             // support UPDATE; the plain-table CMD_INSERT leg is a no-op, and
-            // a foreign leaf always errors (no in-tree ExecForeignInsert).
+            // a foreign leaf needs its FDW's ExecForeignInsert.
             if !mt.leaf_ri_checked[idx] {
                 mt.leaf_ri_checked[idx] = true;
                 let lrel = mt
@@ -7562,15 +8106,13 @@ fn exec_insert<'mcx>(
                     .expect("router built above")
                     .leaf_rel(idx);
                 let (lrelid, lrelname) = (lrel.rd_id, lrel.rd_rel.relname);
-                if lrel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
-                    return Err(Box::new(
-                        PgError::error(format!(
-                            "cannot insert into foreign table \"{}\"",
-                            String::from_utf8_lossy(lrel.rd_rel.relname.name_str())
-                        ))
-                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-                    ));
-                }
+                let leaf_fdw_kind = if lrel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+                    let kind = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, lrelid)?;
+                    check_valid_foreign_result_rel(mcx, lrel, CmdType::CMD_INSERT, kind)?;
+                    Some(kind)
+                } else {
+                    None
+                };
                 // pgrcolumnar2 trickle-DML gate, ROUTED leg ([sqe-generic-b]
                 // partition-truth fix): C's ExecInitPartitionInfo runs
                 // CheckValidResultRel(leaf, CMD_INSERT) on every routed
@@ -7589,6 +8131,7 @@ fn exec_insert<'mcx>(
                         ::pgrc2_am::dml::TrickleOp::Insert,
                     ));
                 }
+                mt.leaf_fdw_kind[idx] = leaf_fdw_kind;
                 if mt.plan.onConflictAction
                     == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32
                 {
@@ -7644,6 +8187,12 @@ fn exec_insert<'mcx>(
     // (cross-partition update) needs the destination leaf for the root FK
     // update event.
     mt.last_insert_leaf = leaf_idx;
+    // ExecInitRoutingInfo's BeginForeignInsert leg, once per foreign leaf.
+    if let Some(idx) = leaf_idx {
+        if mt.leaf_fdw_kind[idx].is_some() && mt.leaf_fdw_state[idx].is_none() {
+            begin_leaf_foreign_insert(mt, estate, idx)?;
+        }
+    }
 
     // ExecPrepareTupleRouting: an attno-remapped leaf takes the tuple
     // converted into its own layout in a dedicated estate slot BEFORE any
@@ -7713,6 +8262,12 @@ fn exec_insert<'mcx>(
         }
     }
 
+    if let Some(idx) = leaf_idx {
+        if mt.leaf_fdw_kind[idx].is_some() {
+            return exec_insert_foreign_leaf(mt, estate, idx, slot_id, work_slot);
+        }
+    }
+
     {
         let EStateData {
             es_relations,
@@ -7766,7 +8321,7 @@ fn exec_insert<'mcx>(
             .as_deref()
             .is_some_and(|c| c.has_generated_stored)
         {
-            exec_compute_stored_generated(mcx, gen_exprs, rel, slot)?;
+            exec_compute_stored_generated(mcx, gen_exprs, None, rel, slot)?;
         }
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
@@ -8965,6 +9520,7 @@ fn exec_leaf_conflict_update<'mcx>(
         }
     }
 
+    let gen_filter = leaf_generated_update_filter(mt, estate, idx)?;
     let mut tmfd = TM_FailureData::default();
     let mut lockmode = LockTupleMode::LockTupleExclusive;
     let mut update_indexes = TU_UpdateIndexes::TU_None;
@@ -8973,7 +9529,7 @@ fn exec_leaf_conflict_update<'mcx>(
             router,
             leaf_checks,
             leaf_virtual_nn,
-            leaf_generated,
+            leaf_generated_u,
             leaf_partition_check,
             rels,
             root,
@@ -8998,7 +9554,13 @@ fn exec_leaf_conflict_update<'mcx>(
             .as_deref()
             .is_some_and(|c| c.has_generated_stored)
         {
-            exec_compute_stored_generated(mcx, &mut leaf_generated[idx], rel, slot)?;
+            exec_compute_stored_generated(
+                mcx,
+                &mut leaf_generated_u[idx],
+                gen_filter.as_ref(),
+                rel,
+                slot,
+            )?;
         }
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
@@ -9069,9 +9631,16 @@ fn exec_leaf_conflict_update<'mcx>(
             &mut update_indexes,
         )?
     };
-    if result != TM_Result::TM_Ok {
+    match result {
+        TM_Result::TM_Ok => {}
+        TM_Result::TM_SelfModified => {
+            if tmfd.cmax != output_cid {
+                return Err(self_modified_violation("updated"));
+            }
+            return Ok(false);
+        }
         // The caller holds the conflict tuple lock; nothing else can move it.
-        panic!("ExecOnConflictUpdate leaf update: unexpected {result:?} on a locked tuple");
+        other => panic!("ExecOnConflictUpdate leaf update: unexpected {other:?} on a locked tuple"),
     }
 
     let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
@@ -9310,10 +9879,11 @@ fn cardinality_violation() -> Box<PgError> {
 pub fn exec_compute_stored_generated<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     generated_exprs: &mut Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
+    updated_cols: Option<&types_nodes::Bitmapset<'mcx>>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
-    exec_compute_stored_generated_impl::<false>(mcx, mcx, generated_exprs, rel, slot)
+    exec_compute_stored_generated_impl::<false>(mcx, mcx, generated_exprs, updated_cols, rel, slot)
 }
 
 pub fn exec_compute_stored_generated_in_row<'mcx>(
@@ -9323,13 +9893,17 @@ pub fn exec_compute_stored_generated_in_row<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
-    exec_compute_stored_generated_impl::<true>(mcx, row_mcx, generated_exprs, rel, slot)
+    exec_compute_stored_generated_impl::<true>(mcx, row_mcx, generated_exprs, None, rel, slot)
 }
 
+// `updated_cols` is ExecInitGenerated's UPDATE filter (nodeModifyTable.c:496):
+// Some(ExecGetUpdatedCols) skips generated columns depending on no target
+// column; None compiles every stored generated column.
 fn exec_compute_stored_generated_impl<'mcx, const ROW: bool>(
     mcx: mcx::Mcx<'mcx>,
     row_mcx: mcx::Mcx<'_>,
     generated_exprs: &mut Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
+    updated_cols: Option<&types_nodes::Bitmapset<'mcx>>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<()> {
@@ -9358,6 +9932,15 @@ fn exec_compute_stored_generated_impl<'mcx, const ROW: bool>(
             // cookDefault coerced the stored tree to the column type, so
             // build_column_default's re-coercion is a no-op; skipped.
             let node = readfuncs::stringToNode(mcx, adbin.as_str())?;
+            if let Some(cols) = updated_cols {
+                let mut attrs_used = types_nodes::Bitmapset::empty();
+                vars::var::pull_varattnos(mcx, node, 1, &mut attrs_used)?;
+                if !cols.overlap(&attrs_used) {
+                    continue;
+                }
+            }
+            let node = clauses::eval_const_expressions(mcx, node)?;
+            nodes_core::fix_opfuncids(node)?;
             let mut state = execexpr::exec_init_expr(mcx, Some(node), execexpr::ParamBind::NONE)?
                 .expect("generation expr");
             state.arm_result_mcx(mcx);
@@ -10005,7 +10588,7 @@ fn expand_generated_columns_in_expr<'mcx>(
                 },
             )?));
         }
-        if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
+        if v.varattno < 0 || rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
             return Ok(None);
         }
         let e = build_generation_expression(mcx, rel, v.varattno as usize)?;
@@ -10042,6 +10625,8 @@ pub fn exec_rel_gen_virtual_notnull<'mcx>(
                     location: -1,
                 },
             )?;
+            let nulltest = clauses::eval_const_expressions(mcx, nulltest)?;
+            nodes_core::fix_opfuncids(nulltest)?;
             let mut state =
                 execexpr::exec_init_expr(mcx, Some(nulltest), execexpr::ParamBind::NONE)?
                     .expect("virtual not-null expr");
@@ -10191,19 +10776,19 @@ mcx::forget_safe_struct!(
         update_cols, update_colnos, ri_FdwRoutine, ri_usesFdwDirectModify;
         indexes, project_new, project_returning, check_exprs, partition_check, trigdesc,
         trig_fmgr, trig_instr, trig_old_slot, trig_when, all_updated_cols, child_to_root,
-        generated_exprs, virtual_nn_exprs, wco_exprs, merge, ri_FdwState },
+        generated_exprs, generated_exprs_u, virtual_nn_exprs, wco_exprs, merge, ri_FdwState },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
         last_insert_remapped, oc_returning_leaf,
         mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd,
         mt_merge_pending_not_matched, outer_instr_idx, instr_idx, epq_origslot,
-        rels, root, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_slots,
+        rels, root, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_generated_u, leaf_fdw_kind, leaf_slots,
         leaf_arbiters, leaf_existing, leaf_child_to_root, leaf_wco,
         leaf_returning_old, leaf_all_null, leaf_ri_checked, leaf_trig_instr;
         operation, snapshot_any, on_conflict, epq_subs, epq_arowmarks,
         router, leaf_indexes, leaf_partition_check,
-        leaf_on_conflict,
+        leaf_on_conflict, leaf_fdw_state,
         leaf_returning, leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
         transition_capture, oc_transition_capture,
         index_eval_cx },

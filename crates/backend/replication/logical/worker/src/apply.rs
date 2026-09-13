@@ -1437,7 +1437,7 @@ fn do_insert<'mcx>(
 
     let mut generated_exprs = None;
     if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
-        nodemodifytable::exec_compute_stored_generated(mcx, &mut generated_exprs, rel, slot)?;
+        nodemodifytable::exec_compute_stored_generated(mcx, &mut generated_exprs, None, rel, slot)?;
     }
     let mut check_exprs = None;
     let mut nn_exprs = None;
@@ -1581,7 +1581,20 @@ fn do_update<'mcx>(
 
     let mut generated_exprs = None;
     if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
-        nodemodifytable::exec_compute_stored_generated(mcx, &mut generated_exprs, rel, slot)?;
+        // ExecInitGenerated(CMD_UPDATE): the worker's updatedCols filter the
+        // recomputed generated columns unless a BEFORE ROW UPDATE trigger runs.
+        let gen_filter = if trig.as_ref().is_some_and(|t| t.td.trig_update_before_row) {
+            None
+        } else {
+            modified_cols
+        };
+        nodemodifytable::exec_compute_stored_generated(
+            mcx,
+            &mut generated_exprs,
+            gen_filter,
+            rel,
+            slot,
+        )?;
     }
     let mut check_exprs = None;
     let mut nn_exprs = None;

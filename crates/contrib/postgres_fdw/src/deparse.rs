@@ -1418,7 +1418,7 @@ fn deparse_column_ref<'mcx>(
         deparse_target_list(
             &mut ctx.buf,
             ctx.mcx,
-            ctx.run,
+            Some(ctx.run),
             varno,
             &rel,
             rte,
@@ -1616,7 +1616,7 @@ pub(crate) fn deparse_analyze_sql<'mcx>(
 fn deparse_target_list<'mcx>(
     buf: &mut PgString<'mcx>,
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'mcx>,
+    run: Option<&PlannerRun<'mcx>>,
     rtindex: i32,
     rel: &types_rel::Relation<'mcx>,
     rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
@@ -1787,7 +1787,7 @@ fn deparse_select_stmt_inner<'mcx>(
         let opened = table::table_open(mcx, rte.relid, types_rel::lock::NoLock)?;
         let mut buf = core::mem::replace(&mut ctx.buf, PgString::new_in(mcx));
         deparse_target_list(
-            &mut buf, mcx, run, run.root.rel(rel).relid as i32, &opened, rte, false,
+            &mut buf, mcx, Some(run), run.root.rel(rel).relid as i32, &opened, rte, false,
             &fp.attrs_used, false, retrieved_attrs,
         )?;
         drop(fp);
@@ -2316,7 +2316,7 @@ fn append_conditions<'mcx>(
 pub fn deparse_returning_list<'mcx>(
     buf: &mut PgString<'mcx>,
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'mcx>,
+    run: Option<&PlannerRun<'mcx>>,
     rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
     rtindex: i32,
     rel: &types_rel::Relation<'mcx>,
@@ -2355,7 +2355,7 @@ pub fn deparse_returning_list<'mcx>(
 pub fn deparse_insert_sql<'mcx>(
     buf: &mut PgString<'mcx>,
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'mcx>,
+    run: Option<&PlannerRun<'mcx>>,
     rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
     rtindex: i32,
     rel: &types_rel::Relation<'mcx>,
@@ -2496,7 +2496,7 @@ pub fn deparse_update_sql<'mcx>(
     buf.push_str(" WHERE ctid = $1");
 
     deparse_returning_list(
-        buf, mcx, run, rte, rtindex, rel, trig_after_row, wco_list, returning_list,
+        buf, mcx, Some(run), rte, rtindex, rel, trig_after_row, wco_list, returning_list,
         retrieved_attrs,
     )
 }
@@ -2519,7 +2519,7 @@ pub fn deparse_delete_sql<'mcx>(
     buf.push_str(" WHERE ctid = $1");
 
     deparse_returning_list(
-        buf, mcx, run, rte, rtindex, rel, trig_after_row, &[], returning_list, retrieved_attrs,
+        buf, mcx, Some(run), rte, rtindex, rel, trig_after_row, &[], returning_list, retrieved_attrs,
     )
 }
 
@@ -2570,7 +2570,7 @@ pub fn deparse_direct_update_sql<'mcx>(
     append_where_clause_nodes(ctx, remote_conds)?;
 
     deparse_returning_list(
-        &mut ctx.buf, mcx, ctx.run, rte, rtindex, rel, false, &[], returning_list,
+        &mut ctx.buf, mcx, Some(ctx.run), rte, rtindex, rel, false, &[], returning_list,
         retrieved_attrs,
     )
 }
@@ -2598,7 +2598,7 @@ pub fn deparse_direct_delete_sql<'mcx>(
     append_where_clause_nodes(ctx, remote_conds)?;
 
     deparse_returning_list(
-        &mut ctx.buf, mcx, ctx.run, rte, rtindex, rel, false, &[], returning_list,
+        &mut ctx.buf, mcx, Some(ctx.run), rte, rtindex, rel, false, &[], returning_list,
         retrieved_attrs,
     )
 }

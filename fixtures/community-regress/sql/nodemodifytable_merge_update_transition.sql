@@ -1,0 +1,16 @@
+-- ExecUpdateEpilogue after a MERGE UPDATE calls ExecARUpdateTriggers
+-- unconditionally, so a root statement trigger's transition table collects
+-- the row even though the updated partition has no row triggers.
+CREATE TABLE mrgt_p(id int, v int) PARTITION BY RANGE(id);
+CREATE TABLE mrgt_p1 PARTITION OF mrgt_p FOR VALUES FROM (0) TO (100);
+INSERT INTO mrgt_p VALUES (1,0), (2,0);
+CREATE TABLE mrgt_log(n bigint);
+CREATE FUNCTION mrgt_trig() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN INSERT INTO mrgt_log SELECT count(*) FROM changed; RETURN NULL; END$$;
+CREATE TRIGGER mrgt_as AFTER UPDATE ON mrgt_p REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION mrgt_trig();
+MERGE INTO mrgt_p USING (VALUES (1,7), (2,8)) s(id,v) ON mrgt_p.id = s.id WHEN MATCHED THEN UPDATE SET v = s.v;
+SELECT * FROM mrgt_log;
+UPDATE mrgt_p SET v = 9 WHERE id = 1;
+SELECT * FROM mrgt_log;
+SELECT * FROM mrgt_p ORDER BY id;
+DROP TABLE mrgt_p, mrgt_log;
+DROP FUNCTION mrgt_trig();

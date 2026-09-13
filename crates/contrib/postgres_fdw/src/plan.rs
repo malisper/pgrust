@@ -2957,6 +2957,7 @@ static MODIFY_ROUTINE: nodemodifytable::FdwModifyRoutine = nodemodifytable::FdwM
     end: crate::modify::end_foreign_modify,
     explain: Some(crate::modify::explain_foreign_modify),
     flush: Some(crate::modify::flush_foreign_modify),
+    begin_insert: Some(crate::modify::begin_foreign_insert),
 };
 
 // postgresIsForeignPathAsyncCapable.

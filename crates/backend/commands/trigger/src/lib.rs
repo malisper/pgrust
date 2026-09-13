@@ -18,7 +18,7 @@ pub use queue::{
     AfterTriggerBeginXact, AfterTriggerEndQuery, AfterTriggerEndSubXact, AfterTriggerEndXact,
     AfterTriggerInstrSink,
     AfterTriggerFireDeferred, AfterTriggerPendingOnRel, ExecARDeleteTriggers,
-    ExecARInsertTriggers, ExecARUpdateTriggers, ExecASDeleteTriggers, ExecASInsertTriggers,
+    ExecARInsertTriggers, ExecARRowTriggersFdw, ExecARUpdateTriggers, ExecASDeleteTriggers, ExecASInsertTriggers,
     ChildToRoot, ExecASTruncateTriggers, ExecASUpdateTriggers, MakeTransitionCaptureState,
     TransitionCaptureState,
 };

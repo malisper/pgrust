@@ -1,0 +1,59 @@
+-- ExecInitGenerated(CMD_UPDATE) skips stored generated columns that depend on
+-- no UPDATE target column (no BEFORE UPDATE row trigger), so a redefined
+-- IMMUTABLE function is not re-evaluated by an unrelated UPDATE.
+CREATE FUNCTION genf_df(int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT $1+1';
+CREATE TABLE genf_g(a int, b int, c int GENERATED ALWAYS AS (genf_df(a)) STORED);
+INSERT INTO genf_g(a,b) VALUES(1,0);
+CREATE OR REPLACE FUNCTION genf_df(int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT $1+2';
+UPDATE genf_g SET b=1 RETURNING c;
+ c 
+---
+ 2
+(1 row)
+
+UPDATE genf_g SET a=1 RETURNING c;
+ c 
+---
+ 3
+(1 row)
+
+CREATE FUNCTION genf_trig() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
+CREATE TRIGGER genf_bu BEFORE UPDATE ON genf_g FOR EACH ROW EXECUTE FUNCTION genf_trig();
+UPDATE genf_g SET b=2 RETURNING c;
+ c 
+---
+ 3
+(1 row)
+
+DROP TABLE genf_g;
+-- ExecGetAllUpdatedCols on a routed leaf uses the leaf's own generation
+-- expressions (a partition may override the parent's), so an UPDATE OF g
+-- trigger fires when the leaf's dependency changes through ON CONFLICT.
+CREATE TABLE genf_p(id int PRIMARY KEY, a int, b int, g int GENERATED ALWAYS AS (a) STORED) PARTITION BY RANGE(id);
+CREATE TABLE genf_p1 PARTITION OF genf_p (g GENERATED ALWAYS AS (b) STORED) FOR VALUES FROM (0) TO (100);
+CREATE TABLE genf_fired(x int);
+CREATE FUNCTION genf_log() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN INSERT INTO genf_fired VALUES (1); RETURN NEW; END$$;
+CREATE TRIGGER genf_tg AFTER UPDATE OF g ON genf_p1 FOR EACH ROW EXECUTE FUNCTION genf_log();
+INSERT INTO genf_p(id,a,b) VALUES (1,10,20);
+INSERT INTO genf_p(id,a,b) VALUES (1,10,30) ON CONFLICT(id) DO UPDATE SET b=excluded.b;
+SELECT count(*) AS fired FROM genf_fired;
+ fired 
+-------
+     1
+(1 row)
+
+INSERT INTO genf_p(id,a,b) VALUES (1,11,30) ON CONFLICT(id) DO UPDATE SET a=excluded.a;
+SELECT count(*) AS fired FROM genf_fired;
+ fired 
+-------
+     1
+(1 row)
+
+SELECT * FROM genf_p;
+ id | a  | b  | g  
+----+----+----+----
+  1 | 11 | 30 | 30
+(1 row)
+
+DROP TABLE genf_p, genf_fired;
+DROP FUNCTION genf_df(int), genf_trig(), genf_log();
