@@ -13407,7 +13407,6 @@ dependencies = [
  "openssl-sys",
  "parser_small1",
  "pg_md5",
- "pg_sha1",
  "pg_sha2",
  "pg_string",
  "pg_strong_random",
@@ -13417,6 +13416,7 @@ dependencies = [
  "types_fmgr",
  "types_tuple",
  "varlena",
+ "wchar",
 ]
 
 [[package]]

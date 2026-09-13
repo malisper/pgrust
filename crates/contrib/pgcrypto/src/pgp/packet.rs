@@ -21,6 +21,26 @@ pub fn write_packet(dst: &mut Vec<u8>, tag: i32, body: &[u8]) {
     dst.extend_from_slice(body);
 }
 
+const STREAM_ID: u8 = 0xE0;
+const STREAM_BLOCK_SHIFT: usize = 14;
+const STREAM_BLOCK: usize = 1 << STREAM_BLOCK_SHIFT;
+
+/// pgp-encrypt.c pgp_create_pkt_writer + pkt_stream_process/flush: the body
+/// goes out as 16 KiB partial-length chunks (length octet 0xEE) and the
+/// stream ends with a normal-length chunk holding the remainder, which is
+/// empty when the body is a multiple of the block.
+pub fn write_stream_packet(dst: &mut Vec<u8>, tag: i32, body: &[u8]) {
+    dst.push(0xC0 | (tag as u8));
+    let mut rest = body;
+    while rest.len() >= STREAM_BLOCK {
+        dst.push(STREAM_ID | STREAM_BLOCK_SHIFT as u8);
+        dst.extend_from_slice(&rest[..STREAM_BLOCK]);
+        rest = &rest[STREAM_BLOCK..];
+    }
+    render_newlen(dst, rest.len());
+    dst.extend_from_slice(rest);
+}
+
 pub struct PktReader<'a> {
     pub data: &'a [u8],
     pub pos: usize,

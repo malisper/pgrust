@@ -2,7 +2,7 @@
 use super::cfb::PgpCfb;
 use super::consts::*;
 use super::context::PgpContext;
-use super::packet::{render_newlen, write_packet};
+use super::packet::{write_packet, write_stream_packet};
 use super::s2k::S2k;
 
 fn build_literal_packet(ctx: &PgpContext, data: &[u8]) -> Vec<u8> {
@@ -22,7 +22,7 @@ fn build_literal_packet(ctx: &PgpContext, data: &[u8]) -> Vec<u8> {
     body.extend_from_slice(&t.to_be_bytes());
     body.extend_from_slice(data);
     let mut pkt = Vec::new();
-    write_packet(&mut pkt, PGP_PKT_LITERAL_DATA, &body);
+    write_stream_packet(&mut pkt, PGP_PKT_LITERAL_DATA, &body);
     pkt
 }
 
@@ -90,7 +90,6 @@ pub fn encrypt_symmetric(
 
     write_encdata_packet(&ctx, data, &sess_key, &mut out)?;
 
-    let _ = render_newlen; // retained for parity reference
     let _ = sess_cipher;
     Ok(out)
 }
@@ -152,7 +151,7 @@ pub fn write_encdata_packet(
         body.push(0x01);
     }
     body.extend_from_slice(&ciphertext);
-    write_packet(out, tag, &body);
+    write_stream_packet(out, tag, &body);
     Ok(())
 }
 
@@ -169,6 +168,6 @@ fn build_compressed_packet(ctx: &PgpContext, inner: &[u8]) -> Result<Vec<u8>, St
     body.push(algo as u8);
     body.extend_from_slice(&compressed);
     let mut pkt = Vec::new();
-    write_packet(&mut pkt, PGP_PKT_COMPRESSED_DATA, &body);
+    write_stream_packet(&mut pkt, PGP_PKT_COMPRESSED_DATA, &body);
     Ok(pkt)
 }

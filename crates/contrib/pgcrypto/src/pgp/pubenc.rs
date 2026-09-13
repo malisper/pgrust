@@ -1,19 +1,19 @@
 
 use super::consts::*;
 use super::mpi::{self, write_mpi, Mpi};
-use super::packet::write_packet;
+use super::packet::write_stream_packet;
 use super::pubkey::{KeyMaterial, PubKey, PGP_PUB_ELG_ENCRYPT, PGP_PUB_RSA_ENCRYPT,
     PGP_PUB_RSA_ENCRYPT_SIGN};
 
-/// `res_len` bytes (pad must be >= 8 nonzero random bytes).
-fn pad_eme_pkcs1_v15(data: &[u8], res_len: usize) -> Result<Vec<u8>, String> {
-    if res_len < data.len() + 2 {
-        return Err("pgcrypto bug".to_string());
-    }
-    let pad_len = res_len - 2 - data.len();
+/// `res_len` bytes (pad must be >= 8 nonzero random bytes). `res_len` is
+/// the key's byte length minus one, so a zero-bit modulus makes it -1.
+fn pad_eme_pkcs1_v15(data: &[u8], res_len: isize) -> Result<Vec<u8>, String> {
+    let pad_len = res_len - 2 - data.len() as isize;
     if pad_len < 8 {
-        return Err("pgcrypto bug".to_string());
+        return Err(PGCRYPTO_BUG.to_string());
     }
+    let res_len = res_len as usize;
+    let pad_len = pad_len as usize;
     let mut buf = vec![0u8; res_len];
     buf[0] = 0x02;
     if !fill_random(&mut buf[1..1 + pad_len]) {
@@ -33,7 +33,7 @@ fn pad_eme_pkcs1_v15(data: &[u8], res_len: usize) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-fn create_secmsg(cipher_algo: i32, sess_key: &[u8], full_bytes: usize) -> Result<Mpi, String> {
+fn create_secmsg(cipher_algo: i32, sess_key: &[u8], full_bytes: isize) -> Result<Mpi, String> {
     let klen = sess_key.len();
     let mut cksum: u32 = 0;
     for &b in sess_key {
@@ -46,7 +46,7 @@ fn create_secmsg(cipher_algo: i32, sess_key: &[u8], full_bytes: usize) -> Result
     secmsg.push((cksum & 0xFF) as u8);
 
     let padded = pad_eme_pkcs1_v15(&secmsg, full_bytes)?;
-    let full_bits = full_bytes * 8 - 6;
+    let full_bits = full_bytes as usize * 8 - 6;
     Ok(Mpi::from_bytes(padded, full_bits))
 }
 
@@ -64,26 +64,26 @@ pub fn write_pubenc_sesskey(
     match pk.algo {
         PGP_PUB_ELG_ENCRYPT => {
             if let KeyMaterial::Elg { p, g, y, .. } = &pk.material {
-                let m = create_secmsg(cipher_algo, sess_key, p.nbytes() - 1)?;
+                let m = create_secmsg(cipher_algo, sess_key, p.nbytes() as isize - 1)?;
                 let (c1, c2) = mpi::elgamal_encrypt(p, g, y, &m)?;
                 write_mpi(&mut body, &c1);
                 write_mpi(&mut body, &c2);
             } else {
-                return Err("pgcrypto bug".to_string());
+                return Err(PGCRYPTO_BUG.to_string());
             }
         }
         PGP_PUB_RSA_ENCRYPT | PGP_PUB_RSA_ENCRYPT_SIGN => {
             if let KeyMaterial::Rsa { n, e, .. } = &pk.material {
-                let m = create_secmsg(cipher_algo, sess_key, n.nbytes() - 1)?;
-                let c = mpi::rsa_encrypt(n, e, &m);
+                let m = create_secmsg(cipher_algo, sess_key, n.nbytes() as isize - 1)?;
+                let c = mpi::rsa_encrypt(n, e, &m)?;
                 write_mpi(&mut body, &c);
             } else {
-                return Err("pgcrypto bug".to_string());
+                return Err(PGCRYPTO_BUG.to_string());
             }
         }
         _ => return Err("Unknown public-key encryption algorithm".to_string()),
     }
 
-    write_packet(out, PGP_PKT_PUBENC_SESSKEY, &body);
+    write_stream_packet(out, PGP_PKT_PUBENC_SESSKEY, &body);
     Ok(())
 }

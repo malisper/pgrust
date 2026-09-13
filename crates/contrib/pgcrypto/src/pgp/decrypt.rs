@@ -194,61 +194,90 @@ fn decrypt_data_packet(
 }
 
 fn finish_inner(ctx: &mut PgpContext, inner: Vec<u8>) -> Result<Vec<u8>, String> {
-    let mut rdr = PktReader::new_allow_ctx(&inner);
-    let hdr = rdr
-        .read_hdr()
-        .map_err(|_| CORRUPT_DATA.to_string())?
-        .ok_or_else(|| CORRUPT_DATA.to_string())?;
-    if hdr.tag == PGP_PKT_COMPRESSED_DATA {
+    let mut out = Vec::new();
+    process_data_packets(ctx, &inner, true, &mut out)?;
+    Ok(out)
+}
+
+/// pgp-decrypt.c:873 process_data_packets: every literal packet appends to
+/// `dst`; a compressed packet must be the only data packet and is legal only
+/// at the top level. The MDC trailer was already peeled off by
+/// decrypt_data_packet (C's mdcbuf filter), so an MDC tag here is unexpected.
+fn process_data_packets(
+    ctx: &mut PgpContext,
+    data: &[u8],
+    allow_compr: bool,
+    dst: &mut Vec<u8>,
+) -> Result<(), String> {
+    let mut rdr = PktReader::new_allow_ctx(data);
+    let mut got_data = false;
+    while let Some(hdr) = rdr.read_hdr().map_err(|_| CORRUPT_DATA.to_string())? {
         let body = rdr.read_body(&hdr).map_err(|_| CORRUPT_DATA.to_string())?;
-        if body.is_empty() {
-            return Err(CORRUPT_DATA.to_string());
-        }
-        let algo = body[0] as i32;
-        ctx.compress_algo = algo;
-        let decompressed = match algo {
-            PGP_COMPR_NONE => body[1..].to_vec(),
-            PGP_COMPR_ZIP => super::compress::inflate_raw(&body[1..])
-                .map_err(|_| CORRUPT_DATA.to_string())?,
-            PGP_COMPR_ZLIB => super::compress::inflate_zlib(&body[1..])
-                .map_err(|_| CORRUPT_DATA.to_string())?,
-            PGP_COMPR_BZIP2 => {
-                ctx.dbg("parse_compressed_data: bzip2 unsupported");
-                return Err(UNSUPPORTED_COMPR.to_string());
+        match hdr.tag {
+            t if t == PGP_PKT_LITERAL_DATA => {
+                got_data = true;
+                parse_literal_data(ctx, &body, dst)?;
             }
-            _ => {
-                ctx.dbg("parse_compressed_data: unknown compr type");
-                // C's parse_compressed_data default case returns the generic
-                // PXE_PGP_CORRUPT_DATA (not PXE_PGP_UNSUPPORTED_COMPR, which C
-                // reserves for the bzip2 flag path). Keep it generic so the
-                // quick-check outcome stays unobservable.
+            t if t == PGP_PKT_COMPRESSED_DATA => {
+                if !allow_compr {
+                    ctx.dbg("process_data_packets: unexpected compression");
+                    return Err(CORRUPT_DATA.to_string());
+                }
+                if got_data {
+                    ctx.dbg("process_data_packets: only one cmpr pkt allowed");
+                    return Err(CORRUPT_DATA.to_string());
+                }
+                got_data = true;
+                parse_compressed_data(ctx, &body, dst)?;
+            }
+            t if t == PGP_PKT_MDC => {
+                ctx.dbg("process_data_packets: unexpected MDC");
                 return Err(CORRUPT_DATA.to_string());
             }
-        };
-        return read_literal(ctx, &decompressed);
+            t => {
+                ctx.dbg(&format!("process_data_packets: unexpected pkt tag={t}"));
+                return Err(CORRUPT_DATA.to_string());
+            }
+        }
     }
-    ctx.compress_algo = PGP_COMPR_NONE;
-    read_literal_from(ctx, hdr, rdr)
-}
-
-fn read_literal(ctx: &mut PgpContext, data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut rdr = PktReader::new_allow_ctx(data);
-    let hdr = rdr
-        .read_hdr()
-        .map_err(|_| CORRUPT_DATA.to_string())?
-        .ok_or_else(|| CORRUPT_DATA.to_string())?;
-    read_literal_from(ctx, hdr, rdr)
-}
-
-fn read_literal_from(
-    ctx: &mut PgpContext,
-    hdr: super::packet::PktHdr,
-    mut rdr: PktReader,
-) -> Result<Vec<u8>, String> {
-    if hdr.tag != PGP_PKT_LITERAL_DATA {
+    if !got_data {
+        ctx.dbg("process_data_packets: no data");
         return Err(CORRUPT_DATA.to_string());
     }
-    let body = rdr.read_body(&hdr).map_err(|_| CORRUPT_DATA.to_string())?;
+    Ok(())
+}
+
+fn parse_compressed_data(ctx: &mut PgpContext, body: &[u8], dst: &mut Vec<u8>) -> Result<(), String> {
+    if body.is_empty() {
+        return Err(CORRUPT_DATA.to_string());
+    }
+    let algo = body[0] as i32;
+    ctx.compress_algo = algo;
+    let decompressed = match algo {
+        PGP_COMPR_NONE => body[1..].to_vec(),
+        PGP_COMPR_ZIP => super::compress::inflate_raw(&body[1..])
+            .map_err(|_| CORRUPT_DATA.to_string())?,
+        PGP_COMPR_ZLIB => super::compress::inflate_zlib(&body[1..])
+            .map_err(|_| CORRUPT_DATA.to_string())?,
+        PGP_COMPR_BZIP2 => {
+            ctx.dbg("parse_compressed_data: bzip2 unsupported");
+            return Err(UNSUPPORTED_COMPR.to_string());
+        }
+        _ => {
+            ctx.dbg("parse_compressed_data: unknown compr type");
+            // C's parse_compressed_data default case returns the generic
+            // PXE_PGP_CORRUPT_DATA (not PXE_PGP_UNSUPPORTED_COMPR, which C
+            // reserves for the bzip2 flag path). Keep it generic so the
+            // quick-check outcome stays unobservable.
+            return Err(CORRUPT_DATA.to_string());
+        }
+    };
+    process_data_packets(ctx, &decompressed, false, dst)
+}
+
+/// pgp-decrypt.c:745 parse_literal_data. CRLF conversion follows the SQL
+/// caller's text mode and convert-crlf, not the literal packet's own type.
+fn parse_literal_data(ctx: &mut PgpContext, body: &[u8], dst: &mut Vec<u8>) -> Result<(), String> {
     if body.len() < 2 {
         return Err(CORRUPT_DATA.to_string());
     }
@@ -264,11 +293,12 @@ fn read_literal_from(
     }
     ctx.unicode_mode = if ty == b'u' { 1 } else { 0 };
     let payload = &body[off..];
-    if (ty == b't' || ty == b'u') && ctx.convert_crlf != 0 {
-        Ok(un_convert_crlf(payload))
+    if ctx.text_mode != 0 && ctx.convert_crlf != 0 {
+        dst.extend_from_slice(&un_convert_crlf(payload));
     } else {
-        Ok(payload.to_vec())
+        dst.extend_from_slice(payload);
     }
+    Ok(())
 }
 
 fn un_convert_crlf(data: &[u8]) -> Vec<u8> {

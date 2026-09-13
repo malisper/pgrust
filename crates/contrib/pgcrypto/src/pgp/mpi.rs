@@ -92,14 +92,23 @@ fn rand_bits(bits: usize) -> Result<BigUint, String> {
     Ok(BigUint::from_bytes_be(&buf))
 }
 
-pub fn rsa_encrypt(n: &Mpi, e: &Mpi, m: &Mpi) -> Mpi {
-    let c = m.to_biguint().modpow(&e.to_biguint(), &n.to_biguint());
-    Mpi::from_biguint(&c)
+/// BN_mod_exp: a zero modulus is a division by zero, PXE_PGP_MATH_FAILED
+/// for every caller in pgp-mpi-openssl.c.
+fn mod_exp(base: &BigUint, exp: &BigUint, modulus: &BigUint) -> Result<BigUint, String> {
+    if modulus.is_zero() {
+        return Err(MATH_FAILED.to_string());
+    }
+    Ok(base.modpow(exp, modulus))
 }
 
-pub fn rsa_decrypt(n: &Mpi, d: &Mpi, c: &Mpi) -> Mpi {
-    let m = c.to_biguint().modpow(&d.to_biguint(), &n.to_biguint());
-    Mpi::from_biguint(&m)
+pub fn rsa_encrypt(n: &Mpi, e: &Mpi, m: &Mpi) -> Result<Mpi, String> {
+    let c = mod_exp(&m.to_biguint(), &e.to_biguint(), &n.to_biguint())?;
+    Ok(Mpi::from_biguint(&c))
+}
+
+pub fn rsa_decrypt(n: &Mpi, d: &Mpi, c: &Mpi) -> Result<Mpi, String> {
+    let m = mod_exp(&c.to_biguint(), &d.to_biguint(), &n.to_biguint())?;
+    Ok(Mpi::from_biguint(&m))
 }
 
 pub fn elgamal_encrypt(p: &Mpi, g: &Mpi, y: &Mpi, m: &Mpi) -> Result<(Mpi, Mpi), String> {
@@ -111,8 +120,8 @@ pub fn elgamal_encrypt(p: &Mpi, g: &Mpi, y: &Mpi, m: &Mpi) -> Result<(Mpi, Mpi),
     let k_bits = decide_k_bits(p.bits() as usize);
     let k = rand_bits(k_bits)?;
 
-    let c1 = g.modpow(&k, &p);
-    let yk = y.modpow(&k, &p);
+    let c1 = mod_exp(&g, &k, &p)?;
+    let yk = mod_exp(&y, &k, &p)?;
     let c2 = (&m * &yk) % &p;
     Ok((Mpi::from_biguint(&c1), Mpi::from_biguint(&c2)))
 }
@@ -123,8 +132,8 @@ pub fn elgamal_decrypt(p: &Mpi, x: &Mpi, c1: &Mpi, c2: &Mpi) -> Result<Mpi, Stri
     let c1 = c1.to_biguint();
     let c2 = c2.to_biguint();
 
-    let c1x = c1.modpow(&x, &p);
-    let inv = mod_inverse(&c1x, &p).ok_or_else(|| "Math operation failed".to_string())?;
+    let c1x = mod_exp(&c1, &x, &p)?;
+    let inv = mod_inverse(&c1x, &p).ok_or_else(|| MATH_FAILED.to_string())?;
     let m = (&c2 * &inv) % &p;
     Ok(Mpi::from_biguint(&m))
 }

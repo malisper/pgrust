@@ -23,6 +23,14 @@ fn px_err(msg: String) -> Box<PgError> {
     PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE).into()
 }
 
+fn hash_err(e: hashing::HashError) -> Box<PgError> {
+    match e {
+        hashing::HashError::Provider(m) => px_err(m),
+        hashing::HashError::Internal(m) => PgError::error(m.to_string()).into(),
+        hashing::HashError::Pg(e) => e,
+    }
+}
+
 fn crypt_err(e: crypt::CryptError) -> Box<PgError> {
     match e {
         crypt::CryptError::Unsupported(what) => PgError::error(format!("pgcrypto: {what} not yet ported"))
@@ -46,7 +54,7 @@ fn fc_pg_digest(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     // SAFETY: strict fn — arg0 bytea/text (implicit-cast), arg1 text, both non-null.
     let (data, name) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let name = String::from_utf8_lossy(name.data()).into_owned();
-    let out = hashing::digest(&name, data.data()).map_err(px_err)?;
+    let out = hashing::digest(&name, data.data()).map_err(hash_err)?;
     bytea_result(fcinfo, &out)
 }
 
@@ -60,7 +68,7 @@ fn fc_pg_hmac(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
         )
     };
     let name = String::from_utf8_lossy(name.data()).into_owned();
-    let out = hashing::hmac(&name, key.data(), data.data()).map_err(px_err)?;
+    let out = hashing::hmac(&name, key.data(), data.data()).map_err(hash_err)?;
     bytea_result(fcinfo, &out)
 }
 
@@ -416,7 +424,13 @@ fn fc_pgp_armor_headers(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    // pgp-pgsql.c:972: keys and values are UTF-8; convert (and validate)
+    // them into the database encoding.
     for (k, v) in &headers {
+        let kc = mbutils::pg_any_to_server(mcx, k, wchar::PG_UTF8)?;
+        let vc = mbutils::pg_any_to_server(mcx, v, wchar::PG_UTF8)?;
+        let k: &[u8] = kc.as_deref().unwrap_or(k);
+        let v: &[u8] = vc.as_deref().unwrap_or(v);
         let kd = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, k)?);
         let vd = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, v)?);
         srf.putvalues(&[kd, vd], &[false, false])?;

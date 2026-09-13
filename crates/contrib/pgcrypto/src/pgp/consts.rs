@@ -31,6 +31,7 @@ pub const PGP_SYM_BLOWFISH: i32 = 4;
 pub const PGP_SYM_AES_128: i32 = 7;
 pub const PGP_SYM_AES_192: i32 = 8;
 pub const PGP_SYM_AES_256: i32 = 9;
+pub const PGP_SYM_TWOFISH: i32 = 10;
 
 pub const PGP_DIGEST_MD5: i32 = 1;
 pub const PGP_DIGEST_SHA1: i32 = 2;
@@ -64,6 +65,8 @@ pub const NOT_V4_KEYPKT: &str = "Only V4 key packets are supported";
 pub const UNKNOWN_PUBALGO: &str = "Unknown public-key encryption algorithm";
 pub const MULTIPLE_KEYS: &str = "Several keys given - pgcrypto does not handle keyring";
 pub const BAD_S2K_MODE: &str = "Bad S2K mode";
+pub const MATH_FAILED: &str = "Math operation failed";
+pub const PGCRYPTO_BUG: &str = "pgcrypto bug";
 /// PXE_NO_RANDOM as px_THROW_ERROR renders it (px.c:96-101): the one px
 /// error whose SQLSTATE is ERRCODE_INTERNAL_ERROR, not 39000.
 pub const NO_RANDOM: &str = "could not generate a random number";
@@ -99,7 +102,7 @@ pub fn cipher_key_size(code: i32) -> usize {
         PGP_SYM_BLOWFISH => 16,
         PGP_SYM_AES_128 => 16,
         PGP_SYM_AES_192 => 24,
-        PGP_SYM_AES_256 => 32,
+        PGP_SYM_AES_256 | PGP_SYM_TWOFISH => 32,
         _ => 0,
     }
 }
@@ -107,7 +110,7 @@ pub fn cipher_key_size(code: i32) -> usize {
 pub fn cipher_block_size(code: i32) -> usize {
     match code {
         PGP_SYM_DES3 | PGP_SYM_CAST5 | PGP_SYM_BLOWFISH => 8,
-        PGP_SYM_AES_128 | PGP_SYM_AES_192 | PGP_SYM_AES_256 => 16,
+        PGP_SYM_AES_128 | PGP_SYM_AES_192 | PGP_SYM_AES_256 | PGP_SYM_TWOFISH => 16,
         _ => 0,
     }
 }
@@ -118,6 +121,7 @@ pub fn cipher_int_name(code: i32) -> Option<&'static str> {
         PGP_SYM_CAST5 => Some("cast5-ecb"),
         PGP_SYM_BLOWFISH => Some("bf-ecb"),
         PGP_SYM_AES_128 | PGP_SYM_AES_192 | PGP_SYM_AES_256 => Some("aes-ecb"),
+        PGP_SYM_TWOFISH => Some("twofish-ecb"),
         _ => None,
     }
 }
@@ -130,7 +134,7 @@ pub fn cipher_code(name: &str) -> Option<i32> {
         "aes" | "aes128" => Some(PGP_SYM_AES_128),
         "aes192" => Some(PGP_SYM_AES_192),
         "aes256" => Some(PGP_SYM_AES_256),
-        "twofish" => Some(10),
+        "twofish" => Some(PGP_SYM_TWOFISH),
         _ => None,
     }
 }
@@ -147,61 +151,44 @@ pub fn digest_code(name: &str) -> Option<i32> {
     }
 }
 
-#[derive(Clone)]
-enum Hasher {
-    Md5(::pg_md5::Md5),
-    Sha1(::pg_sha1::Sha1),
-    Sha256(::pg_sha2::PgSha256Ctx),
-    Sha384(::pg_sha2::PgSha512Ctx),
-    Sha512(::pg_sha2::PgSha512Ctx),
+pub fn digest_name(code: i32) -> Option<&'static str> {
+    match code {
+        PGP_DIGEST_MD5 => Some("md5"),
+        PGP_DIGEST_SHA1 => Some("sha1"),
+        PGP_DIGEST_RIPEMD160 => Some("ripemd160"),
+        PGP_DIGEST_SHA256 => Some("sha256"),
+        PGP_DIGEST_SHA384 => Some("sha384"),
+        PGP_DIGEST_SHA512 => Some("sha512"),
+        _ => None,
+    }
 }
 
-#[derive(Clone)]
+/// pgp.c:174 pgp_load_digest over openssl.c px_find_digest.
 pub struct Digest {
-    initial: Hasher,
-    state: Hasher,
-    len: usize,
+    md: crate::hashing::OsslDigest,
 }
 
 impl Digest {
     pub fn new(code: i32) -> Option<Digest> {
-        let (state, len) = match code {
-            PGP_DIGEST_MD5 => (Hasher::Md5(::pg_md5::Md5::new()), 16),
-            PGP_DIGEST_SHA1 => (Hasher::Sha1(::pg_sha1::Sha1::init()), 20),
-            PGP_DIGEST_SHA256 => (Hasher::Sha256(::pg_sha2::PgSha256Ctx::init_sha256()), 32),
-            PGP_DIGEST_SHA384 => (Hasher::Sha384(::pg_sha2::PgSha512Ctx::init_sha384()), 48),
-            PGP_DIGEST_SHA512 => (Hasher::Sha512(::pg_sha2::PgSha512Ctx::init_sha512()), 64),
-            _ => return None,
-        };
-        Some(Digest { initial: state.clone(), state, len })
+        let name = digest_name(code)?;
+        let md = crate::hashing::OsslDigest::find(name).ok()?;
+        Some(Digest { md })
     }
 
     pub fn result_size(&self) -> usize {
-        self.len
+        self.md.result_size().unwrap_or(0)
     }
 
     pub fn reset(&mut self) {
-        self.state = self.initial.clone();
+        self.md.reset();
     }
 
     pub fn update(&mut self, data: &[u8]) {
-        match &mut self.state {
-            Hasher::Md5(c) => c.update(data),
-            Hasher::Sha1(c) => c.update(data),
-            Hasher::Sha256(c) => c.update(data),
-            Hasher::Sha384(c) => c.update(data),
-            Hasher::Sha512(c) => c.update(data),
-        }
+        self.md.update(data);
     }
 
     pub fn finish(&mut self) -> Vec<u8> {
-        let out = match self.state.clone() {
-            Hasher::Md5(c) => c.finish().to_vec(),
-            Hasher::Sha1(c) => c.finish().to_vec(),
-            Hasher::Sha256(c) => c.final_sha256().to_vec(),
-            Hasher::Sha384(c) => c.final_sha384().to_vec(),
-            Hasher::Sha512(c) => c.final_sha512().to_vec(),
-        };
+        let out = self.md.finish();
         self.reset();
         out
     }

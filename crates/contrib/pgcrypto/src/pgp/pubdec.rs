@@ -82,7 +82,7 @@ pub fn parse_pubenc_sesskey(pk: &PubKey, body: &[u8]) -> Result<(i32, Vec<u8>), 
             if let KeyMaterial::Rsa { n, d, .. } = &pk.material {
                 let d = d.as_ref().ok_or_else(|| WRONG_KEY.to_string())?;
                 let c = read_mpi(body, &mut pos)?;
-                mpi::rsa_decrypt(n, d, &c)
+                mpi::rsa_decrypt(n, d, &c)?
             } else {
                 return Err("Wrong key".to_string());
             }

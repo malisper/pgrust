@@ -256,6 +256,17 @@ fn msg1() -> Vec<u8> {
     unhex(MSG1)
 }
 
+fn hash_msg(r: Result<Vec<u8>, hashing::HashError>) -> String {
+    match r {
+        Ok(v) => hex(&v),
+        Err(e) => hash_err(e).message,
+    }
+}
+
+fn hex(v: &[u8]) -> String {
+    v.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn cipher_msg(op: &str, r: Result<Vec<u8>, cipher::CipherError>) -> String {
     match r {
         Ok(_) => "OK".to_string(),
@@ -330,16 +341,16 @@ fn oversize_keys_clamp_to_cipher_key_size() {
 fn provider_names_are_downcased_and_truncated() {
     let x70 = "x".repeat(70);
     assert_eq!(
-        hashing::digest(&x70, b"abc").unwrap_err(),
+        hash_msg(hashing::digest(&x70, b"abc")),
         format!("Cannot use \"{}\": No such hash algorithm", "x".repeat(63))
     );
     assert_eq!(
-        hashing::digest("SHA9", b"abc").unwrap_err(),
+        hash_msg(hashing::digest("SHA9", b"abc")),
         "Cannot use \"sha9\": No such hash algorithm"
     );
-    assert_eq!(hashing::digest("SHA256", b"abc").unwrap(), hashing::digest("sha256", b"abc").unwrap());
+    assert_eq!(hash_msg(hashing::digest("SHA256", b"abc")), hash_msg(hashing::digest("sha256", b"abc")));
     assert_eq!(
-        hashing::hmac(&"Y".repeat(64), b"k", b"abc").unwrap_err(),
+        hash_msg(hashing::hmac(&"Y".repeat(64), b"k", b"abc")),
         format!("Cannot use \"{}\": No such hash algorithm", "y".repeat(63))
     );
     assert_eq!(
@@ -566,4 +577,153 @@ fn builtin_crypto_mode_off_and_fips_arms() {
     );
     assert_eq!(e.sqlstate, ERRCODE_INTERNAL_ERROR);
     assert!(check_builtin_crypto_mode(Some("on")).is_ok());
+}
+
+// openssl.c:168 px_find_digest resolves every EVP_get_digestbyname name, not
+// a fixed six (batch-19 fp-contrib-pgcrypto-openssl#3 / pgcrypto#1 / b3#3).
+// Values: live C 18.6 pgcrypto, 2026-09-13.
+#[test]
+fn digest_and_hmac_resolve_every_openssl_name() {
+    assert_eq!(
+        hash_msg(hashing::digest("sha3-256", b"abc")),
+        "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532"
+    );
+    assert_eq!(
+        hash_msg(hashing::hmac("sha3-256", b"key", b"abc")),
+        "09b6dbab8d11795ca7c8d82f1cf91682013c7cb980abbb25473be4ae7f7b5683"
+    );
+    assert_eq!(
+        hash_msg(hashing::digest("sha512-256", b"abc")),
+        "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23"
+    );
+    assert_eq!(
+        hash_msg(hashing::hmac("sha512-256", "k".repeat(200).as_bytes(), "a".repeat(300).as_bytes())),
+        "a04af968677a2e05ecb31915525a4e3f6d69af8dbed5960a65fcdef42c054611"
+    );
+    assert_eq!(
+        hash_msg(hashing::digest("ripemd160", b"abc")),
+        "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc"
+    );
+    assert_eq!(hash_msg(hashing::hmac("md5", b"k", b"abc")), "75972c9c6569f2f407752ddb02ac79de");
+    // openssl.c:101 digest_result_size: an XOF has no fixed size (OpenSSL 3.4+).
+    let e = hash_err(hashing::digest("shake128", b"abc").err().unwrap());
+    assert_eq!(e.message, "EVP_MD_CTX_size() failed");
+    assert_eq!(e.sqlstate, ERRCODE_INTERNAL_ERROR);
+}
+
+// pgp.c:174 pgp_load_digest: RIPEMD160 is a pgp digest (batch-19 b2#3).
+#[test]
+fn s2k_digest_ripemd160_round_trips() {
+    let ct = pgp::sym_encrypt(b"x", b"k", Some(b"s2k-digest-algo=ripemd160"), false).unwrap();
+    assert_eq!(ct[5], consts::PGP_DIGEST_RIPEMD160 as u8);
+    assert_eq!(pgp::sym_decrypt(&ct, b"k", None, false).unwrap().plaintext, b"x");
+}
+
+// pgp.c:83 cipher_list: twofish has a 16-byte block and 32-byte key, so the
+// prefix is built and pgp_cfb_create is what rejects it (batch-19 b3#1).
+#[test]
+fn twofish_is_unsupported_not_a_zero_block() {
+    for args in [
+        "cipher-algo=twofish,s2k-cipher-algo=aes128",
+        "cipher-algo=twofish,s2k-cipher-algo=aes,sess-key=1",
+        "cipher-algo=twofish",
+    ] {
+        assert_eq!(
+            pgp::sym_encrypt(b"x", b"k", Some(args.as_bytes()), false).unwrap_err(),
+            consts::UNSUPPORTED_CIPHER,
+            "{args}"
+        );
+    }
+    // The S2K-only arm encrypts (the 32-byte S2K key drives AES-256 as in C)
+    // and is rejected when decrypt selects twofish as the data cipher.
+    let ct = pgp::sym_encrypt(b"x", b"k", Some(b"s2k-cipher-algo=twofish"), false).unwrap();
+    assert_eq!(ct[3], consts::PGP_SYM_TWOFISH as u8);
+    match pgp::sym_decrypt(&ct, b"k", None, false) {
+        Ok(_) => panic!("decrypt succeeded"),
+        Err(e) => assert_eq!(e.message, consts::UNSUPPORTED_CIPHER),
+    }
+}
+
+// pgp-encrypt.c:263 pkt_stream_process: streamed packets go out in 16 KiB
+// partial-length chunks (0xEE) ending in a normal-length chunk, at the
+// literal and the encrypted-data level (batch-19 mbuf#1 / pgp-encrypt#3).
+// Lengths: live C 18.6, s2k-mode=0 so only the prefix bytes are random.
+#[test]
+fn stream_packets_use_partial_lengths() {
+    let enc = |n: usize, extra: &str| {
+        let args = format!("s2k-mode=0,compress-algo=0{extra}");
+        pgp::sym_encrypt(&vec![b'x'; n], b"k", Some(args.as_bytes()), false).unwrap()
+    };
+    let ct = enc(20000, "");
+    assert_eq!(ct[7], 0xEE);
+    assert_eq!(ct.len(), 20061);
+    assert_eq!(enc(0, "").len(), 57);
+    assert_eq!(enc(16378, "").len(), 16437);
+    assert_eq!(enc(16384, "").len(), 16443);
+    assert_eq!(enc(32768, "").len(), 32829);
+    assert_eq!(enc(100000, "").len(), 100071);
+    assert_eq!(enc(20000, ",disable-mdc=1").len(), 20038);
+    assert_eq!(enc(16384, ",disable-mdc=1").len(), 16420);
+    let big = vec![b'y'; 40000];
+    let ct = pgp::sym_encrypt(&big, b"k", None, true).unwrap();
+    assert_eq!(pgp::sym_decrypt(&ct, b"k", None, true).unwrap().plaintext, big);
+}
+
+// pgp-decrypt.c:802 parse_literal_data: CRLF conversion follows the SQL
+// caller's text mode, not the packet's own type (batch-19 pgp-decrypt#1).
+#[test]
+fn bytea_decrypt_of_a_text_packet_keeps_crlf() {
+    let ct = pgp::sym_encrypt(b"a\r\nb\r", b"k", None, true).unwrap();
+    let out = pgp::sym_decrypt(&ct, b"k", Some(b"convert-crlf=1"), false).unwrap();
+    assert_eq!(out.plaintext, b"a\r\nb\r");
+    let out = pgp::sym_decrypt(&ct, b"k", Some(b"convert-crlf=1"), true).unwrap();
+    assert_eq!(out.plaintext, b"a\nb\r");
+}
+
+// A no-MDC, s2k-mode=0 AES-128 message whose encrypted stream carries two
+// literal packets; pgp-decrypt.c:883 process_data_packets appends both
+// (batch-19 pgp-decrypt#2).
+fn two_literal_message() -> Vec<u8> {
+    use pgp::packet::write_packet;
+    let mut s2k = pgp::s2k::S2k::fill(consts::PGP_S2K_SIMPLE, consts::PGP_DIGEST_SHA1, -1).unwrap();
+    s2k.process(consts::PGP_SYM_AES_128, b"k").unwrap();
+    let mut msg = Vec::new();
+    write_packet(&mut msg, consts::PGP_PKT_SYMENC_SESSKEY, &[4, consts::PGP_SYM_AES_128 as u8, 0, consts::PGP_DIGEST_SHA1 as u8]);
+    let mut plain = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 15, 16];
+    for d in [b'a', b'b'] {
+        write_packet(&mut plain, consts::PGP_PKT_LITERAL_DATA, &[b'b', 0, 0, 0, 0, 0, d]);
+    }
+    let mut cfb = pgp::cfb::PgpCfb::create(consts::PGP_SYM_AES_128, &s2k.key, true, None, false).unwrap();
+    let ct = cfb.encrypt(&plain);
+    write_packet(&mut msg, consts::PGP_PKT_SYMENC_DATA, &ct);
+    msg
+}
+
+#[test]
+fn every_literal_packet_is_appended() {
+    let msg = two_literal_message();
+    println!("two_literal_message: {}", hex(&msg));
+    assert_eq!(pgp::sym_decrypt(&msg, b"k", None, false).unwrap().plaintext, b"ab");
+}
+
+// pgp-pubenc.c:171 / pgp-mpi-openssl.c:266: a zero-bit modulus is PXE_BUG on
+// encrypt (negative padding room) and PXE_PGP_MATH_FAILED on decrypt
+// (BN_mod_exp by zero); neither may panic (batch-19 b2#1 / b2#2). Keys are
+// bare RSA / Elgamal subkey packets with n (p) as the zero-bit MPI.
+#[test]
+fn zero_modulus_keys_fail_like_openssl() {
+    let rsa_pub = unhex("ce0d04000000000100000011010001");
+    let elg_pub = unhex("ce0e0400000000100000000101000101");
+    assert_eq!(pgp::pub_encrypt(b"x", &rsa_pub, None, false).unwrap_err(), consts::PGCRYPTO_BUG);
+    assert_eq!(pgp::pub_encrypt(b"x", &elg_pub, None, false).unwrap_err(), consts::PGCRYPTO_BUG);
+    let rsa_sec = unhex("c71c04000000000100000011010001000001010001010001010001010008");
+    let rsa_msg = unhex("c10d030000000000000000010008ff");
+    let elg_sec = unhex("c7140400000000100000000101000101000001010002");
+    let elg_msg = unhex("c110030000000000000000100008ff0008ff");
+    for (msg, sec) in [(rsa_msg, rsa_sec), (elg_msg, elg_sec)] {
+        match pgp::pub_decrypt(&msg, &sec, None, None, false) {
+            Ok(_) => panic!("decrypt succeeded"),
+            Err(e) => assert_eq!(e.message, consts::MATH_FAILED),
+        }
+    }
 }
