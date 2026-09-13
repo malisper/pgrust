@@ -67,6 +67,13 @@ pub(crate) fn install_xlog_archive_command() {
         set: |v| XLOG_ARCHIVE_COMMAND.set(v.map(|s| &*s.leak())),
     });
     guc_tables::hooks::show_archive_command.install(show_archive_command);
+    guc_tables::hooks::show_in_hot_standby.install(show_in_hot_standby);
+}
+
+// show_in_hot_standby (xlog.c:4860): the live shared state, so a SHOW during
+// a statement that spans promotion reports "off" before the next ParameterStatus.
+fn show_in_hot_standby() -> String {
+    if crate::RecoveryInProgress() { "on" } else { "off" }.to_string()
 }
 
 // show_archive_command (xlog.c).

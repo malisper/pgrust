@@ -2251,6 +2251,7 @@ pub mod rtpool {
                 super::sim_universe_adopt(sim_universe);
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
+                stack_depth::set_thread_stack_ceiling(super::child_thread_stack_size());
                 if guc::layers::base_share_enabled() {
                     guc::store::initialize_guc_options_for_child_base(&guc_base)
                         .and_then(|()| guc::layers::bind_base(&guc_base))
@@ -2531,6 +2532,7 @@ pub mod rtgang {
         let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
         boot.inherited.apply();
         let _ = stack_depth::set_stack_base();
+        stack_depth::set_thread_stack_ceiling(super::child_thread_stack_size());
         let guc_ok = if let Some(base) = &boot.guc_base {
             guc::store::initialize_guc_options_for_child_base(base)
                 .and_then(|()| guc::layers::bind_base(base))

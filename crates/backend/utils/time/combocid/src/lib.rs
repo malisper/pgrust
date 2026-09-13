@@ -77,9 +77,9 @@ pub fn HeapTupleHeaderAdjustCmax(
 
 pub fn AtEOXact_ComboCid() {
     STATE.with(|s| {
-        let mut s = s.borrow_mut();
-        s.comboCids.clear();
-        s.comboHash.clear();
+        // combocid.c:182: TopTransactionContext frees the storage; drop the
+        // capacity too rather than pinning the high-water mark for the session.
+        *s.borrow_mut() = ComboCidState::default();
     });
 }
 

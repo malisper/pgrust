@@ -137,3 +137,18 @@ fn at_eoxact_forgets_combo_state() {
     AtEOXact_ComboCid();
     assert_eq!(GetComboCommandId(5, 6), 0);
 }
+
+#[test]
+fn eoxact_releases_combo_cid_storage() {
+    setup();
+    for i in 0..1000 {
+        GetComboCommandId(i, i + 1);
+    }
+    STATE.with(|s| assert!(s.borrow().comboCids.capacity() >= 1000));
+    AtEOXact_ComboCid();
+    STATE.with(|s| {
+        let s = s.borrow();
+        assert_eq!(s.comboCids.capacity(), 0);
+        assert_eq!(s.comboHash.capacity(), 0);
+    });
+}

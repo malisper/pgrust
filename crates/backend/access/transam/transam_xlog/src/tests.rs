@@ -240,6 +240,11 @@ fn insert_flush_smoke() {
     // XLOGShmemInit + the StartupXLOG clean-shutdown tail.
     XLOGShmemInit();
     let ctl = XLogCtl();
+    // xlog.c:4860 show_in_hot_standby reads the shared recovery state, not
+    // the reported backing bool (which stays at its boot value here).
+    let show_in_hot_standby = guc_tables::hooks::show_in_hot_standby.get();
+    assert_eq!(show_in_hot_standby(), "on");
+    assert!(!guc_tables::backing::in_hot_standby_guc());
     ctl.InsertTimeLineID.store(1, Relaxed);
     ctl.PrevTimeLineID.store(1, Relaxed);
     ctl.Insert.PrevBytePos.store(XLogRecPtrToBytePos(redo), Relaxed);
@@ -274,6 +279,8 @@ fn insert_flush_smoke() {
     xlogutils::set_in_recovery(false);
 
     assert!(!RecoveryInProgress());
+    assert_eq!(show_in_hot_standby(), "off");
+    assert!(!guc_tables::backing::in_hot_standby_guc());
     assert!(XLogInsertAllowed());
 
     // Record 1: small NOOP-shaped record.

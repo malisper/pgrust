@@ -335,3 +335,15 @@ fn crash_exit_releases_held_lwlocks() {
     assert!(LWLockHeldByMe(&slots[0].lock));
     ::lwlock::LWLockReleaseAll().unwrap();
 }
+
+// Every thread this crate brings up pairs set_stack_base with the per-thread
+// ceiling clamp, so check_stack_depth raises 54001 before the reservation
+// ends (the standing gang thread runs the parallel index-build recursion).
+#[test]
+fn every_child_thread_arms_its_stack_ceiling() {
+    let src = include_str!("lib.rs");
+    let bases = src.matches("stack_depth::set_stack_base()").count();
+    let ceilings = src.matches("stack_depth::set_thread_stack_ceiling(").count();
+    assert!(bases >= 5, "{bases}");
+    assert_eq!(bases, ceilings);
+}

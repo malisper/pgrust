@@ -146,7 +146,10 @@ fn session_teardown_portals() {
     let _ = PortalHashTableDeleteAll();
     PORTAL_MGR.with(|m| {
         let Some(mgr) = m.borrow_mut().take() else { return };
-        let mgr = ManuallyDrop::into_inner(mgr);
+        let mut mgr = ManuallyDrop::into_inner(mgr);
+        for (_, shell) in core::mem::take(&mut mgr.parked) {
+            discard_shell(&shell);
+        }
         if !mgr.entries.is_empty() {
             let _ = elog(
                 DEBUG1,

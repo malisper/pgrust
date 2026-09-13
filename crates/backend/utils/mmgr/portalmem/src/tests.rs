@@ -328,6 +328,34 @@ fn session_teardown_drops_held_portals_and_ends_their_stores() {
     EnablePortalManager();
 }
 
+// A parked (retained-execution) shell pins its plan, query descriptor and
+// statement list; the Portals teardown phase must release them like
+// discard_shell does on displacement.
+#[test]
+fn session_teardown_releases_parked_shells() {
+    setup();
+    execmain_seams::release_query_desc::set(|q| log(format!("release_qd({})", q.0)));
+    let shell = CreatePortal("", false, false).unwrap();
+    remove_from_table(&shell).unwrap();
+    {
+        let mut p = shell.borrow_mut();
+        p.queryDesc = QueryDescHandle(71);
+        p.stmts = StmtListHandle(72);
+        p.cplan = CachedPlanHandle(73);
+    }
+    with_mgr(|m| m.parked.push((PlanSourceHandle(5), shell.clone()))).unwrap();
+    EVENTS.with(|e| e.borrow_mut().clear());
+
+    session_teardown_portals();
+
+    let ev = events();
+    for want in ["release_qd(71)", "stmt_list_free(72)", "release_cplan(73)"] {
+        assert!(ev.contains(&want.to_owned()), "{want} missing: {ev:?}");
+    }
+    assert!(shell.borrow().cplan.is_null());
+    EnablePortalManager();
+}
+
 #[test]
 fn precommit_holds_holdable_and_drops_the_rest() {
     setup();
