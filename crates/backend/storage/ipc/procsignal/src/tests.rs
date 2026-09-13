@@ -647,3 +647,33 @@ fn thread_signal_reaches_backend_children() {
     DrainThreadSignals().unwrap();
     cleanup_current();
 }
+
+// The kill(-pid) leg: a shell that traps SIGTERM keeps waiting on its forked
+// `sleep` until the group signal reaches the sleep too (archive_command /
+// restore_command shells lead their own group via wait_error::system).
+#[test]
+fn thread_signal_reaches_backend_child_process_group() {
+    use std::os::unix::process::CommandExt;
+    setup();
+    let _guard = serial();
+    register(16, 1016, &[]);
+    let started = std::time::Instant::now();
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("trap 'exit 7' TERM; sleep 30; exit 1")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    g::register_backend_child(child.id());
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    pqsignal_thread(libc::SIGTERM, ThreadSignalHandler::Ignore);
+    assert_eq!(SendThreadSignalByProcNumber(16, 1016, libc::SIGTERM), 0);
+    let status = child.wait().unwrap();
+    g::unregister_backend_child(child.id());
+    assert_eq!(status.code(), Some(7));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+
+    DrainThreadSignals().unwrap();
+    cleanup_current();
+}

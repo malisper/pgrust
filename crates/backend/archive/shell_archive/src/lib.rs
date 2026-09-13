@@ -5,6 +5,7 @@
 #![allow(clippy::result_large_err)]
 
 use elog::{elog, ereport};
+use init_small::globals as g;
 use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG3, FATAL, LOG};
 
 use percentrepl::replace_percent_placeholders;
@@ -44,7 +45,11 @@ pub fn shell_archive_file(file: &str, path: Option<&str>) -> PgResult<bool> {
         .finish(loc("shell_archive_file"))?;
 
     waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_ARCHIVE_COMMAND);
-    let rc = wait_error::system(&xlogarchcmd);
+    let rc = wait_error::system_tracked(
+        &xlogarchcmd,
+        g::register_backend_child,
+        g::unregister_backend_child,
+    );
     waitevent_seams::pgstat_report_wait_end::call();
 
     if rc != 0 {

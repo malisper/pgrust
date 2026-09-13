@@ -103,7 +103,11 @@ pub fn RestoreArchivedFile(
 
     waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_RESTORE_COMMAND);
     postmaster_startup::PreRestoreCommand();
-    let rc = wait_error::system(&xlog_restore_cmd);
+    let rc = wait_error::system_tracked(
+        &xlog_restore_cmd,
+        g::register_backend_child,
+        g::unregister_backend_child,
+    );
     postmaster_startup::PostRestoreCommand();
     waitevent_seams::pgstat_report_wait_end::call();
 

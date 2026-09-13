@@ -490,14 +490,12 @@ fn free_local_latch_rejects_proc_handle() {
 
 static DRAINS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static DRAIN_FAIL_NEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PENDING_SIGNAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SIGNAL_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-#[test]
-fn wait_latch_runs_thread_signal_drain() {
-    let _g = TEST_LOCK.lock().unwrap();
-    install_mock();
-    SetMyProcPid(43);
-    SetIsUnderPostmaster(false);
-
+/// Drain stub: counts drains, fails once on request, and when a signal is
+/// pending runs a C-shaped handler (flag store, then SetLatch(MyLatch)).
+fn install_drain_seam() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
         procsignal_seams::drain_thread_signals::set(|| {
@@ -508,29 +506,74 @@ fn wait_latch_runs_thread_signal_drain() {
                     "terminating connection due to administrator command",
                 )));
             }
+            if PENDING_SIGNAL.swap(false, SeqCst) {
+                SIGNAL_FLAG.store(true, SeqCst);
+                SetLatch(MyLatch().expect("MyLatch"));
+            }
             Ok(())
         });
     });
+}
+
+#[test]
+fn wait_latch_runs_thread_signal_drain() {
+    let _g = TEST_LOCK.lock().unwrap();
+    install_mock();
+    SetMyProcPid(43);
+    SetIsUnderPostmaster(false);
+    install_drain_seam();
 
     let h = fresh_latch();
     InitLatch(h);
     SetMyLatch(Some(h));
     InitializeLatchWaitSet().unwrap();
 
-    // Pre-set latch: WaitLatch returns immediately, then runs the drain.
+    // Pre-set latch: the entry drain runs, WaitLatch returns immediately,
+    // then the exit drain runs.
     latch_ref(h).is_set.store(1, SeqCst);
     let before = DRAINS.load(SeqCst);
     assert_eq!(WaitLatch(Some(h), WL_LATCH_SET, 0, 0).unwrap(), WL_LATCH_SET);
-    assert_eq!(DRAINS.load(SeqCst), before + 1);
+    assert_eq!(DRAINS.load(SeqCst), before + 2);
 
     DRAIN_FAIL_NEXT.store(true, SeqCst);
     let err = WaitLatch(Some(h), WL_LATCH_SET, 0, 0).unwrap_err();
     assert_eq!(err.level(), types_error::FATAL);
+    assert_eq!(DRAINS.load(SeqCst), before + 3);
 
     with_mock(|m| m.wait_result = Ok(None));
     let rc = WaitLatchOrSocket(Some(h), WL_LATCH_SET | WL_TIMEOUT, PGINVALID_SOCKET, 1, 0).unwrap();
     assert_eq!(rc, WL_TIMEOUT);
-    assert_eq!(DRAINS.load(SeqCst), before + 3);
+    assert_eq!(DRAINS.load(SeqCst), before + 5);
+
+    SetMyLatch(None);
+}
+
+// The checkpointer's shutdown loop is ResetLatch -> check flag -> WaitLatch
+// (checkpointer.c:400-410). C's handler stores the flag at delivery; the
+// thread-model handler runs at a drain, so a signal delivered before the
+// ResetLatch must be drained at WaitLatch entry or the reset swallows the
+// only wake and the thread parks forever (P001, PM_WAIT_CHECKPOINTER wedge).
+#[test]
+fn wait_latch_drains_signal_delivered_before_reset_latch() {
+    let _g = TEST_LOCK.lock().unwrap();
+    install_mock();
+    SetMyProcPid(45);
+    SetIsUnderPostmaster(false);
+    install_drain_seam();
+
+    let h = fresh_latch();
+    InitLatch(h);
+    SetMyLatch(Some(h));
+    InitializeLatchWaitSet().unwrap();
+
+    SIGNAL_FLAG.store(false, SeqCst);
+    PENDING_SIGNAL.store(true, SeqCst);
+    SetLatch(h);
+    ResetLatch(h);
+    assert!(!SIGNAL_FLAG.load(SeqCst));
+    let rc = WaitLatch(Some(h), WL_LATCH_SET | WL_TIMEOUT, 2000, 0).unwrap();
+    assert_eq!(rc, WL_LATCH_SET);
+    assert!(SIGNAL_FLAG.load(SeqCst));
 
     SetMyLatch(None);
 }

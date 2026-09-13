@@ -255,6 +255,26 @@ fn logger_pipe_errors_use_socket_access_sqlstates() {
     assert_eq!(err.message, format!("could not create pipe for syslog: {}", elog::errno::strerror(libc::EMFILE)));
 }
 
+/// syslogger.c:1421: snprintf(MAXPGPATH) truncates "<Log_directory>/" by
+/// bytes; a cut inside a multibyte character must not panic (C keeps the
+/// partial lead byte, which a String cannot hold, so it is dropped).
+#[test]
+fn logfile_getname_truncates_log_directory_on_a_char_boundary() {
+    let _g = lock();
+    let dir = format!("{}\u{e9}", "a".repeat(MAXPGPATH - 2));
+    assert_eq!(dir.len(), MAXPGPATH);
+    let saved_dir = LOG_DIRECTORY.lock().unwrap().replace(dir);
+    let saved_name = LOG_FILENAME.lock().unwrap().replace("x".to_string());
+    let saved_tz = pgtz::log_timezone();
+    pgtz::set_log_timezone(Some(pgtz::pg_tzset(b"GMT").unwrap().expect("GMT always parses")));
+
+    assert_eq!(logfile_getname(0, None), "a".repeat(MAXPGPATH - 2));
+
+    *LOG_FILENAME.lock().unwrap() = saved_name;
+    *LOG_DIRECTORY.lock().unwrap() = saved_dir;
+    pgtz::set_log_timezone(saved_tz);
+}
+
 /// syslogger.c:1424: `pg_strftime(filename + len, MAXPGPATH - len, ...)`
 /// formats up to MAXPGPATH - len - 1 bytes (the last slot is the NUL); one
 /// byte more overflows and leaves "<Log_directory>/".
@@ -283,4 +303,44 @@ fn logfile_getname_formats_up_to_maxpgpath_minus_len_minus_one() {
     *LOG_FILENAME.lock().unwrap() = saved_name;
     *LOG_DIRECTORY.lock().unwrap() = saved_dir;
     pgtz::set_log_timezone(saved_tz);
+}
+
+/// syslogger.c:1120-1128: a logfile write failure is reported on the
+/// collector's own stderr, which is never its input pipe. Sharing fd 2 with
+/// the postmaster (redirected into the pipe) would make every failed write
+/// generate another message to fail on: a self-sustaining loop on ENOSPC.
+#[test]
+fn write_failure_report_avoids_the_collector_input_pipe() {
+    let _g = lock();
+    let mut fds = [0i32; 2];
+    // SAFETY: fresh pipe; the read end is made non-blocking so an absent
+    // report fails the assertion instead of hanging.
+    unsafe {
+        assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+        libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    let saved_orig = SYSLOG_ORIG_STDERR.swap(fds[1], Relaxed);
+    // SAFETY: a read-only stream makes fwrite fail with EBADF.
+    let readonly = unsafe { libc::fopen(c"/dev/null".as_ptr(), c"r".as_ptr()) };
+    assert!(!readonly.is_null());
+    let saved_file = SYSLOG_FILE.swap(readonly, Relaxed);
+
+    write_syslogger_file(b"hello\n", LOG_DESTINATION_STDERR);
+
+    let mut buf = [0u8; 256];
+    // SAFETY: reading our own pipe into a stack buffer.
+    let n = unsafe { libc::read(fds[0], buf.as_mut_ptr().cast(), buf.len()) }.max(0) as usize;
+    assert_eq!(
+        String::from_utf8_lossy(&buf[..n]),
+        format!("could not write to log file: {}\n", elog::errno::strerror(libc::EBADF))
+    );
+
+    SYSLOG_FILE.store(saved_file, Relaxed);
+    SYSLOG_ORIG_STDERR.store(saved_orig, Relaxed);
+    // SAFETY: closing what this test opened.
+    unsafe {
+        libc::fclose(readonly);
+        libc::close(fds[0]);
+        libc::close(fds[1]);
+    }
 }

@@ -716,6 +716,8 @@ fn signal_backend_children(pid: i32, bit: u32) {
     for child in init_small::globals::backend_children(pid) {
         // SAFETY: kill(2) on a pid this backend spawned and still owns.
         unsafe { libc::kill(child as libc::pid_t, signo) };
+        // SAFETY: the same child's process group (ESRCH if it leads none).
+        unsafe { libc::kill(-(child as libc::pid_t), signo) };
     }
 }
 

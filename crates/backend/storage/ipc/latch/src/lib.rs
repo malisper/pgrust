@@ -281,6 +281,10 @@ pub fn WaitLatch(
         None
     };
 
+    // C's handler ran at delivery; a signal that landed before the caller's
+    // ResetLatch must run here, before parking, or its SetLatch is lost.
+    drain_thread_signals()?;
+
     // Guarded like the drain seams below: pgstat wait reporting is
     // diagnostics; unit tests run without the activity seams installed.
     let report = waitevent_seams::pgstat_report_wait_start::is_installed();
@@ -394,6 +398,8 @@ fn wait_latch_or_socket(
     } else {
         timeout = -1;
     }
+
+    drain_thread_signals()?;
 
     if wakeEvents & WL_LATCH_SET != 0 {
         wes::add_wait_event_to_set::call(set, WL_LATCH_SET, PGINVALID_SOCKET, latch, None)?;

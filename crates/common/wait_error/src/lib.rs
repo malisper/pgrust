@@ -6,11 +6,37 @@
 // caller immediately feeds its raw wait status into wait_result_to_str et al.
 #[cfg(not(target_family = "wasm"))]
 pub fn system(command: &str) -> i32 {
-    use std::os::unix::process::ExitStatusExt;
-    match std::process::Command::new("/bin/sh").arg("-c").arg(command).status() {
+    system_tracked(command, |_| {}, |_| {})
+}
+
+// The shell leads its own process group, as C's setsid'd child does, so the
+// kill(-pid) leg of signal_child reaches the command's descendants; the hooks
+// let the caller register the child for that signal fan-out.
+#[cfg(not(target_family = "wasm"))]
+pub fn system_tracked(command: &str, spawned: impl FnOnce(u32), reaped: impl FnOnce(u32)) -> i32 {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let mut child = match std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .process_group(0)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return -1,
+    };
+    let pid = child.id();
+    spawned(pid);
+    let rc = match child.wait() {
         Ok(status) => status.into_raw(),
         Err(_) => -1,
-    }
+    };
+    reaped(pid);
+    rc
+}
+
+#[cfg(target_family = "wasm")]
+pub fn system_tracked(_command: &str, _spawned: impl FnOnce(u32), _reaped: impl FnOnce(u32)) -> i32 {
+    -1
 }
 
 // wasm32: WASI p1 has no processes; system(3) fails as C's would when
@@ -152,6 +178,33 @@ mod tests {
 
     fn signaled(sig: i32) -> i32 {
         sig
+    }
+
+    // The shell traps SIGTERM and is waiting on its forked `sleep`, so it
+    // only exits promptly if kill(-pid) reaches the sleep: the shell must
+    // lead its own process group.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn system_tracked_child_leads_its_own_process_group() {
+        let started = std::time::Instant::now();
+        let seen = std::sync::Mutex::new((0u32, 0u32));
+        let rc = system_tracked(
+            "trap 'exit 7' TERM; sleep 30; exit 1",
+            |pid| {
+                seen.lock().unwrap().0 = pid;
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    // SAFETY: the shell's own group, created by process_group(0).
+                    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
+                });
+            },
+            |pid| seen.lock().unwrap().1 = pid,
+        );
+        assert!(WIFEXITED(rc), "status {rc:#x}");
+        assert_eq!(WEXITSTATUS(rc), 7);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        let (spawned, reaped) = *seen.lock().unwrap();
+        assert!(spawned != 0 && spawned == reaped);
     }
 
     #[test]

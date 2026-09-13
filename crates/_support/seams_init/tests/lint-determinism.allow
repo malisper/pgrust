@@ -165,7 +165,7 @@ fs	crates/backend/postmaster/postmaster/src/main_entry.rs	8
 fs	crates/backend/storage/file/vfs/src/sim_boot.rs	8	DST-REVIEW(provider-seam): the §9.3 asset ingest IS the declared host boundary — the one place the sim world is seeded from a pinned host snapshot (std::fs read-only walk, pre-schedule, digest-covered via asset_hash); sim cfg only, dead in product builds
 env	crates/backend/storage/file/vfs/src/sim_boot.rs	2	DST-REVIEW(provider-seam): PGRUST_PGSHAREDIR/PGRUST_TZDIR are sim-harness asset locators consumed once at boot ingest (§9.3); sim cfg only, dead in product builds
 # --- crates/backend/postmaster/syslogger (32 sites) ---
-fs	crates/backend/postmaster/syslogger/src/lib.rs	32
+fs	crates/backend/postmaster/syslogger/src/lib.rs	34	DST-REVIEW(audit-18.6 postmaster batch-29): +2 = the collector's private dup of the original stderr (fcntl F_DUPFD_CLOEXEC before the pipe redirect) + the write of "could not write to log file" to it (syslogger.c:1120-1128: never the collector's own input pipe, which looped at 25% CPU on ENOSPC). Same fd-2 surface as the existing dup2 sites; P1 Vfs choke routing rides the file's migration.
 # --- crates/backend/replication/logical/reorderbuffer (11 sites) ---
 fs	crates/backend/replication/logical/reorderbuffer/src/iter.rs	2	DST-REVIEW(logdec-port): spill-restore file handles riding the iterator state (C TXNEntryFile) — same surface as spill.rs below; vfd/Vfs routing chartered to the DST program
 fs	crates/backend/replication/logical/reorderbuffer/src/spill.rs	4	DST-REVIEW(logdec-port): reorderbuffer spill files under pg_replslot/<slot>/ — direct file IO exactly as C reorderbuffer.c does via fd.c transient files/vfds (single-run scratch data, deleted at startup); vfd/Vfs routing chartered to the DST program

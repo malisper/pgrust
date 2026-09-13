@@ -17441,6 +17441,7 @@ version = "0.0.0"
 dependencies = [
  "elog",
  "guc_tables",
+ "init_small",
  "libc",
  "percentrepl",
  "types_error",

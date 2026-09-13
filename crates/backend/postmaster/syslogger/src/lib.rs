@@ -87,6 +87,7 @@ static LOG_FILENAME: Mutex<Option<String>> = Mutex::new(None);
 // writing only before launch / in the redirect step.
 static SYSLOG_PIPE_R: AtomicI32 = AtomicI32::new(-1);
 static SYSLOG_PIPE_W: AtomicI32 = AtomicI32::new(-1);
+static SYSLOG_ORIG_STDERR: AtomicI32 = AtomicI32::new(-1);
 static SYSLOG_FILE: AtomicPtr<libc::FILE> = AtomicPtr::new(std::ptr::null_mut());
 static CSVLOG_FILE: AtomicPtr<libc::FILE> = AtomicPtr::new(std::ptr::null_mut());
 static JSONLOG_FILE: AtomicPtr<libc::FILE> = AtomicPtr::new(std::ptr::null_mut());
@@ -508,6 +509,13 @@ pub fn SysLogger_Start(child_slot: i32) -> PgResult<i32> {
                     .finish(loc("SysLogger_Start"))?;
             }
             let _ = std::io::stderr().flush();
+            // The collector shares fd 2 with the postmaster: keep the
+            // original stderr for its own write failures (C: the syslogger's
+            // stderr is the postmaster's original one, or /dev/null).
+            SYSLOG_ORIG_STDERR.store(
+                libc::fcntl(libc::STDERR_FILENO, libc::F_DUPFD_CLOEXEC, 3),
+                Relaxed,
+            );
             if libc::dup2(pipe_write, libc::STDERR_FILENO) < 0 {
                 ereport(FATAL)
                     .with_saved_errno(last_errno())
@@ -642,10 +650,14 @@ pub fn write_syslogger_file(buffer: &[u8], destination: i32) {
         unsafe { libc::fwrite(buffer.as_ptr().cast(), 1, buffer.len(), logfile) }
     };
     if rc != buffer.len() {
-        elog::write_stderr(&elog::errno::replace_percent_m(
-            "could not write to log file: %m\n",
-            last_errno(),
-        ));
+        let msg = elog::errno::replace_percent_m("could not write to log file: %m\n", last_errno());
+        let orig = SYSLOG_ORIG_STDERR.load(Relaxed);
+        if orig < 0 {
+            elog::write_stderr(&msg);
+        } else {
+            // SAFETY: a private dup of the original stderr; never our pipe.
+            unsafe { libc::write(orig, msg.as_ptr().cast(), msg.len()) };
+        }
     }
 }
 
@@ -813,11 +825,10 @@ fn logfile_rotate(time_based_rotation: bool, size_rotation_for: i32, st: &mut Sy
 
 fn logfile_getname(timestamp: pg_time_t, suffix: Option<&str>) -> String {
     let mut filename = format!("{}/", Log_directory());
-    if filename.len() >= MAXPGPATH {
-        filename.truncate(MAXPGPATH - 1);
-    }
-
-    let len = filename.len();
+    // snprintf's byte budget; a cut inside a multibyte char backs up to the
+    // boundary (C keeps the partial byte; a String cannot).
+    let len = filename.len().min(MAXPGPATH - 1);
+    filename.truncate(filename.floor_char_boundary(len));
     let tz = pgtz::log_timezone().expect("log_timezone not initialized");
     if let Some(tm) = localtime::pg_localtime(timestamp, tz) {
         // syslogger.c:1424: pg_strftime(filename + len, MAXPGPATH - len, ...)
