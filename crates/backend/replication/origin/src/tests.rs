@@ -8,8 +8,8 @@ fn text_datum_round_trip_keeps_name_exact() {
     let ctx = mcx::MemoryContext::new("test");
     let mcx = ctx.mcx();
     for name in ["test_origin", "pg_16400", &"n".repeat(300)] {
-        let d = text_datum(mcx, name).unwrap();
-        assert_eq!(text_datum_to_string(mcx, d).unwrap(), name);
+        let d = text_datum(mcx, name.as_bytes()).unwrap();
+        assert_eq!(text_datum_to_bytes(mcx, d).unwrap(), name.as_bytes());
     }
 }
 

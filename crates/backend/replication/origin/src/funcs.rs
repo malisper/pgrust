@@ -17,10 +17,11 @@ use crate::{
     set_replorigin_session_origin_timestamp, show_status_rows,
 };
 
-fn arg_text_string(fcinfo: &mut FunctionCallInfoBaseData, i: usize) -> PgResult<String> {
+// text_to_cstring: the name's bytes as stored, whatever the database encoding.
+fn arg_text_string(fcinfo: &mut FunctionCallInfoBaseData, i: usize) -> PgResult<Vec<u8>> {
     // SAFETY: strict fn — the arg is a non-null text varlena.
     let name = unsafe { fcinfo.arg_varlena_packed(i)? };
-    Ok(String::from_utf8_lossy(name.data()).into_owned())
+    Ok(name.data().to_vec())
 }
 
 pub fn fc_pg_replication_origin_create(
@@ -32,7 +33,8 @@ pub fn fc_pg_replication_origin_create(
 
     // "any"/"none" are reserved for subscription options, "pg_*" for internal
     // use.
-    if catalog::IsReservedName(&name) || is_reserved_origin_name(&name) {
+    if name.starts_with(b"pg_") || is_reserved_origin_name(&name) {
+        let name = String::from_utf8_lossy(&name);
         ereport(ERROR)
             .errcode(ERRCODE_RESERVED_NAME)
             .errmsg(format!("replication origin name \"{name}\" is reserved"))
@@ -209,7 +211,7 @@ pub fn fc_pg_show_replication_origin_status(
 
         // The origin may be dropped concurrently; silently accept that.
         if let Some(roname) = replorigin_by_oid(mcx, roident, true)? {
-            let img = varlena::cstring_to_text(mcx, roname.as_bytes())?.into_image().leak();
+            let img = varlena::cstring_to_text(mcx, &roname)?.into_image().leak();
             values[1] = Datum::from_usize(img.as_ptr() as usize);
             nulls[1] = false;
         }

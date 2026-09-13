@@ -196,15 +196,15 @@ pub(crate) fn replorigin_check_prerequisites(
 }
 
 // IsReservedOriginName: "none" or "any" (pg_strcasecmp).
-pub(crate) fn is_reserved_origin_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("none") || name.eq_ignore_ascii_case("any")
+pub(crate) fn is_reserved_origin_name(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b"none") || name.eq_ignore_ascii_case(b"any")
 }
 
 // ---------------------------------------------------------------------------
 // Catalog: create / lookup / drop
 // ---------------------------------------------------------------------------
 
-fn text_datum_to_string(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
+fn text_datum_to_bytes(mcx: Mcx<'_>, d: Datum) -> PgResult<Vec<u8>> {
     let ptr = d.as_usize() as *const u8;
     // SAFETY: a live varlena readable through its full VARSIZE_ANY.
     let raw = unsafe { core::slice::from_raw_parts(ptr, types_tuple::varatt::varsize_any(ptr)) };
@@ -212,21 +212,25 @@ fn text_datum_to_string(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
     // text_to_cstring(&full_image) call kept the 4-byte varlena header glued
     // to the front of every roname read back through this path.
     let payload = varlena::open_image(mcx, raw)?;
-    Ok(String::from_utf8_lossy(payload.as_bytes()).into_owned())
+    Ok(payload.as_bytes().to_vec())
 }
 
-fn text_datum(mcx: Mcx<'_>, s: &str) -> PgResult<Datum> {
-    let img = varlena::cstring_to_text(mcx, s.as_bytes())?.into_image().leak();
+fn text_datum(mcx: Mcx<'_>, s: &[u8]) -> PgResult<Datum> {
+    let img = varlena::cstring_to_text(mcx, s)?.into_image().leak();
     Ok(Datum::from_usize(img.as_ptr() as usize))
 }
 
 // replorigin_by_name (origin.c). Needs to be called in a transaction.
-pub fn replorigin_by_name(roname: &str, missing_ok: bool) -> PgResult<RepOriginId> {
+pub fn replorigin_by_name<N: AsRef<[u8]> + ?Sized>(
+    roname: &N,
+    missing_ok: bool,
+) -> PgResult<RepOriginId> {
     use cache_syscache::cacheinfo::REPLORIGNAME;
+    let roname = roname.as_ref();
     let mut roident = InvalidOid;
     if let Some(tup) = cache_syscache::SearchSysCache1(
         REPLORIGNAME,
-        cache_syscache::SysCacheKey::Str(roname),
+        cache_syscache::SysCacheKey::Bytes(roname),
     )? {
         roident = cache_syscache::SysCacheGetAttr(
             REPLORIGNAME,
@@ -237,6 +241,7 @@ pub fn replorigin_by_name(roname: &str, missing_ok: bool) -> PgResult<RepOriginI
         .as_oid();
         cache_syscache::ReleaseSysCache(tup);
     } else if !missing_ok {
+        let roname = String::from_utf8_lossy(roname);
         ereport(ERROR)
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!("replication origin \"{roname}\" does not exist"))
@@ -247,9 +252,13 @@ pub fn replorigin_by_name(roname: &str, missing_ok: bool) -> PgResult<RepOriginI
 }
 
 // replorigin_create (origin.c). Needs to be called in a transaction.
-pub fn replorigin_create(mcx: Mcx<'_>, roname: &str) -> PgResult<RepOriginId> {
+pub fn replorigin_create<N: AsRef<[u8]> + ?Sized>(
+    mcx: Mcx<'_>,
+    roname: &N,
+) -> PgResult<RepOriginId> {
     use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
     use types_snapshot::{SnapshotData, SNAPSHOT_DIRTY};
+    let roname = roname.as_ref();
 
     // Names are limited to 512 bytes so pg_replication_origin needs no TOAST
     // table.
@@ -379,7 +388,12 @@ fn replorigin_state_clear(roident: RepOriginId, nowait: bool) -> PgResult<()> {
 }
 
 // replorigin_drop_by_name (origin.c). Needs to be called in a transaction.
-pub fn replorigin_drop_by_name(mcx: Mcx<'_>, name: &str, missing_ok: bool, nowait: bool) -> PgResult<()> {
+pub fn replorigin_drop_by_name<N: AsRef<[u8]> + ?Sized>(
+    mcx: Mcx<'_>,
+    name: &N,
+    missing_ok: bool,
+    nowait: bool,
+) -> PgResult<()> {
     use cache_syscache::cacheinfo::REPLORIGIDENT;
 
     let rel = table::table_open(mcx, catalog::ReplicationOriginRelationId, types_rel::RowExclusiveLock)?;
@@ -433,7 +447,7 @@ pub fn replorigin_by_oid(
     mcx: Mcx<'_>,
     roident: RepOriginId,
     missing_ok: bool,
-) -> PgResult<Option<String>> {
+) -> PgResult<Option<Vec<u8>>> {
     use cache_syscache::cacheinfo::REPLORIGIDENT;
     debug_assert!(roident != InvalidRepOriginId);
     debug_assert!(roident != DoNotReplicateId);
@@ -447,7 +461,7 @@ pub fn replorigin_by_oid(
             &tup,
             Anum_pg_replication_origin_roname,
         )?;
-        let name = text_datum_to_string(mcx, d)?;
+        let name = text_datum_to_bytes(mcx, d)?;
         cache_syscache::ReleaseSysCache(tup);
         Ok(Some(name))
     } else {

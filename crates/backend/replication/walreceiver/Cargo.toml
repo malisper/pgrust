@@ -9,6 +9,7 @@ name = "walreceiver"
 path = "src/lib.rs"
 
 [dependencies]
+fd = { path = "../../storage/file/fd" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 auxprocess = { path = "../../postmaster/auxprocess" }
@@ -52,6 +53,5 @@ xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }
 waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
 latch_seams = { path = "../../storage/ipc/latch_seams" }
-fd = { path = "../../storage/file/fd" }
 xact_seams = { path = "../../access/transam/xact_seams" }
 xlogarchive_seams = { path = "../../access/transam/xlogarchive_seams" }

@@ -629,6 +629,7 @@ fn WalRcvDie() -> PgResult<()> {
     assert!(startpointTLI != 0);
 
     XLogWalRcvFlush(true, startpointTLI)?;
+    close_recv_file();
 
     with_walrcv(|d| {
         debug_assert!(matches!(
@@ -654,6 +655,15 @@ fn WalRcvDie() -> PgResult<()> {
 
     xlogrecovery_seams::wakeup_recovery::call();
     Ok(())
+}
+
+// C leaves the open segment to process exit; the threaded receiver closes it.
+fn close_recv_file() {
+    let recv_file = with_state(|s| s.recvFile);
+    if recv_file >= 0 {
+        fd::pg_close(recv_file);
+        with_state(|s| s.recvFile = -1);
+    }
 }
 
 fn XLogWalRcvProcessMsg(msg_type: u8, buf: &[u8], tli: TimeLineID) -> PgResult<()> {
@@ -1197,6 +1207,22 @@ mod tests {
             "history file must come from the archive, not the primary: {r:?}"
         );
         assert!(RESTORE_CALLS.load(Ordering::SeqCst) > before, "RestoreArchivedFile not consulted");
+    }
+
+    // WalRcvDie (walreceiver.c:858) runs in a thread, not a dying process:
+    // the WAL segment still open from streaming must be closed on exit.
+    #[test]
+    fn die_closes_the_open_wal_segment() {
+        setup();
+        // SAFETY: a descriptor this test owns.
+        let fd = unsafe { libc::open(b"/dev/null\0".as_ptr().cast(), libc::O_RDWR) };
+        assert!(fd >= 0);
+        arm_segment(fd, 0);
+        close_recv_file();
+        assert_eq!(with_state(|s| s.recvFile), -1);
+        close_recv_file();
+        // SAFETY: probing a descriptor number; EBADF is the expected outcome.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1, "WAL segment still open after WalRcvDie");
     }
 
     fn arm_segment(recv_file: i32, segno: XLogSegNo) {

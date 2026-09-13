@@ -91,6 +91,12 @@ pub fn connect_extended(
         );
     }
 
+    // PQconnectStartParams (conninfo_array_parse): service file, environment
+    // and compiled defaults fill in what the conninfo leaves out.
+    let opts = match pgclient::resolve_conninfo(conninfo) {
+        Ok(o) => o,
+        Err(e) => return Ok(Err(e)),
+    };
     let user = opt(&opts, "user").map(|s| s.to_string()).unwrap_or_else(os_user_name);
     let appname = opt(&opts, "application_name").unwrap_or(appname).to_string();
     let options = opt(&opts, "options").unwrap_or("").to_string();
@@ -735,6 +741,29 @@ mod tests {
             Ok(Err(e)) => panic!("scripted server refused: {e}"),
             Err(e) => panic!("ereport connecting: {e}"),
         }
+    }
+
+    // libpqrcv_connect connects through PQconnectStartParams
+    // (libpqwalreceiver.c:230): a service= conninfo takes host, port and
+    // user from the service file.
+    #[test]
+    fn connect_resolves_the_service_file() {
+        let (port, server) = scripted_server(vec![]);
+        let dir = std::env::temp_dir().join(format!("walrcv-svc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("pg_service.conf");
+        std::fs::write(&f, format!("[walrcv_test]\nhost=127.0.0.1\nport={port}\nuser=walrcv\n"))
+            .unwrap();
+        std::env::set_var("PGSERVICEFILE", &f);
+        client_env();
+        let conn = match connect("service=walrcv_test", "t") {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => panic!("service file not resolved: {e}"),
+            Err(e) => panic!("ereport connecting: {e}"),
+        };
+        drop(conn);
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     const CREATE_SLOT_FIELDS: [&str; 4] =

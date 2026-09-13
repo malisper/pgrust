@@ -579,7 +579,7 @@ pub(crate) fn my_set_reply_time(reply_time: TimestampTz) {
 // THIS is the release point for LWLocks/CV sleeps/wait events held at the
 // error (e.g. ReplicationSlotCreate's 42710 under
 // ReplicationSlotAllocationLock, slot.c:412). The physical xlogreader is a
-// StartReplication local here; its segment is closed there on both exits.
+// StartReplication local here (streaming::PhysicalReader closes its segment).
 pub fn WalSndErrorCleanup() -> PgResult<()> {
     lwlock::LWLockReleaseAll()?;
     condition_variable::ConditionVariableCancelSleep();

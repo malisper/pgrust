@@ -228,7 +228,8 @@ fn errdetail_apply_conflict<'mcx>(
     let origin: OriginName<'_> = if localorigin == InvalidRepOriginId {
         None
     } else {
-        origin_name = origin::replorigin_by_oid(mcx, localorigin, true)?;
+        origin_name = origin::replorigin_by_oid(mcx, localorigin, true)?
+            .map(|b| String::from_utf8_lossy(&b).into_owned());
         Some(origin_name.as_deref())
     };
     let mut err_detail = conflict_type_detail(ty, &index_name, localxmin, localts_str, origin);

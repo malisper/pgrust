@@ -1376,6 +1376,7 @@ fn send_repl_origin(
         // Message boundary.
         OutputPluginWrite(opc, false)?;
         OutputPluginPrepareWrite(opc, true)?;
+        let origin = String::from_utf8_lossy(&origin);
         logicalproto::logicalrep_write_origin(opc.out.as_mut_vec(), &origin, origin_lsn);
     }
     Ok(())

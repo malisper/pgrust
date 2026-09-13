@@ -257,3 +257,34 @@ fn at_eoxact_logicalrep_workers_wakes_queued_subscriptions_on_commit() {
     assert!(test_latches()[1].is_set());
     assert!(!test_latches()[2].is_set());
 }
+
+// logicalrep_worker_stop_internal (launcher.c:544) stops the worker
+// generation captured together with the lookup: when the slot has since been
+// handed to another worker, it returns without signalling or waiting.
+#[test]
+fn worker_stop_leaves_a_reused_slot_alone() {
+    let _g = ctx_test_guard();
+    ApplyLauncherShmemInit();
+    with_ctx(|ctx| {
+        ctx.workers[0].in_use = true;
+        ctx.workers[0].wtype = LogicalRepWorkerType::Apply;
+        ctx.workers[0].subid = 200;
+        ctx.workers[0].generation = 8;
+        ctx.workers[0].proc_pid = 4711;
+    });
+    let stopper = std::thread::spawn(|| {
+        logicalrep_worker_stop_internal(0, 7, procsignal::signums::SIGTERM)
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !stopper.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(stopper.is_finished(), "stop of a stale generation must return at once");
+    stopper.join().unwrap().unwrap();
+    let w = worker_snapshot(0).unwrap();
+    assert!(
+        w.in_use && w.generation == 8 && w.proc_pid == 4711,
+        "the replacement worker was disturbed"
+    );
+    with_ctx(|ctx| logicalrep_worker_cleanup_locked(&mut ctx.workers[0]));
+}

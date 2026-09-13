@@ -88,6 +88,17 @@ pub(crate) fn WalSndShutdown() -> ! {
 }
 
 // static void StartReplication(StartReplicationCmd *cmd) — PHYSICAL branch.
+// The physical xlogreader (walsender.c:142) is a StartReplication local; its
+// open segment is closed on every exit, as WalSndErrorCleanup (walsender.c:351)
+// does for C's static reader.
+pub(crate) struct PhysicalReader<'mcx>(pub(crate) XLogReaderState<'mcx>);
+
+impl Drop for PhysicalReader<'_> {
+    fn drop(&mut self) {
+        self.0.XLogReaderFree(&mut WalSndSegment);
+    }
+}
+
 pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResult<()> {
     if let Some(slotname) = cmd.slotname.as_deref() {
         slot::ReplicationSlotAcquire(slotname, true, true)?;
@@ -192,8 +203,9 @@ pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResul
 
         crate::REPLICATION_ACTIVE.with(|c| c.set(true));
 
-        let mut reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
-        let r = WalSndLoop(&mut |()| XLogSendPhysical(&mut reader), false);
+        let mut reader =
+            PhysicalReader(XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?);
+        let r = WalSndLoop(&mut |()| XLogSendPhysical(&mut reader.0), false);
 
         crate::REPLICATION_ACTIVE.with(|c| c.set(false));
         r?;
@@ -793,5 +805,26 @@ pub(crate) fn WalSndKeepaliveIfNecessary() -> PgResult<()> {
 pub(crate) fn reset_my_latch() {
     if let Some(l) = init_small::globals::MyLatch() {
         latch::ResetLatch(l);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // WalSndErrorCleanup (walsender.c:351): the WAL segment the physical
+    // reader holds open is closed when streaming ends in an error.
+    #[test]
+    fn physical_reader_closes_its_segment_on_drop() {
+        let cx = mcx::MemoryContext::new("PhysicalReader test");
+        let mut reader =
+            PhysicalReader(XLogReaderState::allocate(cx.mcx(), 16 * 1024 * 1024).unwrap());
+        // SAFETY: a descriptor this test owns.
+        let fd = unsafe { libc::open(b"/dev/null\0".as_ptr().cast(), libc::O_RDONLY) };
+        assert!(fd >= 0);
+        reader.0.v.seg.ws_file = fd;
+        drop(reader);
+        // SAFETY: probing a descriptor number; EBADF is the expected outcome.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1, "segment descriptor still open");
     }
 }

@@ -603,15 +603,18 @@ fn WaitForReplicationWorkerAttach(
 
 // logicalrep_worker_stop (launcher.c:619) + _internal (:537).
 pub fn logicalrep_worker_stop(subid: Oid, relid: Oid) -> PgResult<()> {
-    let Some(slot) = logicalrep_worker_find(subid, relid, false) else {
+    let found = with_ctx_opt(None, |ctx| {
+        find_locked(ctx, subid, relid, false).map(|slot| (slot, ctx.workers[slot].generation))
+    });
+    let Some((slot, generation)) = found else {
         return Ok(());
     };
-    logicalrep_worker_stop_internal(slot, procsignal::signums::SIGTERM)
+    logicalrep_worker_stop_internal(slot, generation, procsignal::signums::SIGTERM)
 }
 
-fn logicalrep_worker_stop_internal(slot: usize, signo: i32) -> PgResult<()> {
-    let generation = with_ctx(|ctx| ctx.workers[slot].generation);
-
+// The (slot, generation) pair is captured under the same lock as the lookup
+// (launcher.c:544): a slot reused by another worker in between is left alone.
+fn logicalrep_worker_stop_internal(slot: usize, generation: u16, signo: i32) -> PgResult<()> {
     // Still starting up: wait for attach, then kill.
     loop {
         let st = with_ctx(|ctx| {
@@ -846,7 +849,7 @@ fn logicalrep_worker_detach_slot() {
         // A dying leader apply worker stops its parallel apply workers first
         // (launcher.c:754): C detaches the error queues (pa_detach_all_error_mq,
         // done by the worker crate's own exit path) then SIGTERMs each one.
-        let pa_slots: Vec<usize> = with_ctx(|ctx| {
+        let pa_slots: Vec<(usize, u16)> = with_ctx(|ctx| {
             let me = &ctx.workers[slot];
             if me.wtype != LogicalRepWorkerType::Apply {
                 return Vec::new();
@@ -857,10 +860,11 @@ fn logicalrep_worker_detach_slot() {
                     let w = &ctx.workers[i];
                     w.in_use && w.subid == subid && w.is_parallel_apply() && w.proc_pid != 0
                 })
+                .map(|i| (i, ctx.workers[i].generation))
                 .collect()
         });
-        for pa in pa_slots {
-            let _ = logicalrep_worker_stop_internal(pa, procsignal::signums::SIGTERM);
+        for (pa, generation) in pa_slots {
+            let _ = logicalrep_worker_stop_internal(pa, generation, procsignal::signums::SIGTERM);
         }
         with_ctx(|ctx| {
             // A leaving apply worker's private tablesync start-times table
@@ -885,7 +889,7 @@ pub fn logicalrep_pa_worker_stop(slot: usize, generation: u16) -> PgResult<()> {
         w.generation == generation && w.proc_pid != 0
     });
     if alive {
-        logicalrep_worker_stop_internal(slot, procsignal::signums::SIGUSR2)?;
+        logicalrep_worker_stop_internal(slot, generation, procsignal::signums::SIGUSR2)?;
     }
     Ok(())
 }
