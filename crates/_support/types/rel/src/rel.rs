@@ -1,5 +1,8 @@
 use core::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::rc::Rc;
+
+use ::pgsync::Mutex;
 
 use ::mcx::PgVec;
 use ::types_fmgr::FmgrInfo;
@@ -130,6 +133,23 @@ pub struct RdAmCacheGin {
     pub cols: [RdAmCacheGinCol; 32],
 }
 
+// C's NameStr is raw bytes; a SQL_ASCII relname need not be UTF-8. Such
+// names are interned once (lossy) for the process lifetime so `name()` can
+// keep handing out `&str` instead of panicking.
+#[cold]
+#[inline(never)]
+fn lossy_relname(bytes: &[u8]) -> &'static str {
+    static INTERNED: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+    let lossy = String::from_utf8_lossy(bytes);
+    let mut set = ::pgsync::lock(&INTERNED);
+    if let Some(s) = set.get(lossy.as_ref()) {
+        return s;
+    }
+    let leaked: &'static str = Box::leak(lossy.into_owned().into_boxed_str());
+    set.insert(leaked);
+    leaked
+}
+
 impl<'mcx> RelationData<'mcx> {
     #[inline]
     pub fn descr(&self) -> &TupleDescData<'mcx> {
@@ -138,7 +158,11 @@ impl<'mcx> RelationData<'mcx> {
 
     #[inline]
     pub fn name(&self) -> &str {
-        core::str::from_utf8(self.rd_rel.relname.name_str()).expect("non-UTF-8 relname")
+        let bytes = self.rd_rel.relname.name_str();
+        match core::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => lossy_relname(bytes),
+        }
     }
 
     #[inline]
@@ -413,6 +437,18 @@ pub(crate) mod tests {
             rd_trigdesc: Default::default(),
             rd_hastriggers: false, rd_hasrules: false,
         }
+    }
+
+    #[test]
+    fn name_tolerates_non_utf8_sql_ascii_relname() {
+        let ctx = MemoryContext::new("t");
+        let mut data = rel_data(ctx.mcx(), 16384);
+        data.rd_rel.relname.namestrcpy("t");
+        assert_eq!(data.name(), "t");
+        data.rd_rel.relname.namestrcpy_bytes(b"t\xFF");
+        assert_eq!(data.rd_rel.relname.name_str(), b"t\xFF");
+        assert_eq!(data.name(), "t\u{FFFD}");
+        assert_eq!(data.name().as_ptr(), data.name().as_ptr());
     }
 
     fn std_options(fillfactor: i32) -> StdRdOptions {

@@ -8,6 +8,7 @@ publish.workspace = true
 types_bloom = { path = "../types_bloom" }
 types_trigger = { path = "../types_trigger" }
 mcx = { path = "../../mcx" }
+pgsync = { path = "../../pgsync" }
 types_core = { path = "../types_core" }
 types_error = { path = "../types_error" }
 types_storage = { path = "../types_storage" }

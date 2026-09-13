@@ -39,7 +39,7 @@ impl<'mcx> StringInfo<'mcx> {
     pub fn from_vec(mut data: PgVec<'mcx, u8>) -> PgResult<Self> {
         if data.capacity() == data.len() {
             let mcx = *data.allocator();
-            data.try_reserve(1).map_err(|_| mcx.oom(data.len() + 1))?;
+            data.try_reserve_exact(1).map_err(|_| mcx.oom(data.len() + 1))?;
         }
         // SAFETY: capacity > len after the reserve above.
         unsafe { *data.as_mut_ptr().add(data.len()) = 0 };

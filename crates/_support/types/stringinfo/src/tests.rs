@@ -174,6 +174,17 @@ fn from_vec_appendable() {
 }
 
 #[test]
+fn from_vec_full_capacity_reserves_terminator_only() {
+    let ctx = MemoryContext::new("t");
+    let v = mcx::slice_in(ctx.mcx(), &[b'z'; 4096]).unwrap();
+    assert_eq!(v.capacity(), v.len());
+    let s = StringInfo::from_vec(v).unwrap();
+    assert_eq!(s.len(), 4096);
+    assert_eq!(s.capacity(), 4097);
+    assert_eq!(sentinel(&s), 0);
+}
+
+#[test]
 fn into_vec_roundtrip() {
     let ctx = MemoryContext::new("t");
     let mut s = StringInfo::new_in(ctx.mcx()).unwrap();

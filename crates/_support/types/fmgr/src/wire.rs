@@ -1,13 +1,15 @@
 use alloc::boxed::Box;
 use alloc::format;
 
+use ::datum::varlena::{set_varsize_4b, VARHDRSZ};
 use ::datum::Datum;
-use ::mcx::Mcx;
+use ::mcx::{vec_append_bytes, Mcx, PgVec};
 use ::stringinfo::StringInfo;
 use ::types_core::{primitive::InvalidOid, Oid};
 use ::types_error::{PgError, PgResult};
 
 use crate::fcinfo::{function_call1_coll_in, FmgrInfo, LocalFcinfo};
+use crate::getarg::datum_varlena_packed;
 
 // Binary-wire fmgr frame; extends the by-ref result convention
 // (notes/fc-wire-convention.md).
@@ -68,8 +70,24 @@ pub fn receive_function_call(
     Ok(result)
 }
 
-/// C `SendFunctionCall` (the send wrappers build an untoasted bytea into `mcx`).
-#[inline]
+/// C `SendFunctionCall`: `DatumGetByteaP` over the result, so a toasted or
+/// short-header bytea (a SQL-language send function returning a stored
+/// column) comes back as a 4B-uncompressed image in `mcx`.
 pub fn send_function_call(flinfo: &mut FmgrInfo, val: Datum, mcx: Mcx<'_>) -> PgResult<Datum> {
-    function_call1_coll_in(flinfo, InvalidOid, mcx, val)
+    let out = function_call1_coll_in(flinfo, InvalidOid, mcx, val)?;
+    // SAFETY: a send function's result is a live non-null bytea datum.
+    let packed = unsafe { datum_varlena_packed(out, mcx)? };
+    if !packed.is_short() {
+        return Ok(Datum::from_usize(packed.as_ptr() as usize));
+    }
+    unpack_short(packed.data(), mcx)
+}
+
+#[cold]
+#[inline(never)]
+fn unpack_short(data: &[u8], mcx: Mcx<'_>) -> PgResult<Datum> {
+    let mut image = PgVec::new_in(mcx);
+    vec_append_bytes(&mut image, &set_varsize_4b(data.len() + VARHDRSZ))?;
+    vec_append_bytes(&mut image, data)?;
+    Ok(Datum::from_usize(image.leak().as_ptr() as usize))
 }

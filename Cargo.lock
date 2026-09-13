@@ -20618,6 +20618,7 @@ name = "types_rel"
 version = "0.1.0"
 dependencies = [
  "mcx",
+ "pgsync",
  "types_bloom",
  "types_core",
  "types_error",
