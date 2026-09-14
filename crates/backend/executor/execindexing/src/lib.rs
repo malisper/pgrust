@@ -79,7 +79,17 @@ struct IdxExprCache {
     mcx: Mcx<'static>,
     exprs: mcx::PgHashMap<'static, Oid, NodeList<'static>>,
     preds: mcx::PgHashMap<'static, Oid, NodeList<'static>>,
+    // C rd_exclops/rd_exclprocs/rd_exclstrats (relcache.c:5680), cleared by
+    // relcache inval on the index like the trees above.
+    excl: mcx::PgHashMap<'static, Oid, ExclInfo>,
     callbacks_registered: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ExclInfo {
+    ops: [Oid; INDEX_MAX_KEYS as usize],
+    procs: [Oid; INDEX_MAX_KEYS as usize],
+    strats: [u16; INDEX_MAX_KEYS as usize],
 }
 
 thread_local! {
@@ -96,6 +106,7 @@ fn with_expr_cache<R>(f: impl FnOnce(&mut IdxExprCache) -> R) -> R {
                 mcx,
                 exprs: mcx::PgHashMap::new_in(mcx),
                 preds: mcx::PgHashMap::new_in(mcx),
+                excl: mcx::PgHashMap::new_in(mcx),
                 callbacks_registered: false,
             })
         });
@@ -108,9 +119,11 @@ fn IdxExprRelCallback(_arg: Datum, relid: Oid) {
         if relid != types_core::InvalidOid {
             st.exprs.remove(&relid);
             st.preds.remove(&relid);
+            st.excl.remove(&relid);
         } else {
             st.exprs.clear();
             st.preds.clear();
+            st.excl.clear();
         }
     });
 }
@@ -193,8 +206,9 @@ pub fn RelationGetIndexPredicate<'mcx>(
     Ok(out)
 }
 
-/// RelationGetExclusionInfo (relcache.c). DIVERGENCE: C caches the arrays in
-/// rd_indexcxt; recomputed per BuildIndexInfo here (per-statement write path).
+/// RelationGetExclusionInfo (relcache.c): the arrays are cached per index
+/// relid after the first lookup (C rd_exclops et al., relcache.c:5680), so
+/// later BuildIndexInfo calls take no pg_constraint scan or lock.
 pub fn RelationGetExclusionInfo(
     mcx: Mcx<'_>,
     index: &Relation<'_>,
@@ -204,6 +218,13 @@ pub fn RelationGetExclusionInfo(
 ) -> PgResult<()> {
     let indexstruct = index.rd_index.as_ref().expect("index relation");
     let indnkeyatts = indexstruct.indnkeyatts as usize;
+    expr_cache_arm()?;
+    if let Some(hit) = with_expr_cache(|st| st.excl.get(&index.rd_id).copied()) {
+        *ops = hit.ops;
+        *procs = hit.procs;
+        *strats = hit.strats;
+        return Ok(());
+    }
     // The scan verifies conexclop is a 1-D Oid array of exactly indnkeyatts
     // (relcache.c:5742) and reports every inconsistency as C's catchable ERROR.
     let conexclop = relcache_build_seams::scan_exclusion_ops::call(
@@ -226,6 +247,9 @@ pub fn RelationGetExclusionInfo(
         }
         strats[i] = strat as u16;
     }
+    with_expr_cache(|st| {
+        st.excl.insert(index.rd_id, ExclInfo { ops: *ops, procs: *procs, strats: *strats })
+    });
     Ok(())
 }
 

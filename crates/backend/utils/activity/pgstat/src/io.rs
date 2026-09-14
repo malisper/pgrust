@@ -1,7 +1,7 @@
 // pgstat_io.c — per-backend pending IO matrix, flush into the per-BackendType
 // shared table, tracked-combination predicates.
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use pgsync::Mutex;
 
 use types_core::{BackendType, TimestampTz, BACKEND_NUM_TYPES};
@@ -119,6 +119,12 @@ thread_local! {
             backend_has_iostats: false,
         }) };
     static SNAPSHOT_IO: RefCell<Option<PgStat_IO>> = const { RefCell::new(None) };
+    // pgBufferUsage.{shared,local}_blk_{read,write}_time (instrument.h), in
+    // ns ticks; instrument's pg_buffer_usage reads them.
+    static SHARED_BLK_READ_TIME: Cell<i64> = const { Cell::new(0) };
+    static SHARED_BLK_WRITE_TIME: Cell<i64> = const { Cell::new(0) };
+    static LOCAL_BLK_READ_TIME: Cell<i64> = const { Cell::new(0) };
+    static LOCAL_BLK_WRITE_TIME: Cell<i64> = const { Cell::new(0) };
 }
 
 #[inline(always)]
@@ -205,6 +211,22 @@ pub fn pgstat_count_io_op(
     pending::pgstat_report_fixed_set();
 }
 
+pub fn shared_blk_read_time() -> i64 {
+    SHARED_BLK_READ_TIME.with(Cell::get)
+}
+
+pub fn shared_blk_write_time() -> i64 {
+    SHARED_BLK_WRITE_TIME.with(Cell::get)
+}
+
+pub fn local_blk_read_time() -> i64 {
+    LOCAL_BLK_READ_TIME.with(Cell::get)
+}
+
+pub fn local_blk_write_time() -> i64 {
+    LOCAL_BLK_WRITE_TIME.with(Cell::get)
+}
+
 // Zero start means timing disabled: pgstat_count_io_op_time skips the diff.
 pub fn pgstat_prepare_io_time(track_io_guc: bool) -> i64 {
     if track_io_guc {
@@ -225,14 +247,31 @@ pub fn pgstat_count_io_op_time(
     if start_ns != 0 {
         let elapsed_ns = crate::now_ns() - start_ns;
         if io_object != IOObject::Wal {
-            // pgBufferUsage blk time additions happen at the bufmgr call site
-            // (it owns those counters); the dbstats half lives here as in C.
+            // pgstat_io.c:134-148.
             match io_op {
                 IOOp::Write | IOOp::Extend => {
                     crate::database::pgstat_count_buffer_write_time(elapsed_ns / 1000);
+                    match io_object {
+                        IOObject::Relation => {
+                            SHARED_BLK_WRITE_TIME.with(|c| c.set(c.get() + elapsed_ns))
+                        }
+                        IOObject::TempRelation => {
+                            LOCAL_BLK_WRITE_TIME.with(|c| c.set(c.get() + elapsed_ns))
+                        }
+                        IOObject::Wal => {}
+                    }
                 }
                 IOOp::Read => {
                     crate::database::pgstat_count_buffer_read_time(elapsed_ns / 1000);
+                    match io_object {
+                        IOObject::Relation => {
+                            SHARED_BLK_READ_TIME.with(|c| c.set(c.get() + elapsed_ns))
+                        }
+                        IOObject::TempRelation => {
+                            LOCAL_BLK_READ_TIME.with(|c| c.set(c.get() + elapsed_ns))
+                        }
+                        IOObject::Wal => {}
+                    }
                 }
                 _ => {}
             }

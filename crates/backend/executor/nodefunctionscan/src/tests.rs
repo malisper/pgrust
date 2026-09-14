@@ -497,3 +497,63 @@ mod init_sexpr_witness {
         assert_eq!(events, vec![(OAT_FUNCTION_EXECUTE, PROCEDURE_RELATION_ID, FID_HOOKED, 0)]);
     }
 }
+
+// execSRF.c:340: a NULL from a tuple-returning SRF expands to an all-nulls
+// row in per-tuple memory (reset per call), never in the query context.
+#[test]
+fn null_composite_rows_do_not_grow_query_context() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static LEFT: AtomicUsize = AtomicUsize::new(0);
+    fn null_tuple_srf(
+        _flinfo: Option<&mut FmgrInfo>,
+        fcinfo: &mut FunctionCallInfoBaseData,
+    ) -> PgResult<Datum> {
+        let left = LEFT.load(Ordering::Relaxed);
+        if let Some(rsinfo) = fcinfo.rsinfo_mut() {
+            rsinfo.isDone = if left == 0 {
+                ExprDoneCond::ExprEndResult
+            } else {
+                ExprDoneCond::ExprMultipleResult
+            };
+        }
+        LEFT.store(left.saturating_sub(1), Ordering::Relaxed);
+        fcinfo.isnull = true;
+        Ok(Datum::null())
+    }
+    fn query_ctx_used_after(n: usize) -> usize {
+        LEFT.store(n, Ordering::Relaxed);
+        let root = MemoryContext::new("t");
+        // es_query_cxt is a Bump arena in the executor: nothing dropped
+        // there is ever reclaimed before the reset.
+        let ctx = root.new_child_bump("t-query");
+        let mcx = ctx.mcx();
+        let mut estate = EStateData::new_in(mcx);
+        let ecxt = estate.exec_assign_expr_context();
+        let desc = int4_desc(mcx, 2);
+        let mut setexpr = SetExprState {
+            flinfo: Some(FmgrInfo::new(null_tuple_srf, 4245, 0, false, true)),
+            args: PgVec::new_in(mcx),
+            collation: 0,
+            returns_set: true,
+            returns_tuple: true,
+            elided_func_state: None,
+        };
+        let mut arg_mcx = MemoryContext::new("t-args");
+        let mut store = exec_make_table_function_result(
+            &mut setexpr,
+            &desc,
+            false,
+            &mut estate,
+            ecxt,
+            &mut arg_mcx,
+        )
+        .unwrap();
+        assert_eq!(store.tuple_count(), n as i64);
+        store.end();
+        estate.es_query_cxt.context().subtree_used()
+    }
+    let small = query_ctx_used_after(100);
+    let big = query_ctx_used_after(20_000);
+    const SLACK: usize = 16 * 1024;
+    assert!(big <= small + SLACK, "query context grew with NULL composite rows: {small} -> {big}");
+}

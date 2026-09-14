@@ -291,3 +291,13 @@ mod peragg {
         assert!(pa.init_value.isnull);
     }
 }
+
+// windowfuncs.c:552: -INT_MIN wraps under -fwrapv, so lag(x, INT_MIN) still
+// seeks backward.
+#[test]
+fn leadlag_relpos_wraps_int_min_like_c() {
+    assert_eq!(leadlag_relpos(3, false), -3);
+    assert_eq!(leadlag_relpos(3, true), 3);
+    assert_eq!(leadlag_relpos(i32::MIN, false), i64::from(i32::MIN));
+}
+

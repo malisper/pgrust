@@ -180,11 +180,94 @@ fn run_group(rows: &'static [Option<i32>]) -> Vec<Option<i32>> {
     })
 }
 
+// mk_group whose projection also computes int4out(a): a by-ref result
+// allocated per output row (C ExecProject: ecxt_per_tuple_memory).
+fn mk_group_with_byref_projection(mcx: Mcx<'_>) -> &Group<'_> {
+    const F_INT4OUT: u32 = 43;
+    const CSTRINGOID: u32 = 2275;
+    let var =
+        Node::mk_var(mcx, ::types_nodes::primnodes::OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
+    let arg =
+        Node::mk_var(mcx, ::types_nodes::primnodes::OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let fexpr = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::FuncExpr {
+            funcid: F_INT4OUT,
+            funcresulttype: CSTRINGOID,
+            funcretset: false,
+            funcvariadic: false,
+            funcformat: Default::default(),
+            funccollid: 0,
+            inputcollid: 0,
+            args: NodeList::make1(mcx, arg).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let tle2 = Node::mk_target_entry(mcx, fexpr, 2, Some("s"), false).unwrap();
+    let mut g = Node::build::<Group>(mcx).unwrap();
+    let mut tl = NodeList::make1(mcx, tle).unwrap();
+    tl.lappend(mcx, tle2).unwrap();
+    g.plan.targetlist = tl;
+    g.numCols = 1;
+    g.grpColIdx = mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    g.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    g.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    g.seal_ref()
+}
+
+fn two_col_result_desc(mcx: Mcx<'_>) -> Rc<TupleDescData<'_>> {
+    let a1 = FormData_pg_attribute {
+        attnum: 1,
+        atttypid: INT4OID,
+        atttypmod: -1,
+        attlen: 4,
+        attbyval: true,
+        attalign: TYPALIGN_INT,
+        attstorage: TYPSTORAGE_PLAIN,
+        ..Default::default()
+    };
+    let a2 = FormData_pg_attribute {
+        attnum: 2,
+        atttypid: 2275,
+        atttypmod: -1,
+        attlen: -2,
+        attbyval: false,
+        attalign: b'c' as i8,
+        attstorage: TYPSTORAGE_PLAIN,
+        ..Default::default()
+    };
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
+    compact.push(CompactAttribute::populate_from(&a1));
+    compact.push(CompactAttribute::populate_from(&a2));
+    attrs.push(a1);
+    attrs.push(a2);
+    Rc::new(TupleDescData {
+        natts: 2,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    })
+}
+
 // Query-context bytes after `n` one-row groups (every row is retained as
 // the new first-of-group tuple): (self used, subtree used).
 fn query_ctx_used_after(n: i32) -> (usize, usize) {
+    query_ctx_used_after_with(n, false)
+}
+
+fn query_ctx_used_after_with(n: i32, byref_projection: bool) -> (usize, usize) {
     install_seams();
-    let gp = mk_group(leaked_mcx());
+    let gp = if byref_projection {
+        mk_group_with_byref_projection(leaked_mcx())
+    } else {
+        mk_group(leaked_mcx())
+    };
     let mut estate_owner =
         create_executor_state(Box::leak(Box::new(MemoryContext::new("q")))).unwrap();
     estate_owner.with_mut(|estate| {
@@ -193,12 +276,17 @@ fn query_ctx_used_after(n: i32) -> (usize, usize) {
         let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
         // SAFETY: gp is leaked ('static) and read-only.
         let gp = unsafe { shorten(gp) };
-        let result_desc = one_col_desc(leaked_mcx());
+        let result_desc = if byref_projection {
+            two_col_result_desc(leaked_mcx())
+        } else {
+            one_col_desc(leaked_mcx())
+        };
         let params = estate.param_bind();
         let proj = ::execexpr::exec_build_projection_info(mcx, &gp.plan.targetlist, None, params)
             .unwrap();
+        let outer_desc_static = one_col_desc(leaked_mcx());
         let mut state =
-            exec_init_group(gp, estate, 0, &result_desc.clone(), result_desc, None, proj).unwrap();
+            exec_init_group(gp, estate, 0, &outer_desc_static, result_desc, None, proj).unwrap();
         let mut i = 0i32;
         let mut feed = |estate: &mut EStateData<'_>| {
             if i >= n {
@@ -218,12 +306,38 @@ fn query_ctx_used_after(n: i32) -> (usize, usize) {
             let slot = estate.slot_mut(slot_id);
             exectuples::slot_getallattrs(slot);
             assert_eq!(slot.base().tts_values[0].as_i32(), count);
+            if byref_projection {
+                // SAFETY: int4out's cstring result, NUL-terminated.
+                let s = unsafe {
+                    core::ffi::CStr::from_ptr(slot.base().tts_values[1].as_usize() as *const _)
+                };
+                assert_eq!(s.to_str().unwrap(), count.to_string());
+            }
             count += 1;
         }
         assert_eq!(count, n);
         let ctx = estate.es_query_cxt.context();
         (ctx.used(), ctx.subtree_used())
     })
+}
+
+// nodeGroup.c:125: ExecProject runs in ecxt_per_tuple_memory, so a by-ref
+// projection result is reclaimed at the next row rather than retained for
+// the query.
+#[test]
+fn byref_projection_results_do_not_grow_query_context() {
+    let (small_self, small_tree) = query_ctx_used_after_with(1_000, true);
+    let (big_self, big_tree) = query_ctx_used_after_with(50_000, true);
+    eprintln!("GROUPDBG small=({small_self},{small_tree}) big=({big_self},{big_tree})");
+    const SLACK: usize = 64 * 1024;
+    assert!(
+        big_self <= small_self + SLACK,
+        "query context grew with projected rows: {small_self} -> {big_self}"
+    );
+    assert!(
+        big_tree <= small_tree + SLACK,
+        "query context subtree grew with projected rows: {small_tree} -> {big_tree}"
+    );
 }
 
 // The retained first-of-group tuple must not accumulate in the query

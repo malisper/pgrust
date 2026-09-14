@@ -1093,21 +1093,14 @@ pub fn exec_init_agg<'mcx>(
     // constant (or the grouping set is empty), so the whole input is one
     // group; C's boundary check is guarded by numCols > 0.
 
-    // Hashed: the node context IS the table context (C hands
-    // BuildTupleHashTable the same hashcontext memory).
+    // Hashed: C's hashcontext (CreateWorkExprContext, nodeAgg.c:2008) holds
+    // the by-ref transvalues; entries live in perhash's table_ctx.
     let agg_ctx_name =
         if node.aggstrategy == AGG_HASHED { "HashAgg hash table" } else { "AggContext" };
-    let aggcontext = if matches!(node.aggstrategy, AGG_HASHED | AGG_MIXED) {
-        mcx.context().new_child_bump_with_max_block_size(
-            agg_ctx_name,
-            work_mem_block_size(init_small::globals::work_mem()),
-        )
-    } else {
-        // C's aggcontext is an AllocSet (nodeAgg.c:3394): superseded by-ref
-        // transvalues are pfree'd per row, so it must be able to free; its
-        // per-group reset drops whatever transition states left behind.
-        mcx.context().new_child_wholesale(agg_ctx_name)
-    };
+    // An AllocSet in every strategy (nodeAgg.c:2008/3394): superseded by-ref
+    // transvalues are pfree'd per row, so it must be able to free; its
+    // per-group reset drops whatever transition states left behind.
+    let aggcontext = mcx.context().new_child_wholesale(agg_ctx_name);
     let agg_node = make_agg_state_node(mcx, aggcontext)?;
     let fm_agg_node: FmNodePtr = Some(agg_node.cast());
     let tmpcontext = estate.create_expr_context();

@@ -1128,9 +1128,10 @@ fn postquel_start<'mcx>(
             state.tstore
         } else {
             if state.row_store.is_null() {
-                let work_mem = init_small::globals::work_mem();
+                // functions.c:2665 keeps this one row in the junkfilter slot:
+                // no spill budget, so temp_file_limit never applies to it.
                 state.row_store = tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(
-                    false, false, work_mem,
+                    false, false, i32::MAX,
                 ));
             } else {
                 tuplestore::hold::with_store(state.row_store, |st| st.clear());

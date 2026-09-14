@@ -23,13 +23,12 @@ pub fn instr_time_current() -> instr_time {
     instr_time { ticks: pg_clock::mono_ns() as i64 }
 }
 
-// pgBufferUsage (instrument.c): shared/local blks tick in bufmgr::counters
-// and temp_blks_* / temp_blk_*_time in fd::buffile (the latter advance only
-// under track_io_timing, buffile.c:459-476/532-553); the shared/local
-// blk_*_time clocks have no ported writers, so their running totals are
-// truly zero. WORKER_CONTRIB is InstrAccumParallelQuery's add — the live
-// counters cannot be bumped, so the accumulated worker usage rides as an
-// overlay.
+// pgBufferUsage (instrument.c): shared/local blks tick in bufmgr::counters,
+// temp_blks_* / temp_blk_*_time in fd::buffile (the latter advance only
+// under track_io_timing, buffile.c:459-476/532-553) and the shared/local
+// blk_*_time clocks in pgstat::io (pgstat_count_io_op_time, pgstat_io.c:134).
+// WORKER_CONTRIB is InstrAccumParallelQuery's add — the live counters cannot
+// be bumped, so the accumulated worker usage rides as an overlay.
 pub fn pg_buffer_usage() -> BufferUsage {
     let mut u = BufferUsage {
         shared_blks_hit: bufmgr::counters::shared_blks_hit() as i64,
@@ -44,7 +43,10 @@ pub fn pg_buffer_usage() -> BufferUsage {
         temp_blks_written: fd::buffile::temp_blks_written(),
         temp_blk_read_time: instr_time { ticks: fd::buffile::temp_blk_read_time() },
         temp_blk_write_time: instr_time { ticks: fd::buffile::temp_blk_write_time() },
-        ..BufferUsage::default()
+        shared_blk_read_time: instr_time { ticks: pgstat::io::shared_blk_read_time() },
+        shared_blk_write_time: instr_time { ticks: pgstat::io::shared_blk_write_time() },
+        local_blk_read_time: instr_time { ticks: pgstat::io::local_blk_read_time() },
+        local_blk_write_time: instr_time { ticks: pgstat::io::local_blk_write_time() },
     };
     WORKER_CONTRIB.with(|c| buffer_usage_add(&mut u, &c.get()));
     u

@@ -545,6 +545,26 @@ pub struct TupleHashTable<'mcx> {
     // lifetime-erasure reason as ExprState::arm_result_mcx_raw; None (unit
     // tables that never see toasted keys) falls back to the entries arena.
     temp_ctx: Option<NonNull<::mcx::MemoryContext>>,
+    // C hashtable->exprcontext (CreateStandaloneExprContext): the match
+    // program's scratch, reset after every candidate comparison
+    // (TupleHashTableMatch's ExecQualAndReset) so a collision chain of
+    // compressed keys never accumulates its detoast copies.
+    eq_scratch: NonNull<::mcx::MemoryContext>,
+}
+
+// nodesetop precedent: a droppy MemoryContext inside the no-drop metacxt
+// arena gets its destructor from the arena's reset callback.
+fn make_eq_scratch(mcx: Mcx<'_>) -> PgResult<NonNull<::mcx::MemoryContext>> {
+    use ::mcx::Allocator;
+    let layout = core::alloc::Layout::new::<::mcx::MemoryContext>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<::mcx::MemoryContext> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(mcx.context().new_child_bump("TupleHashTable match scratch")) };
+    // SAFETY: fires exactly once, before the arena bytes are reclaimed.
+    mcx.context()
+        .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+    Ok(p)
 }
 
 /// C `BuildTupleHashTable`; entry tuples go to the per-lookup `table_mcx`
@@ -639,12 +659,14 @@ pub fn build_tuple_hash_table_with_iv<'mcx>(
         eqfuncoids,
         collations,
     )?;
-    // C runs hash/eq fns in the caller-reset tempcxt; production callers
+    // C runs the hash fn in the caller-reset tempcxt; production callers
     // install theirs via set_temp_ctx_raw right after build (which re-arms
-    // these two programs onto it). Until then the arming below (metacxt, to
+    // the hash program onto it). Until then the arming below (metacxt, to
     // teardown) only covers tables that never install one — unit rigs.
     tab_hash_expr.arm_result_mcx(metacxt);
-    tab_eq_func.arm_result_mcx(metacxt);
+    let eq_scratch = make_eq_scratch(metacxt)?;
+    // SAFETY: eq_scratch is arena-boxed in metacxt and outlives the table.
+    unsafe { tab_eq_func.arm_result_mcx_raw(eq_scratch.as_ref().mcx()) };
     let tableslot = exectuples::make_tuple_table_slot(
         metacxt,
         TupleSlotKind::MinimalTuple,
@@ -676,6 +698,7 @@ pub fn build_tuple_hash_table_with_iv<'mcx>(
         tab_eq_func,
         tableslot,
         temp_ctx: None,
+        eq_scratch,
     })
 }
 
@@ -746,7 +769,6 @@ impl<'mcx> TupleHashTable<'mcx> {
         // SAFETY: forwarded caller contract.
         unsafe {
             self.tab_hash_expr.arm_result_mcx_raw(mcx);
-            self.tab_eq_func.arm_result_mcx_raw(mcx);
         }
     }
 
@@ -830,8 +852,16 @@ impl<'mcx> TupleHashTable<'mcx> {
                 );
             }
         }
-        let TupleHashTable { entries, hashtab, tab_eq_func, tableslot, kernel, temp_ctx, .. } =
-            self;
+        let TupleHashTable {
+            entries,
+            hashtab,
+            tab_eq_func,
+            tableslot,
+            kernel,
+            temp_ctx,
+            eq_scratch,
+            ..
+        } = self;
         let input_slot = input_slot;
         // Kernel match = NOT DISTINCT over the entry's cached key datum.
         let entry_hash = |ix: u32| entries[ix as usize].hash;
@@ -888,10 +918,14 @@ impl<'mcx> TupleHashTable<'mcx> {
                     match (&a, e.key_isnull) {
                         (Some(a), false) => {
                             // SAFETY: e.key points into the live stored image
-                            // (insert caches it; relocate_entry rebases it).
-                            let b =
-                                unsafe { ::types_fmgr::datum_varlena_packed(e.key, det_mcx) }?;
-                            Ok(a.data() == b.data())
+                            // (insert caches it; relocate_entry rebases it);
+                            // eq_scratch is arena-boxed in metacxt.
+                            let b = unsafe {
+                                ::types_fmgr::datum_varlena_packed(e.key, eq_scratch.as_ref().mcx())
+                            }?;
+                            let eq = a.data() == b.data();
+                            unsafe { eq_scratch.as_mut() }.reset();
+                            Ok(eq)
                         }
                         (None, true) => Ok(true),
                         _ => Ok(false),
@@ -912,7 +946,10 @@ impl<'mcx> TupleHashTable<'mcx> {
                 // C TupleHashTableMatch (execGrouping.c:542): an error in
                 // ExecQualAndReset aborts the probe at once — no later
                 // colliding entry is evaluated and THAT error is reported.
-                exec_qual(Some(tab_eq_func), &mut slots)
+                let matched = exec_qual(Some(tab_eq_func), &mut slots);
+                // SAFETY: arena-boxed in metacxt, outlives the table.
+                unsafe { eq_scratch.as_mut() }.reset();
+                matched
             })?,
         };
         if let Some(ix) = found {
@@ -1031,7 +1068,11 @@ impl<'mcx> TupleHashTable<'mcx> {
                     inner: Some(input_slot),
                     outer: Some(&mut self.tableslot),
                 };
-                exec_qual(Some(&mut self.tab_eq_func), &mut slots)
+                let matched = exec_qual(Some(&mut self.tab_eq_func), &mut slots);
+                let mut scratch = self.eq_scratch;
+                // SAFETY: arena-boxed in metacxt, outlives the table.
+                unsafe { scratch.as_mut() }.reset();
+                matched
             }
         }
     }

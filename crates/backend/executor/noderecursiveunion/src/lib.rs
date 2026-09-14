@@ -38,6 +38,24 @@ pub struct RecursiveUnionState<'mcx> {
     recursing: bool,
     intermediate_empty: bool,
     hashtable: Option<TupleHashTable<'mcx>>,
+    // C rustate->tableContext (nodeRecursiveunion.c): entry tuple images,
+    // reset wholesale on rescan.
+    table_ctx: Option<core::ptr::NonNull<::mcx::MemoryContext>>,
+}
+
+// nodesetop precedent: a droppy MemoryContext inside the no-drop query
+// arena gets its destructor from the arena's reset callback.
+fn make_table_context(mcx: ::mcx::Mcx<'_>) -> PgResult<core::ptr::NonNull<::mcx::MemoryContext>> {
+    use ::mcx::Allocator;
+    let layout = core::alloc::Layout::new::<::mcx::MemoryContext>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: core::ptr::NonNull<::mcx::MemoryContext> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(mcx.context().new_child_bump("RecursiveUnion table context")) };
+    // SAFETY: fires exactly once, before the arena bytes are reclaimed.
+    mcx.context()
+        .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+    Ok(p)
 }
 
 /// The prmdata half of `ExecInitRecursiveUnion`; must run before child init.
@@ -78,7 +96,7 @@ pub fn exec_init_recursive_union<'mcx>(
     let mut wt_chg = Bitmapset::empty();
     wt_chg.add_member(mcx, node.wtParam)?;
 
-    let (hashtable, ps_ExprContext) = if node.numCols > 0 {
+    let (hashtable, ps_ExprContext, table_ctx) = if node.numCols > 0 {
         debug_assert!(
             node.numGroups > 0
                 && node.dupColIdx.len() == node.numCols as usize
@@ -87,8 +105,6 @@ pub fn exec_init_recursive_union<'mcx>(
         );
         let (eqfuncoids, hashfunctions) =
             ::execgrouping::exec_tuples_hash_prepare(mcx, node.dupOperators)?;
-        // C divergence (nodesetop precedent): entries live in the query
-        // context, not a rescan-reset tableContext.
         let mut hashtable = ::execgrouping::build_tuple_hash_table(
             mcx,
             outer_desc,
@@ -109,9 +125,9 @@ pub fn exec_init_recursive_union<'mcx>(
         unsafe {
             hashtable.set_temp_ctx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx())
         };
-        (Some(hashtable), Some(ps_ExprContext))
+        (Some(hashtable), Some(ps_ExprContext), Some(make_table_context(mcx)?))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     Ok(RecursiveUnionState {
@@ -122,6 +138,7 @@ pub fn exec_init_recursive_union<'mcx>(
         recursing: false,
         intermediate_empty: true,
         hashtable,
+        table_ctx,
     })
 }
 
@@ -132,9 +149,11 @@ fn lookup_is_new<'mcx>(
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let ht = node.hashtable.as_mut().expect("numCols > 0 implies a hash table");
+    // SAFETY: table_ctx lives until the query context resets.
+    let table_mcx = unsafe { node.table_ctx.expect("hash table implies a table context").as_ref() }.mcx();
     let slot = estate.slot_mut(slot_id);
     let hash = ht.hash_slot(slot)?;
-    let (_, isnew) = ht.lookup(slot, hash, Some(mcx), mcx)?;
+    let (_, isnew) = ht.lookup(slot, hash, Some(table_mcx), mcx)?;
     estate.reset_expr_context(node.ps_ExprContext.expect("hashing implies a temp context"));
     Ok(isnew)
 }
@@ -237,6 +256,12 @@ pub fn exec_rescan_recursive_union<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) {
     if let Some(ht) = node.hashtable.as_mut() {
+        // nodeRecursiveunion.c:333: MemoryContextReset(tableContext) +
+        // build_hash_table. SAFETY: table_ctx lives until the query
+        // context resets; no other reference is live during the reset.
+        if let Some(mut tc) = node.table_ctx {
+            unsafe { tc.as_mut() }.reset();
+        }
         ht.reset();
     }
     node.recursing = false;
@@ -250,5 +275,5 @@ pub fn exec_rescan_recursive_union<'mcx>(
 // Exempt: hashtable released in exec_end_recursive_union.
 mcx::forget_safe_struct!(
     RecursiveUnionState<'_> { plan, inner_plan, ps_ExprContext, recursing,
-        intermediate_empty; wt_chg, hashtable },
+        intermediate_empty, table_ctx; wt_chg, hashtable },
 );

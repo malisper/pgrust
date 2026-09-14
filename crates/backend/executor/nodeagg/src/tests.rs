@@ -3321,3 +3321,95 @@ fn work_mem_block_cap_rounds_down_and_clamps() {
         assert_eq!(crate::work_mem_block_size(kb), bytes);
     }
 }
+
+fn int4_text_desc(mcx: Mcx<'_>) -> Rc<TupleDescData<'_>> {
+    let a1 = FormData_pg_attribute {
+        attnum: 1,
+        atttypid: INT4OID,
+        atttypmod: -1,
+        attlen: 4,
+        attbyval: true,
+        attalign: TYPALIGN_INT,
+        attstorage: TYPSTORAGE_PLAIN,
+        ..Default::default()
+    };
+    let a2 = FormData_pg_attribute {
+        attnum: 2,
+        atttypid: TEXTOID,
+        atttypmod: -1,
+        attlen: -1,
+        attbyval: false,
+        attalign: TYPALIGN_INT,
+        attstorage: b'x' as i8,
+        ..Default::default()
+    };
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
+    compact.push(CompactAttribute::populate_from(&a1));
+    compact.push(CompactAttribute::populate_from(&a2));
+    attrs.push(a1);
+    attrs.push(a2);
+    Rc::new(TupleDescData {
+        natts: 2,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    })
+}
+
+// nodeAgg.c:2008 hashcontext is an AllocSet: a by-ref transvalue replaced
+// on every row is pfree'd, so the aggcontext stays bounded by the live
+// minimum rather than by the input.
+fn hashed_min_text_aggcontext_after(n: usize) -> usize {
+    install_seams();
+    let agg = mk_hashed_min_text_agg(leaked_mcx());
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = int4_text_desc(mcx);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, two_col_desc(leaked_mcx()), None).unwrap();
+        let mut i = 0usize;
+        let mut feed = move |estate: &mut EStateData<'_>| {
+            if i >= n {
+                return Ok(None);
+            }
+            let mcx = estate.es_query_cxt;
+            let slot = estate.slot_mut(outer_id);
+            exectuples::exec_clear_tuple(slot, mcx);
+            slot.base_mut().tts_values[0] = Datum::from_i32(1);
+            slot.base_mut().tts_isnull[0] = false;
+            let s = format!("{:010}{}", n - i, "x".repeat(200));
+            slot.base_mut().tts_values[1] = text_datum(&s);
+            slot.base_mut().tts_isnull[1] = false;
+            exectuples::exec_store_virtual_tuple(slot);
+            i += 1;
+            Ok(Some(outer_id))
+        };
+        let mut got: Vec<(i32, Option<String>)> = Vec::new();
+        while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            let m = (!base.tts_isnull[1]).then(|| text_datum_str(base.tts_values[1]));
+            got.push((base.tts_values[0].as_i32(), m));
+        }
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 1);
+        assert!(got[0].1.as_deref().unwrap().starts_with("0000000001"));
+        // SAFETY: read of the once-allocated node after the drive.
+        unsafe { state.agg_node.as_ref() }.aggcontext().context().subtree_allocated()
+    })
+}
+
+#[test]
+fn hashed_min_text_replacement_frees_superseded_transvalues() {
+    let small = hashed_min_text_aggcontext_after(100);
+    let big = hashed_min_text_aggcontext_after(4_000);
+    const SLACK: usize = 64 * 1024;
+    assert!(big <= small + SLACK, "aggcontext grew with replaced transvalues: {small} -> {big}");
+}

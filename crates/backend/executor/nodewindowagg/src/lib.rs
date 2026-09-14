@@ -100,13 +100,13 @@ enum WfKind {
     PlainAgg { aggno: u16 },
 }
 
-// C WindowStatePerFuncData + the WindowObject position fields (markptr is
-// bookkeeping only: tuplestore_trim is unported, so no mark read pointer).
+// C WindowStatePerFuncData + the WindowObject position fields.
 // Rank/ntile state is C's WinGetPartitionLocalMemory chunk, inline.
 struct PerFuncData<'mcx> {
     kind: WfKind,
     wfuncno: u16,
     readptr: i32,
+    markptr: i32,
     seekpos: i64,
     markpos: i64,
     rank: i64,
@@ -223,6 +223,7 @@ pub struct WindowAggStateData<'mcx> {
     peragg: PgVec<'mcx, PerAggData<'mcx>>,
     agg_saved: PgVec<'mcx, NullableDatum>,
     agg_readptr: i32,
+    agg_markptr: i32,
     agg_seekpos: i64,
     agg_markpos: i64,
     agg_mark_active: bool,
@@ -1014,6 +1015,7 @@ pub fn exec_init_window_agg<'mcx>(
             kind,
             wfuncno: wfuncno as u16,
             readptr: -1,
+            markptr: -1,
             seekpos: -1,
             markpos: -1,
             rank: 0,
@@ -1203,6 +1205,7 @@ pub fn exec_init_window_agg<'mcx>(
         peragg,
         agg_saved,
         agg_readptr: -1,
+        agg_markptr: -1,
         agg_seekpos: -1,
         agg_markpos: -1,
         agg_mark_active: false,
@@ -1600,8 +1603,7 @@ enum SeekType {
 }
 
 impl<'mcx> WindowAggStateData<'mcx> {
-    // prepare_tuplestore (nodeWindowAgg.c). Mark pointers are position
-    // bookkeeping only (no tuplestore_trim); the agg read pointer gets
+    // prepare_tuplestore (nodeWindowAgg.c): the agg read pointer gets
     // BACKWARD capability when the frame head can move (restart re-reads).
     fn prepare_tuplestore(&mut self) -> PgResult<()> {
         debug_assert!(self.buffer.is_none());
@@ -1614,12 +1616,14 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 || self.frameOptions & FRAMEOPTION_EXCLUSION != 0
             {
                 self.agg_mark_active = true;
+                self.agg_markptr = buffer.alloc_read_pointer(0)?;
                 flags |= EXEC_FLAG_BACKWARD;
             }
             self.agg_readptr = buffer.alloc_read_pointer(flags)?;
         }
         for pf in self.perfunc.iter_mut() {
             if !matches!(pf.kind, WfKind::PlainAgg { .. }) {
+                pf.markptr = buffer.alloc_read_pointer(0)?;
                 pf.readptr = buffer.alloc_read_pointer(EXEC_FLAG_BACKWARD)?;
             }
         }
@@ -1905,33 +1909,47 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(true)
     }
 
-    // WinSetMarkPosition minus the mark read pointer (no trim): the read
-    // pointer still advances so later fetches never seek before the mark.
+    // WinSetMarkPosition (nodeWindowAgg.c:3365): the mark read pointer
+    // advances so tuplestore_trim can drop rows before it, then the read
+    // pointer so later fetches never seek before the mark.
     fn set_mark_position(&mut self, perfunc_ix: usize, markpos: i64) -> PgResult<()> {
         let pf = &mut self.perfunc[perfunc_ix];
-        if markpos < pf.markpos {
-            panic!("cannot move WindowObject's mark position backward");
-        }
-        pf.markpos = markpos;
-        if markpos > pf.seekpos {
-            let buffer = self.buffer.as_mut().unwrap();
-            buffer.select_read_pointer(pf.readptr)?;
-            buffer.skiptuples(markpos - pf.seekpos, true)?;
-            pf.seekpos = markpos;
-        }
-        Ok(())
+        let buffer = self.buffer.as_mut().unwrap();
+        Self::set_winobj_mark(buffer, pf.markptr, pf.readptr, &mut pf.markpos, &mut pf.seekpos, markpos)
     }
 
     fn set_agg_mark_position(&mut self, markpos: i64) -> PgResult<()> {
-        if markpos < self.agg_markpos {
+        let buffer = self.buffer.as_mut().unwrap();
+        Self::set_winobj_mark(
+            buffer,
+            self.agg_markptr,
+            self.agg_readptr,
+            &mut self.agg_markpos,
+            &mut self.agg_seekpos,
+            markpos,
+        )
+    }
+
+    fn set_winobj_mark(
+        buffer: &mut Tuplestore,
+        markptr: i32,
+        readptr: i32,
+        cur_markpos: &mut i64,
+        seekpos: &mut i64,
+        markpos: i64,
+    ) -> PgResult<()> {
+        if markpos < *cur_markpos {
             panic!("cannot move WindowObject's mark position backward");
         }
-        self.agg_markpos = markpos;
-        if markpos > self.agg_seekpos {
-            let buffer = self.buffer.as_mut().unwrap();
-            buffer.select_read_pointer(self.agg_readptr)?;
-            buffer.skiptuples(markpos - self.agg_seekpos, true)?;
-            self.agg_seekpos = markpos;
+        buffer.select_read_pointer(markptr)?;
+        if markpos > *cur_markpos {
+            buffer.skiptuples(markpos - *cur_markpos, true)?;
+            *cur_markpos = markpos;
+        }
+        buffer.select_read_pointer(readptr)?;
+        if markpos > *seekpos {
+            buffer.skiptuples(markpos - *seekpos, true)?;
+            *seekpos = markpos;
         }
         Ok(())
     }
@@ -2963,7 +2981,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 } else {
                     (1, true)
                 };
-                let relpos = if forward { offset as i64 } else { -(offset as i64) };
+                let relpos = leadlag_relpos(offset, forward);
                 let (mut nd, isout) = self.win_get_func_arg_in_partition(
                     estate,
                     fetch,
@@ -3829,8 +3847,18 @@ where
                 }
             }
         }
-        // C force-updates framehead/frametail/grouptail pointers and trims
-        // the tuplestore here; trim is unported, so the pointers stay lazy.
+        // nodeWindowAgg.c:2376-2385: the auxiliary boundary read pointers
+        // are forced up to date so tuplestore_trim can discard consumed rows.
+        if state.framehead_ptr >= 0 {
+            state.update_frameheadpos(estate, fetch)?;
+        }
+        if state.frametail_ptr >= 0 {
+            state.update_frametailpos(estate, fetch)?;
+        }
+        if state.grouptail_ptr >= 0 {
+            state.update_grouptailpos(estate, fetch)?;
+        }
+        state.buffer.as_mut().unwrap().trim();
 
         if expr_needs_driver(&state.proj) {
             let ecxt = state.ps_ExprContext;
@@ -3972,7 +4000,7 @@ mcx::forget_safe_nodrop!(WfKind, Int8TransState, WaStatus);
 // in_range/eq ExprStates and FmgrInfos taken, buffer ended, slot descs
 // cleared).
 mcx::forget_safe_struct!(
-    PerFuncData<'_> { kind, wfuncno, readptr, seekpos, markpos, rank, ntile,
+    PerFuncData<'_> { kind, wfuncno, readptr, markptr, seekpos, markpos, rank, ntile,
         rows_per_bucket, boundary, remainder, arg1_stable, resulttype_len, resulttype_byval;
         argstates, flinfo },
     PerAggData<'_> { wfuncno, num_arguments, win_collation, fn_strict,
@@ -3985,7 +4013,7 @@ mcx::forget_safe_struct!(
         ps_ResultTupleSlot, first_part_valid, first_part_mcx, agg_row_valid, perfunc, peragg,
         trans_init, trans_typlen, trans_byval, agg_node, _pergroup, pergroup_base,
         peragg_wfuncno, agg_saved,
-        agg_readptr, agg_seekpos, agg_markpos, agg_mark_active,
+        agg_readptr, agg_markptr, agg_seekpos, agg_markpos, agg_mark_active,
         agg_values_base, agg_nulls_base, numaggs, currentpos, frameheadpos,
         frametailpos, framehead_valid, frametail_valid, framehead_ptr,
         frametail_ptr, currentgroup, frameheadgroup, frametailgroup,
@@ -4001,3 +4029,9 @@ mcx::forget_safe_struct!(
         end_offset_state, start_in_range, end_in_range, runcondition, qual,
         default_final },
 );
+
+// windowfuncs.c:552 negates the int32 offset under -fwrapv (INT_MIN stays
+// negative) before it reaches WinGetFuncArgInPartition's int relpos.
+fn leadlag_relpos(offset: i32, forward: bool) -> i64 {
+    i64::from(if forward { offset } else { offset.wrapping_neg() })
+}

@@ -573,7 +573,15 @@ fn run_elided<'mcx>(
         };
     if setexpr.returns_tuple {
         let mut set_desc: Option<TupleDescData<'mcx>> = None;
-        put_composite_row(&mut store, expected_desc, &mut set_desc, value, isnull, estate)?;
+        put_composite_row(
+            &mut store,
+            expected_desc,
+            &mut set_desc,
+            value,
+            isnull,
+            estate.es_query_cxt,
+            estate.ecxt(ecxt).per_tuple_mcx(),
+        )?;
         // C: cross-check the function-provided tupdesc against expectedDesc.
         if let Some(d) = &set_desc {
             tupledesc_match(expected_desc, d)?;
@@ -650,7 +658,8 @@ fn run_value_per_call<'mcx>(
                 &mut none,
                 ::datum::Datum::null(),
                 true,
-                estate,
+                estate.es_query_cxt,
+                estate.ecxt(ecxt).per_tuple_mcx(),
             )?;
         }
         return Ok(store);
@@ -719,7 +728,8 @@ fn run_value_per_call<'mcx>(
                             &mut none,
                             ::datum::Datum::null(),
                             true,
-                            estate,
+                            estate.es_query_cxt,
+                            estate.ecxt(ecxt).per_tuple_mcx(),
                         )?;
                     }
                     break;
@@ -731,7 +741,8 @@ fn run_value_per_call<'mcx>(
                         &mut set_desc,
                         result,
                         fcinfo.isnull,
-                        estate,
+                        estate.es_query_cxt,
+                        estate.ecxt(ecxt).per_tuple_mcx(),
                     )?;
                 } else {
                     store.putvalues(expected_desc, &[result], &[fcinfo.isnull])?;
@@ -832,15 +843,15 @@ fn put_composite_row<'mcx>(
     set_desc: &mut Option<TupleDescData<'mcx>>,
     result: ::datum::Datum,
     isnull: bool,
-    estate: &mut EStateData<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
+    scratch: ::mcx::Mcx<'_>,
 ) -> PgResult<()> {
-    let mcx = estate.es_query_cxt;
     if isnull {
         // C: a NULL from a tuple-returning function expands to a row of all
-        // nulls, shaped by expectedDesc.
+        // nulls, shaped by expectedDesc (per-tuple memory, execSRF.c:225).
         let natts = expected_desc.natts as usize;
-        let mut values: PgVec<'_, ::datum::Datum> = ::mcx::vec_with_capacity_in(mcx, natts)?;
-        let mut nulls: PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut values: PgVec<'_, ::datum::Datum> = ::mcx::vec_with_capacity_in(scratch, natts)?;
+        let mut nulls: PgVec<'_, bool> = ::mcx::vec_with_capacity_in(scratch, natts)?;
         values.resize(natts, ::datum::Datum::null());
         nulls.resize(natts, true);
         return store.putvalues(expected_desc, &values, &nulls);
@@ -854,7 +865,7 @@ fn put_composite_row<'mcx>(
         if !::types_tuple::varatt::varatt_is_4b_u(src) {
             let image =
                 core::slice::from_raw_parts(src, ::types_tuple::varatt::varsize_any(src));
-            _flat = ::detoast_seams::detoast_attr::call(mcx, image)?;
+            _flat = ::detoast_seams::detoast_attr::call(scratch, image)?;
             _flat.as_ptr()
         } else {
             src

@@ -793,6 +793,33 @@ fn io_timed_count_records_time_and_dbstats() {
     io::pgstat_flush_io(false);
 }
 
+// pgstat_io.c:134-148: the pgBufferUsage shared/local blk times advance
+// with each timed relation/temp-relation read, write and extend.
+#[test]
+fn io_timed_count_feeds_buffer_usage_times() {
+    use crate::io::{self, IOContext, IOObject, IOOp};
+    let _lock = setup_io();
+    let (r0, w0, lr0, lw0) = (
+        io::shared_blk_read_time(),
+        io::shared_blk_write_time(),
+        io::local_blk_read_time(),
+        io::local_blk_write_time(),
+    );
+    let start = io::pgstat_prepare_io_time(true) - 1_000_000;
+    io::pgstat_count_io_op_time(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Read, start, 1, 8192);
+    io::pgstat_count_io_op_time(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Extend, start, 1, 8192);
+    io::pgstat_count_io_op_time(IOObject::TempRelation, IOContext::IOCONTEXT_NORMAL, IOOp::Read, start, 1, 8192);
+    io::pgstat_count_io_op_time(IOObject::TempRelation, IOContext::IOCONTEXT_NORMAL, IOOp::Write, start, 1, 8192);
+    io::pgstat_count_io_op_time(IOObject::Wal, IOContext::IOCONTEXT_NORMAL, IOOp::Write, start, 1, 8192);
+    io::pgstat_count_io_op_time(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Read, 0, 1, 8192);
+    assert!(io::shared_blk_read_time() - r0 >= 1_000_000);
+    assert!(io::shared_blk_write_time() - w0 >= 1_000_000);
+    assert!(io::local_blk_read_time() - lr0 >= 1_000_000);
+    assert!(io::local_blk_write_time() - lw0 >= 1_000_000);
+    assert!(io::shared_blk_read_time() - r0 < 2 * (io::pgstat_prepare_io_time(true) - start));
+    io::pgstat_flush_io(false);
+}
+
 const IOCONTEXT_NORMAL_IDX: usize = 3;
 
 #[test]

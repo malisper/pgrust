@@ -40,6 +40,7 @@ const IDX_OID: Oid = 61001;
 const INT4OID: Oid = 23;
 const INT4_BTREE_OPFAMILY: Oid = 1976;
 const OP_INT4EQ: Oid = 96;
+static EXCL_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const F_INT4EQ: Oid = 65;
 const OP_INT4GT: Oid = 521;
 const F_INT4GT: Oid = 147;
@@ -300,6 +301,14 @@ fn install() {
                 5 => OP_INT4GT,
                 _ => 0,
             })
+        });
+        relcache_build_seams::scan_exclusion_ops::set(|mcx, _conrelid, _index_relid, _name, n| {
+            EXCL_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut ops = PgVec::new_in(mcx);
+            for _ in 0..n {
+                ops.push(OP_INT4EQ);
+            }
+            Ok(ops)
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
             Ok((opno == OP_INT4EQ).then_some(syscache_seams::PgOperatorShape {
@@ -1283,4 +1292,33 @@ fn index_info_rejects_invalid_attribute_counts_before_metadata_access() {
     for count in [1, types_core::INDEX_MAX_KEYS as i32] {
         crate::check_indnatts(count, IDX_OID).unwrap();
     }
+}
+
+// relcache.c:5680: after the first lookup the exclusion arrays come from the
+// index's cache (no pg_constraint scan or lock) until a relcache inval on
+// that index drops them.
+#[test]
+fn exclusion_info_is_cached_per_index_until_relcache_inval() {
+    use std::sync::atomic::Ordering;
+    install();
+    let _guard = serial();
+    let context = MemoryContext::new("exclusion info cache");
+    let mcx = context.mcx();
+    let mut data = index_relation_data(mcx, false);
+    data.rd_index.as_mut().unwrap().indisexclusion = true;
+    let index = Relation::open(data, noop_closer());
+    let n = ::types_core::INDEX_MAX_KEYS as usize;
+    let (mut ops, mut procs, mut strats) = ([0 as Oid; 32], [0 as Oid; 32], [0u16; 32]);
+    assert_eq!(n, 32);
+    crate::IdxExprRelCallback(Datum::from_oid(0), IDX_OID);
+    let before = EXCL_SCANS.load(Ordering::Relaxed);
+    for expected_scans in [1, 1] {
+        crate::RelationGetExclusionInfo(mcx, &index, &mut ops, &mut procs, &mut strats).unwrap();
+        assert_eq!(EXCL_SCANS.load(Ordering::Relaxed), before + expected_scans);
+        assert_eq!((ops[0], procs[0], strats[0]), (OP_INT4EQ, F_INT4EQ, 3));
+    }
+    crate::IdxExprRelCallback(Datum::from_oid(0), IDX_OID);
+    crate::RelationGetExclusionInfo(mcx, &index, &mut ops, &mut procs, &mut strats).unwrap();
+    assert_eq!(EXCL_SCANS.load(Ordering::Relaxed), before + 2);
+    assert_eq!((ops[0], procs[0], strats[0]), (OP_INT4EQ, F_INT4EQ, 3));
 }

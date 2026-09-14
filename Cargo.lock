@@ -8233,6 +8233,7 @@ dependencies = [
  "bufmgr",
  "fd",
  "pg_clock",
+ "pgstat",
  "transam_xlog_seams",
  "types_core",
 ]

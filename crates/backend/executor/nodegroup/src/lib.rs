@@ -4,7 +4,9 @@
 
 use std::rc::Rc;
 
-use ::execexpr::{exec_build_grouping_equal, exec_project, exec_qual, EvalSlots, ExprState};
+use ::execexpr::{
+    exec_build_grouping_equal, exec_project_prearmed, exec_qual, EvalSlots, ExprState,
+};
 use ::executils::{EStateData, EcxtId, ExecSlotId, RetainedTupleCtx};
 use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
 use ::types_error::PgResult;
@@ -223,6 +225,10 @@ impl<'mcx> GroupState<'mcx> {
                 self.ps_ExprContext,
             );
         }
+        if let Some(q) = self.qual.as_deref_mut() {
+            // SAFETY: per-tuple context outlives the eval (C ExecQual).
+            unsafe { q.arm_result_mcx_raw(estate.ecxt(self.ps_ExprContext).per_tuple_mcx()) };
+        }
         let mut slots =
             EvalSlots { scan: None, inner: None, outer: Some(&mut self.firsttuple_slot) };
         exec_qual(self.qual.as_deref_mut(), &mut slots)
@@ -240,10 +246,13 @@ impl<'mcx> GroupState<'mcx> {
             return Ok(Some(self.ps_ResultTupleSlot));
         }
         let mcx = estate.es_query_cxt;
+        // SAFETY: per-tuple context outlives the eval; reset per input
+        // tuple (C ExecProject allocates in ecxt_per_tuple_memory).
+        unsafe { self.proj.arm_result_mcx_raw(estate.ecxt(self.ps_ExprContext).per_tuple_mcx()) };
         let result_slot = estate.slot_mut(self.ps_ResultTupleSlot);
         let mut slots =
             EvalSlots { scan: None, inner: None, outer: Some(&mut self.firsttuple_slot) };
-        exec_project(&mut self.proj, &mut slots, result_slot, mcx)?;
+        exec_project_prearmed(&mut self.proj, &mut slots, result_slot, mcx)?;
         Ok(Some(self.ps_ResultTupleSlot))
     }
 }
