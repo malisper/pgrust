@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use manifest::{pg_checksum_type_name, PgChecksumContext, PgChecksumType};
 use parse_manifest::ManifestWalRange;
 
-use crate::flog::{errno_message, pg_fatal};
+use crate::app::flog::{errno_message, pg_fatal};
 
 pub struct ManifestWriter {
     pathname: PathBuf,
@@ -152,7 +152,7 @@ impl ManifestWriter {
 
         /* Close the file. */
         let file = self.file.take().expect("manifest file open after flush");
-        if let Err(e) = crate::copy_file::close_file(file) {
+        if let Err(e) = crate::app::copy_file::close_file(file) {
             pg_fatal!(
                 "could not close file \"{}\": {}",
                 self.pathname.display(),
@@ -164,7 +164,7 @@ impl ManifestWriter {
     /// C: flush_manifest.
     fn flush(&mut self) {
         if self.file.is_none() {
-            match crate::copy_file::open_excl_create(&self.pathname, false) {
+            match crate::app::copy_file::open_excl_create(&self.pathname, false) {
                 Ok(f) => self.file = Some(f),
                 Err(e) => pg_fatal!(
                     "could not open file \"{}\": {}",

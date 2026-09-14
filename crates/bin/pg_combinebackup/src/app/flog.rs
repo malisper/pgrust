@@ -141,8 +141,8 @@ pub fn exit_program(code: i32) -> ! {
 /// C: pg_fatal — log the error and exit(1) (via the atexit-equivalent path).
 macro_rules! pg_fatal {
     ($($arg:tt)*) => {{
-        $crate::flog::log_error(&format!($($arg)*));
-        $crate::flog::exit_program(1)
+        $crate::app::flog::log_error(&format!($($arg)*));
+        $crate::app::flog::exit_program(1)
     }};
 }
 pub(crate) use pg_fatal;

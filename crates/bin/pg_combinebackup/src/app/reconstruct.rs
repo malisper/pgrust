@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 
 use manifest::{pg_checksum_type_name, PgChecksumContext, PgChecksumType};
 
-use crate::copy_file::{copy_file, CopyMethod};
-use crate::flog::{errno_message, log_debug, log_warning, pg_fatal};
-use crate::load_manifest::ManifestData;
-use crate::{BLCKSZ, RELSEG_SIZE};
+use crate::app::copy_file::{copy_file, CopyMethod};
+use crate::app::flog::{errno_message, log_debug, log_warning, pg_fatal};
+use crate::app::load_manifest::ManifestData;
+use crate::app::{BLCKSZ, RELSEG_SIZE};
 
 /// C: INCREMENTAL_MAGIC (backup/basebackup_incremental.h).
 pub const INCREMENTAL_MAGIC: u32 = 0xd3ae1f0d;
@@ -561,7 +561,7 @@ fn write_reconstructed_file(
     /* Open the output file, except in dry_run mode. */
     let mut wfd: Option<File> = None;
     if !dry_run {
-        match crate::copy_file::open_excl_create(output_filename, true) {
+        match crate::app::copy_file::open_excl_create(output_filename, true) {
             Ok(f) => wfd = Some(f),
             Err(e) => pg_fatal!(
                 "could not open file \"{}\": {}",
@@ -643,7 +643,7 @@ fn write_reconstructed_file(
 
     /* Close the output file. */
     if let Some(f) = wfd {
-        if let Err(e) = crate::copy_file::close_file(f) {
+        if let Err(e) = crate::app::copy_file::close_file(f) {
             pg_fatal!(
                 "could not close file \"{}\": {}",
                 output_filename.display(),

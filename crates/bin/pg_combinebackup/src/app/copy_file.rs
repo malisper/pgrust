@@ -16,8 +16,8 @@ use std::path::Path;
 
 use manifest::{pg_checksum_type_name, PgChecksumContext, PgChecksumType};
 
-use crate::flog::{errno_message, log_debug, pg_fatal};
-use crate::BLCKSZ;
+use crate::app::flog::{errno_message, log_debug, pg_fatal};
+use crate::app::BLCKSZ;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CopyMethod {
@@ -36,7 +36,7 @@ pub fn open_excl_create(path: &Path, rdwr: bool) -> std::io::Result<File> {
     }
     opts.write(true)
         .create_new(true)
-        .mode(crate::fsutil::pg_file_create_mode())
+        .mode(crate::app::fsutil::pg_file_create_mode())
         .open(path)
 }
 
@@ -218,8 +218,8 @@ fn copy_file_clone(src: &Path, dest: &Path, checksum_ctx: &mut PgChecksumContext
             flags: u32,
         ) -> libc::c_int;
     }
-    let csrc = crate::fsutil::cstring(src);
-    let cdst = crate::fsutil::cstring(dest);
+    let csrc = crate::app::fsutil::cstring(src);
+    let cdst = crate::app::fsutil::cstring(dest);
     // SAFETY: NUL-terminated paths, NULL state.
     let rc = unsafe { copyfile(csrc.as_ptr(), cdst.as_ptr(), std::ptr::null_mut(), COPYFILE_CLONE_FORCE) };
     if rc < 0 {

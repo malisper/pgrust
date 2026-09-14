@@ -16,7 +16,7 @@ use parse_manifest::{json_parse_manifest, JsonManifestParseContext, ManifestWalR
 use types_core::{TimeLineID, XLogRecPtr};
 use types_error::{PgError, PgResult};
 
-use crate::flog::{errno_message, log_warning, pg_fatal};
+use crate::app::flog::{errno_message, log_warning, pg_fatal};
 
 /// C: manifest_file (sans hash-table plumbing).
 pub struct ManifestFileEntry {
@@ -132,8 +132,8 @@ pub fn load_backup_manifest(backup_directory: &Path) -> Option<ManifestData> {
     let result = json_parse_manifest(root.mcx(), &mut context, &buffer);
     if let Err(e) = result {
         /* C: report_manifest_error — pg_log_error + exit(1). */
-        crate::flog::log_error(e.message());
-        crate::flog::exit_program(1);
+        crate::app::flog::log_error(e.message());
+        crate::app::flog::exit_program(1);
     }
 
     Some(context.data)

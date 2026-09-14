@@ -7,8 +7,8 @@ use std::path::Path;
 use manifest::{PgChecksumContext, PgChecksumType};
 use types_core::{TimeLineID, XLogRecPtr};
 
-use crate::flog::{errno_message, pg_fatal};
-use crate::write_manifest::ManifestWriter;
+use crate::app::flog::{errno_message, pg_fatal};
+use crate::app::write_manifest::ManifestWriter;
 
 /// C: parse_backup_label. Scans the label line by line; extracts
 /// START WAL LOCATION, START TIMELINE, and the INCREMENTAL FROM LSN/TLI pair
@@ -107,7 +107,7 @@ pub fn write_backup_label(
     let output_filename = output_directory.join("backup_label");
     let mut checksum_ctx = PgChecksumContext::init(checksum_type);
 
-    let mut file = match crate::copy_file::open_excl_create(&output_filename, false) {
+    let mut file = match crate::app::copy_file::open_excl_create(&output_filename, false) {
         Ok(f) => f,
         Err(e) => pg_fatal!(
             "could not open file \"{}\": {}",
@@ -139,7 +139,7 @@ pub fn write_backup_label(
     }
 
     // C: close(output_fd) with a pinned error message on failure.
-    if let Err(e) = crate::copy_file::close_file(file) {
+    if let Err(e) = crate::app::copy_file::close_file(file) {
         pg_fatal!(
             "could not close file \"{}\": {}",
             output_filename.display(),
@@ -152,7 +152,7 @@ pub fn write_backup_label(
 
     if let Some(mwriter) = mwriter {
         let (size, mtime) = match std::fs::metadata(&output_filename) {
-            Ok(md) => (md.len(), crate::write_manifest::mtime_of(&md)),
+            Ok(md) => (md.len(), crate::app::write_manifest::mtime_of(&md)),
             Err(e) => pg_fatal!(
                 "could not stat file \"{}\": {}",
                 output_filename.display(),

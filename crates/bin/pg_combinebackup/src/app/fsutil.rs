@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::flog::{errno_message, pg_fatal};
+use crate::app::flog::{errno_message, pg_fatal};
 
 /* C: file_perm.h defaults (owner-only). */
 const PG_FILE_MODE_OWNER: u32 = 0o600;
@@ -108,12 +108,12 @@ pub fn get_dirent_type(path: &Path) -> PgFileType {
             }
         }
         Err(e) => {
-            crate::flog::log_error(&format!(
+            crate::app::flog::log_error(&format!(
                 "could not stat file \"{}\": {}",
                 path.display(),
                 errno_message(&e)
             ));
-            crate::flog::exit_program(1)
+            crate::app::flog::exit_program(1)
         }
     }
 }
@@ -225,7 +225,7 @@ fn fsync_fname(path: &Path, isdir: bool) {
     unsafe {
         if libc::fsync(fd) != 0 {
             let e = std::io::Error::last_os_error();
-            crate::flog::log_error(&format!(
+            crate::app::flog::log_error(&format!(
                 "could not fsync file \"{}\": {}",
                 path.display(),
                 errno_message(&e)
