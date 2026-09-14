@@ -113,6 +113,7 @@ fn mk_state<'mcx>(
         cur_lineno: 0,
         cur_attidx: None,
         cur_attval_off: None,
+        cur_attval_stale: PgVec::new_in(mcx),
         file_encoding: wchar::PG_UTF8,
         need_transcoding: false,
         conversion_proc: 0,
@@ -199,6 +200,9 @@ fn q8_f1_hex_escape_is_22021_not_slice_panic() {
     );
     assert!(err.message().contains("invalid byte sequence"));
 
+    let mut nd = types_tuple::NameData::default();
+    nd.namestrcpy("a");
+    st.attnames.push(nd);
     st.cur_attidx = Some(0);
     st.cur_attval_off = Some(2);
     st.cur_lineno = 2;
@@ -209,6 +213,9 @@ fn q8_f1_hex_escape_is_22021_not_slice_panic() {
         wrapped.sqlstate(),
         types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
     );
+    // The field is NUL-terminated before the encoding check, as in C, so the
+    // stale column pointer shows the offending byte.
+    assert_eq!(wrapped.context(), Some("COPY fzmin2, line 2, column a: \"\u{fffd}\""));
 }
 
 #[test]
@@ -796,4 +803,48 @@ fn binary_field_handles_fragmentation_and_truncation() {
             assert_eq!(result.unwrap_err().sqlstate(), types_error::ERRCODE_BAD_COPY_FILE_FORMAT);
         }
     }
+}
+
+// After a soft error C's cur_attname/cur_attval stay set (copyfromparse.c
+// NextCopyFrom soft-error return), so a line-level error on the NEXT line
+// reports the previous column, with whatever attribute_buf holds at the old
+// offset: the new line's bytes, or the old ones once a shorter line was parsed.
+#[test]
+fn stale_column_context_survives_the_next_line() {
+    setup_fd();
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+    let mcx = test_ctx().mcx();
+    let mut st = mk_state(mcx, b'\t', "\\N");
+    for n in ["a", "b"] {
+        let mut nd = types_tuple::NameData::default();
+        nd.namestrcpy(n);
+        st.attnames.push(nd);
+    }
+    st.relname = "t3".into();
+    st.line_buf_valid = true;
+
+    mcx::vec_append_bytes(&mut st.line_buf, b"1\tabc").unwrap();
+    st.copy_read_attributes_text().unwrap();
+    st.cur_lineno = 1;
+    st.cur_attidx = Some(1);
+    st.cur_attval_off = Some(st.raw_fields[1]);
+
+    st.line_buf.clear();
+    mcx::vec_append_bytes(&mut st.line_buf, b"2\t3\t4").unwrap();
+    st.copy_read_attributes_text().unwrap();
+    st.cur_lineno = 2;
+    let e = copy_from_error_context(&st, crate::fromparse::extra_data());
+    assert_eq!(e.context(), Some("COPY t3, line 2, column b: \"3\""));
+
+    st.line_buf.clear();
+    mcx::vec_append_bytes(&mut st.line_buf, b"2").unwrap();
+    st.copy_read_attributes_text().unwrap();
+    st.cur_lineno = 3;
+    let e = copy_from_error_context(&st, crate::fromparse::extra_data());
+    assert_eq!(e.context(), Some("COPY t3, line 3, column b: \"3\""));
+
+    st.cur_attidx = None;
+    st.cur_attval_off = None;
+    let e = copy_from_error_context(&st, crate::fromparse::extra_data());
+    assert_eq!(e.context(), Some("COPY t3, line 3: \"2\""));
 }

@@ -80,7 +80,12 @@ struct FileFdwExecutionState {
     filename: &'static str,
     is_program: bool,
     options: NodeList<'static>,
+    // Declared before copycx: dropped first, it never outlives its arena.
     cstate: Option<CopyFromState<'static, 'static>>,
+    // BeginCopyFrom's "COPY" context (copyfrom.c:1567), one per scan start;
+    // a rescan replaces it, so the previous cstate's buffers are freed.
+    // Boxed: cstate's allocator handle points at it.
+    copycx: Box<MemoryContext>,
 }
 
 fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
@@ -613,12 +618,16 @@ fn festate<'a>(node: &'a mut ForeignScanState<'_>) -> Option<&'a mut FileFdwExec
 }
 
 fn begin_copy<'mcx>(
-    mcx: Mcx<'mcx>,
+    copycx: &MemoryContext,
     rel: &Relation<'mcx>,
     filename: &'mcx str,
     is_program: bool,
     options: &NodeList<'mcx>,
 ) -> PgResult<CopyFromState<'static, 'static>> {
+    // SAFETY: copycx is owned by the FileFdwExecutionState that owns the
+    // returned cstate and outlives it (field order; rescan ends the cstate
+    // before replacing the context).
+    let mcx = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'mcx>>(copycx.mcx()) };
     let cstate = copy_cmd::BeginCopyFrom(
         mcx,
         rel,
@@ -651,8 +660,10 @@ fn file_begin_foreign_scan<'mcx>(
     for def in node.plan.fdw_private.iter() {
         options.lappend(mcx, def)?;
     }
-    let cstate = begin_copy(mcx, rel, filename, is_program, &options)?;
-    // SAFETY: same es_query_cxt restamp as begin_copy.
+    let copycx = Box::new(mcx.context().new_child_bump("COPY"));
+    let cstate = begin_copy(&copycx, rel, filename, is_program, &options)?;
+    // SAFETY: es_query_cxt restamp, dropped at end-scan before the context
+    // resets.
     let (filename, options) = unsafe {
         (
             core::mem::transmute::<&'mcx str, &'static str>(filename),
@@ -664,6 +675,7 @@ fn file_begin_foreign_scan<'mcx>(
         is_program,
         options,
         cstate: Some(cstate),
+        copycx,
     }));
     Ok(())
 }
@@ -747,10 +759,11 @@ fn file_rescan_foreign_scan<'mcx>(
     if let Some(cstate) = f.cstate.take() {
         copy_cmd::EndCopyFrom(cstate)?;
     }
+    f.copycx = Box::new(mcx.context().new_child_bump("COPY"));
     // SAFETY: undoes the begin-time 'static restamp (same es_query_cxt).
     let options =
         unsafe { core::mem::transmute::<&NodeList<'static>, &NodeList<'mcx>>(&f.options) };
-    f.cstate = Some(begin_copy(mcx, rel, f.filename, f.is_program, options)?);
+    f.cstate = Some(begin_copy(&f.copycx, rel, f.filename, f.is_program, options)?);
     Ok(())
 }
 

@@ -1670,6 +1670,7 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
             cur_lineno: 0,
             cur_attidx: None,
             cur_attval_off: None,
+            cur_attval_stale: PgVec::new_in(mcx),
             file_encoding: shared.file_encoding,
             need_transcoding: false,
             conversion_proc: 0,

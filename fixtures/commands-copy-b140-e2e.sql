@@ -1,0 +1,89 @@
+-- bugs/batch-140-backend-commands-copy: C-vs-pgrust parity for the COPY FROM
+-- fixes in commands/copy. Expected file captured from C 18.6
+-- (scripts/regress-diff.sh --capture), except the block marked HAND-VERIFIED.
+\set VERBOSITY verbose
+
+-- copyfrom: the COPY command id is taken before BEFORE STATEMENT triggers run
+CREATE TABLE b140_t1(a int);
+CREATE TABLE b140_log(x int);
+CREATE FUNCTION b140_bs() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO b140_log VALUES (1); RETURN NULL; END $$;
+CREATE TRIGGER b140_t1_bs BEFORE INSERT ON b140_t1 FOR EACH STATEMENT EXECUTE FUNCTION b140_bs();
+BEGIN;
+COPY b140_t1 FROM stdin;
+1
+2
+\.
+SELECT cmin, a FROM b140_t1 ORDER BY a;
+SELECT cmin, x FROM b140_log;
+COMMIT;
+SELECT cmin, a FROM b140_t1 ORDER BY a;
+DROP TABLE b140_t1, b140_log;
+DROP FUNCTION b140_bs;
+
+-- copyfromparse: a soft-error row's column context is still in place when the
+-- next line raises a line-level error
+CREATE TABLE b140_t3(a int, b int);
+COPY b140_t3 FROM stdin WITH (format csv, on_error ignore);
+1,abc
+2,"unterminated
+\.
+COPY b140_t3 FROM stdin WITH (format csv, on_error ignore);
+1,abc
+2,3,4
+\.
+COPY b140_t3 FROM stdin WITH (on_error ignore);
+1	abc
+2	3	4
+\.
+COPY b140_t3 FROM stdin WITH (on_error ignore);
+1	abcdef
+2	3	4
+\.
+COPY b140_t3 FROM stdin WITH (on_error ignore);
+1	abc
+2
+\.
+COPY b140_t3 FROM stdin WITH (on_error ignore, log_verbosity verbose);
+1	abcdef
+2	3	4
+\.
+COPY b140_t3 FROM stdin WITH (on_error ignore);
+1	\N
+2	3	4
+\.
+COPY b140_t3 FROM stdin WITH (on_error ignore);
+1	abc
+2	4
+3	x	y
+\.
+COPY b140_t3 FROM stdin WITH (on_error ignore, reject_limit 1);
+1	abc
+2	xyz
+3	4
+\.
+COPY b140_t3 FROM stdin WITH (on_error ignore, reject_limit 1);
+1	abc
+2	\N
+3	x	y
+\.
+SELECT * FROM b140_t3 ORDER BY 1, 2;
+DROP TABLE b140_t3;
+
+-- HAND-VERIFIED: transition table row of a COPY routed into a reordered
+-- partition with a stored generated column. C 18.6 prints new: (1,) (the
+-- pre-generation root slot is captured, copyfrom.c:1270 / trigger.c
+-- AfterTriggerSaveEvent); pgrust captures the computed row, as it does for
+-- INSERT (UPSTREAM-BUGS.md #16 / #17).
+CREATE TABLE b140_tp(a int, g int GENERATED ALWAYS AS (a*2) STORED) PARTITION BY LIST (a);
+CREATE TABLE b140_tp1(g int GENERATED ALWAYS AS (a*2) STORED, a int);
+ALTER TABLE b140_tp ATTACH PARTITION b140_tp1 FOR VALUES IN (1);
+CREATE TABLE b140_tp2 PARTITION OF b140_tp FOR VALUES IN (2);
+CREATE FUNCTION b140_tp_stmt() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE r record; BEGIN FOR r IN SELECT * FROM newtab ORDER BY 1 LOOP RAISE NOTICE 'new: %', r; END LOOP; RETURN NULL; END $$;
+CREATE TRIGGER b140_tp_ins AFTER INSERT ON b140_tp REFERENCING NEW TABLE AS newtab FOR EACH STATEMENT EXECUTE FUNCTION b140_tp_stmt();
+COPY b140_tp(a) FROM stdin;
+1
+2
+\.
+SELECT * FROM b140_tp ORDER BY a;
+DROP TABLE b140_tp;
+DROP FUNCTION b140_tp_stmt;

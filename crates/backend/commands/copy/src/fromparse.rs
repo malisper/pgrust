@@ -692,6 +692,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             return Ok(0);
         }
 
+        self.stash_cur_attval()?;
         let line: &[u8] = &self.line_buf;
         let null_print = self.opts.null_print.as_bytes();
         let default_print = self.opts.default_print.map(str::as_bytes);
@@ -801,16 +802,17 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                     op.write(0);
                     op = op.add(1);
                 } else {
-                    if saw_non_ascii {
-                        let fld = core::slice::from_raw_parts(
-                            field_start,
-                            op.offset_from(field_start) as usize,
-                        );
-                        mbutils::pg_verify_mbstr(mbutils::GetDatabaseEncoding(), fld, false)?;
-                    }
                     self.raw_fields.push(field_start.offset_from(dst) as i32);
                     op.write(0);
                     op = op.add(1);
+                    if saw_non_ascii {
+                        out.set_len(op.offset_from(dst) as usize);
+                        let fld = core::slice::from_raw_parts(
+                            field_start,
+                            op.offset_from(field_start) as usize - 1,
+                        );
+                        mbutils::pg_verify_mbstr(mbutils::GetDatabaseEncoding(), fld, false)?;
+                    }
                 }
 
                 fieldno += 1;
@@ -836,6 +838,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             return Ok(0);
         }
 
+        self.stash_cur_attval()?;
         let line: &[u8] = &self.line_buf;
         let null_print = self.opts.null_print.as_bytes();
         let default_print = self.opts.default_print.map(str::as_bytes);
@@ -939,11 +942,6 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         for d in self.defaults.iter_mut() {
             *d = false;
         }
-        // Q8-F1: C keeps a pointer into the prior row; our offset into a
-        // subsequently clear()ed attribute_buf is a slice panic.
-        self.cur_attidx = None;
-        self.cur_attval_off = None;
-
         if self.opts.binary {
             if !self.copy_from_binary_one_row(row_mcx, values, nulls)? {
                 return Ok(false);
@@ -1048,7 +1046,6 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             return Err(extra_data());
         }
 
-        let mut soft_error = false;
         for i in 0..attr_count {
             let attnum = self.attnumlist[i];
             let m = attnum as usize - 1;
@@ -1109,10 +1106,8 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                     if self.opts.log_verbosity == crate::CopyLogVerbosityChoice::Verbose {
                         let msg = match self.cur_attval_off {
                             Some(off) => {
-                                let bytes = &self.attribute_buf[off as usize..];
-                                let nul =
-                                    bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                                let attval = super::from::limit_printout_length(&bytes[..nul]);
+                                let attval =
+                                    super::from::limit_printout_length(self.cur_attval_bytes(off));
                                 format!(
                                     "skipping row due to data type incompatibility at line {} \
                                      for column \"{}\": \"{attval}\"",
@@ -1132,14 +1127,9 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                             .errcontext_msg(format!("COPY {}", self.relname))
                             .finish(loc("CopyFromTextLikeOneRow"))?;
                     }
-                    soft_error = true;
                     break;
                 }
             }
-            self.cur_attidx = None;
-            self.cur_attval_off = None;
-        }
-        if soft_error {
             self.cur_attidx = None;
             self.cur_attval_off = None;
         }
@@ -1409,7 +1399,7 @@ fn unexpected_eof_in_copy_data() -> Box<PgError> {
 #[track_caller]
 #[cold]
 #[inline(never)]
-fn extra_data() -> Box<PgError> {
+pub(crate) fn extra_data() -> Box<PgError> {
     bad_copy_format("extra data after last expected column")
 }
 
@@ -1485,6 +1475,7 @@ pub mod bench_internals {
             cur_lineno: 0,
             cur_attidx: None,
             cur_attval_off: None,
+            cur_attval_stale: PgVec::new_in(mcx),
             file_encoding: 0,
             need_transcoding: false,
             conversion_proc: 0,

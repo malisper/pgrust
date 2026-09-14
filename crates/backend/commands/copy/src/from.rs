@@ -90,6 +90,9 @@ pub struct CopyFromState<'mcx, 's> {
     pub cur_lineno: u64,
     pub(crate) cur_attidx: Option<usize>,
     pub(crate) cur_attval_off: Option<i32>,
+    // C's cur_attval keeps pointing into attribute_buf after a soft error;
+    // the bytes it addressed before the next line overwrote the buffer.
+    pub(crate) cur_attval_stale: PgVec<'mcx, u8>,
     pub(crate) file_encoding: i32,
     pub(crate) need_transcoding: bool,
     pub(crate) conversion_proc: Oid,
@@ -122,6 +125,33 @@ impl CopyFromState<'_, '_> {
 
     pub fn num_errors(&self) -> u64 {
         self.num_errors
+    }
+
+    // What C's cur_attval addresses: attribute_buf at `off` up to its NUL, or,
+    // once a shorter line has been parsed over it, the bytes it held before.
+    pub(crate) fn cur_attval_bytes(&self, off: i32) -> &[u8] {
+        let off = off as usize;
+        if off >= self.attribute_buf.len() {
+            return &self.cur_attval_stale;
+        }
+        let bytes = &self.attribute_buf[off..];
+        let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        &bytes[..nul]
+    }
+
+    // resetStringInfo(&attribute_buf) leaves a dangling cur_attval in C;
+    // remember what it pointed at so the error context can still show it.
+    pub(crate) fn stash_cur_attval(&mut self) -> PgResult<()> {
+        if let Some(off) = self.cur_attval_off {
+            let off = off as usize;
+            if off < self.attribute_buf.len() {
+                let bytes = &self.attribute_buf[off..];
+                let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                self.cur_attval_stale.clear();
+                mcx::vec_append_bytes(&mut self.cur_attval_stale, &bytes[..nul])?;
+            }
+        }
+        Ok(())
     }
 
     /// `cstate->escontext->error_occurred` (file_fdw's soft-error probe).
@@ -485,6 +515,7 @@ fn begin_copy_from_guts<'mcx: 's, 's>(
         cur_lineno: 0,
         cur_attidx: None,
         cur_attval_off: None,
+        cur_attval_stale: PgVec::new_in(mcx),
         file_encoding,
         need_transcoding,
         conversion_proc,
@@ -661,6 +692,9 @@ pub fn CopyFrom<'mcx>(
     // pre-trigger (stale-held-rd_rel audit). A partitioned root's state is
     // only held — routed inserts use the per-leaf opens below.
     let root_index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
+    // copyfrom.c:792: the COPY command id is fixed before the BS triggers
+    // run (a trigger's SPI insert advances the counter).
+    let mycid = xact::GetCurrentCommandId(true)?;
     if let Some(td) = &trigdesc {
         let mut when =
             trigger::TriggerWhenEval { mcx, cache: &mut trig_when, modified_cols: None };
@@ -678,6 +712,7 @@ pub fn CopyFrom<'mcx>(
             ti_options,
             part_force_single,
             transition_capture.as_ref(),
+            mycid,
         )
     } else {
         let mut trig = trigdesc.as_ref().map(|td| CopyTrig {
@@ -686,7 +721,7 @@ pub fn CopyFrom<'mcx>(
             when: &mut trig_when,
             fmgr: &mut trig_fmgr,
         });
-        copy_from_body(mcx, cstate, rel, ti_options, trig.as_mut(), root_index_state)
+        copy_from_body(mcx, cstate, rel, ti_options, trig.as_mut(), root_index_state, mycid)
     };
     match body {
         Ok(n) => {
@@ -721,9 +756,8 @@ fn copy_from_body<'mcx>(
     mut trig: Option<&mut CopyTrig<'_, 'mcx>>,
     // Opened by the caller BEFORE the BS triggers fired (C copyfrom.c:924).
     index_state: execindexing::ResultRelIndexState<'mcx>,
+    mycid: types_core::CommandId,
 ) -> PgResult<u64> {
-    let mycid = xact::GetCurrentCommandId(true)?;
-
     let mut index_state = index_state;
 
     // The DoCopy perminfo's insertedCols (copy.c): constraint-error DETAILs
@@ -1064,8 +1098,8 @@ fn copy_from_partitioned_body<'mcx>(
     ti_options: i32,
     force_single: bool,
     transition_capture: Option<&trigger::TransitionCaptureState>,
+    mycid: types_core::CommandId,
 ) -> PgResult<u64> {
-    let mycid = xact::GetCurrentCommandId(true)?;
 
     // The DoCopy perminfo's insertedCols (copy.c): constraint-error DETAILs
     // always include the columns the user provided data for (execMain.c
@@ -1600,39 +1634,25 @@ pub fn copy_from_error_context(
         };
         return Box::new(e.add_context(ctx));
     }
-    let stale_attval = cstate
-        .cur_attval_off
-        .is_some_and(|off| (off as usize) >= cstate.attribute_buf.len());
-    let ctx = if stale_attval {
-        if cstate.line_buf_valid {
-            let lineval = limit_printout_length(&cstate.line_buf);
-            format!("COPY {relname}, line {lineno}: \"{lineval}\"")
-        } else {
-            format!("COPY {relname}, line {lineno}")
-        }
-    } else {
-        match cstate.cur_attidx {
-            Some(m) => {
-                let attname = cstate.attname(m);
-                match cstate.cur_attval_off {
-                    Some(off) => {
-                        let bytes = &cstate.attribute_buf[off as usize..];
-                        let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                        let attval = limit_printout_length(&bytes[..nul]);
-                        format!("COPY {relname}, line {lineno}, column {attname}: \"{attval}\"")
-                    }
-                    None => {
-                        format!("COPY {relname}, line {lineno}, column {attname}: null input")
-                    }
+    let ctx = match cstate.cur_attidx {
+        Some(m) => {
+            let attname = cstate.attname(m);
+            match cstate.cur_attval_off {
+                Some(off) => {
+                    let attval = limit_printout_length(cstate.cur_attval_bytes(off));
+                    format!("COPY {relname}, line {lineno}, column {attname}: \"{attval}\"")
+                }
+                None => {
+                    format!("COPY {relname}, line {lineno}, column {attname}: null input")
                 }
             }
-            None => {
-                if cstate.line_buf_valid {
-                    let lineval = limit_printout_length(&cstate.line_buf);
-                    format!("COPY {relname}, line {lineno}: \"{lineval}\"")
-                } else {
-                    format!("COPY {relname}, line {lineno}")
-                }
+        }
+        None => {
+            if cstate.line_buf_valid {
+                let lineval = limit_printout_length(&cstate.line_buf);
+                format!("COPY {relname}, line {lineno}: \"{lineval}\"")
+            } else {
+                format!("COPY {relname}, line {lineno}")
             }
         }
     };
