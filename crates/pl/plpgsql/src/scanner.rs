@@ -446,6 +446,14 @@ impl<'mcx> PlScanner<'mcx> {
         Ok(())
     }
 
+    // plpgsql_peek (pl_scanner.c:457): one raw token, no identifier lookahead.
+    pub fn peek(&mut self) -> PgResult<i32> {
+        let mut aux = TokenAux::default();
+        let tok = self.internal_yylex(&mut aux)?;
+        self.push_back(tok, &aux)?;
+        Ok(tok)
+    }
+
     pub fn push_back_token(
         &mut self,
         token: i32,

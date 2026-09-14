@@ -62,10 +62,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     }
 
     fn peek(&mut self) -> PgResult<i32> {
-        let t = self.yylex()?;
-        let tok = t.0;
-        self.push_back(&t)?;
-        Ok(tok)
+        self.sc.peek()
     }
 
     fn lineno(&mut self, loc: i32) -> i32 {
@@ -112,9 +109,9 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     // opt_transaction_chain (pl_gram.y): [AND [NO] CHAIN] ';'.
     fn parse_opt_transaction_chain(&mut self) -> PgResult<bool> {
         let t = self.yylex()?;
-        let chain = if Self::tok_is_keyword(&t, K_AND, "and") {
+        let chain = if t.0 == K_AND {
             let t2 = self.yylex()?;
-            if Self::tok_is_keyword(&t2, K_NO, "no") {
+            if t2.0 == K_NO {
                 self.expect(K_CHAIN, "syntax error")?;
                 false
             } else {
@@ -324,8 +321,20 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     // plpgsql_sql_error_callback; the built type carries fn_input_collation
     // and remembers its SQL spelling for later re-resolution.
     fn parse_datatype(&mut self, type_name: &str, location: i32) -> PgResult<PlType> {
-        let (typoid, typmod) = parse_utilcmd::parseTypeString(self.scratch, type_name)
-            .map_err(|e| self.sql_error_callback(e, location))?;
+        let (pos, query) = if location >= 0 {
+            (
+                Some(self.sc.errposition(location)),
+                Some(self.source_span(0, self.sc.scanbuf().len() as i32)),
+            )
+        } else {
+            (None, None)
+        };
+        let cb = elog::push_emit_context_callback(Box::new(move |e| {
+            Self::sql_error_callback_at(e, pos, query.as_deref());
+        }));
+        let r = parse_utilcmd::parseTypeString(self.scratch, type_name);
+        elog::pop_emit_context_callback(cb);
+        let (typoid, typmod) = r.map_err(|e| self.sql_error_callback(e, location))?;
         CompState::build_datatype(
             typoid,
             typmod,
@@ -338,9 +347,22 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     // internal-query cursor over the body (plpgsql_scanner_errposition), a
     // core-parser cursor inside the type string is added to it, errposition cleared.
     fn sql_error_callback(&self, mut e: Box<PgError>, location: i32) -> Box<PgError> {
-        if location >= 0 {
-            e.internal_position = Some(self.sc.errposition(location));
-            e.internal_query = Some(self.source_span(0, self.sc.scanbuf().len() as i32));
+        let (pos, query) = if location >= 0 {
+            (
+                Some(self.sc.errposition(location)),
+                Some(self.source_span(0, self.sc.scanbuf().len() as i32)),
+            )
+        } else {
+            (None, None)
+        };
+        Self::sql_error_callback_at(&mut e, pos, query.as_deref());
+        e
+    }
+
+    fn sql_error_callback_at(e: &mut PgError, pos: Option<i32>, query: Option<&str>) {
+        if let Some(pos) = pos {
+            e.internal_position = Some(pos);
+            e.internal_query = query.map(|q| q.to_string());
         }
         if let Some(errpos) = e.cursor_position.filter(|&p| p > 0) {
             if let Some(mypos) = e.internal_position.filter(|&p| p > 0) {
@@ -348,7 +370,6 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             }
         }
         e.cursor_position = None;
-        e
     }
 
     // read_datatype (pl_gram.y); the lookahead token is passed in.
@@ -554,14 +575,14 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 }
             } else if opt.0 == K_VARIABLE_CONFLICT {
                 let v = self.yylex()?;
-                if Self::tok_is_keyword(&v, K_ERROR, "error") {
+                if v.0 == K_ERROR {
                     self.comp.resolve_option = crate::comp::PLPGSQL_RESOLVE_ERROR;
-                } else if Self::tok_is_keyword(&v, K_USE_VARIABLE, "use_variable") {
+                } else if v.0 == K_USE_VARIABLE {
                     self.comp.resolve_option = crate::comp::PLPGSQL_RESOLVE_VARIABLE;
-                } else if Self::tok_is_keyword(&v, K_USE_COLUMN, "use_column") {
+                } else if v.0 == K_USE_COLUMN {
                     self.comp.resolve_option = crate::comp::PLPGSQL_RESOLVE_COLUMN;
                 } else {
-                    return Err(self.yyerror("unrecognized option", v.2));
+                    return Err(self.yyerror("syntax error", v.2));
                 }
             } else {
                 return Err(self.yyerror("unrecognized option", opt.2));
@@ -686,11 +707,12 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             None
         };
         let (end_label, end_loc) = self.opt_label()?;
+        let lineno = self.lineno(begin_loc);
         self.check_labels(label.as_deref(), end_label.as_deref(), end_loc)?;
         self.comp.ns_pop();
         self.comp.nstatements += 1;
         Ok(PlBlock {
-            lineno: self.lineno(begin_loc),
+            lineno,
             label,
             body,
             initvarnos,
@@ -2049,7 +2071,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             ));
         };
         let t = self.yylex()?;
-        let slice = if Self::tok_is_keyword(&t, K_SLICE, "slice") {
+        let slice = if t.0 == K_SLICE {
             let it = self.expect(ICONST, "syntax error")?;
             it.1.ival
         } else {
@@ -2571,10 +2593,10 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     fn parse_getdiag(&mut self, lloc: i32) -> PgResult<PlStmt> {
         // getdiag_area_opt.
         let mut t = self.yylex()?;
-        let is_stacked = if Self::tok_is_keyword(&t, K_CURRENT, "current") {
+        let is_stacked = if t.0 == K_CURRENT {
             t = self.yylex()?;
             false
-        } else if Self::tok_is_keyword(&t, K_STACKED, "stacked") {
+        } else if t.0 == K_STACKED {
             t = self.yylex()?;
             true
         } else {

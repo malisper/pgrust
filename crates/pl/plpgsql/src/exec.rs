@@ -509,6 +509,10 @@ struct SimpleExpr {
     // The compiled ExprState carries init_func's EXECUTE ACL verdicts for
     // this user; C rebuilds per transaction so a role change re-checks.
     userid: Oid,
+    // C expr_simple_lxid (pl_exec.c:6172): the compiled state (its function
+    // usage-tracking opcodes included) lives one transaction; plpgsql_xact_cb
+    // frees simple_eval_estate at every transaction end (pl_exec.c:8728).
+    lxid: u32,
     // C expr_simple_mutable (exec_save_simple_expr, pl_exec.c:8349): only
     // expressions containing mutable functions need the CCI + fresh-snapshot
     // ceremony per evaluation (pl_exec.c:6198-6204).
@@ -822,16 +826,22 @@ fn spi_ctx_err(
     query: &str,
     mode: parser_seams::RawParseMode,
 ) -> Box<PgError> {
+    spi_error_context(&mut e, query, mode);
+    e
+}
+
+// _SPI_error_callback (spi.c:2992) over one report.
+fn spi_error_context(e: &mut PgError, query: &str, mode: parser_seams::RawParseMode) {
     if let Some(p) = e.cursor_position.filter(|&p| p > 0) {
         e.cursor_position = None;
         e.internal_position = Some(p);
         e.internal_query = Some(query.to_string());
-        return e;
+        return;
     }
     // The spi crate's _SPI_error_callback port may already have handled this
     // query (transpose or context line); C runs the callback once per level.
     if e.internal_query.as_deref() == Some(query) {
-        return e;
+        return;
     }
     let line = spi_context_line(query, mode);
     // Dedup only an immediately-repeated line (same-level double handling by
@@ -841,10 +851,9 @@ fn spi_ctx_err(
     // context `contains` check collapsed those to one line (wire-metadata
     // workflow, recursive-context finding).
     if e.context.as_deref().and_then(|c| c.lines().last()) == Some(line.as_str()) {
-        return e;
+        return;
     }
     e.add_context_line(line);
-    e
 }
 
 fn spi_context_line(query: &str, mode: parser_seams::RawParseMode) -> String {
@@ -1008,6 +1017,42 @@ impl<'a> Estate<'a> {
             }
             _ => panic!("plpgsql: assign to non-Var datum {dno}"),
         }
+    }
+
+    // plpgsql_exec_function's IN-argument store (pl_exec.c:565): no copy, not
+    // freeable, except assign_simple_var's non-atomic detoast arm
+    // (pl_exec.c:8794-8811), whose detoasted copy the variable owns.
+    pub(crate) fn set_arg_var(&mut self, dno: Dno, value: Datum, isnull: bool) -> PgResult<()> {
+        if !self.atomic && !isnull && self.var_type(dno).typlen == -1 {
+            let p = value.as_usize() as *const u8;
+            // SAFETY: non-null by-ref varlena datum.
+            let external = unsafe {
+                types_tuple::varatt::varatt_is_1b_e(p)
+                    && !types_tuple::varatt::varatt_is_external_expanded(p)
+            };
+            if external {
+                let d = self.assign_copy_to_datum_ctx(value, false, -1, false)?;
+                self.set_var(dno, d, false, true);
+                return Ok(());
+            }
+        }
+        self.set_var(dno, value, isnull, false);
+        Ok(())
+    }
+
+    // exec_move_row(rec, NULL, NULL) (pl_exec.c:6922-6945): a composite-domain
+    // rec becomes an empty expanded record and domain-checks the NULL.
+    pub(crate) fn assign_rec_null(&mut self, recno: Dno) -> PgResult<()> {
+        let is_domain = matches!(&self.func.datums[recno as usize],
+            PlDatum::Rec(r) if r.datatype.as_ref().is_some_and(|d| d.typtype == TYPTYPE_DOMAIN));
+        if is_domain {
+            self.revalidate_rectypeid(recno)?;
+            adt_domains::domain_check(Datum::null(), true, self.rec_typeid(recno))?;
+            self.instantiate_empty_rec(recno)?;
+        } else {
+            self.assign_record_var(recno, None);
+        }
+        Ok(())
     }
 
     pub fn get_var(&self, dno: Dno) -> (Datum, bool) {
@@ -1822,7 +1867,7 @@ impl<'a> Estate<'a> {
         let se = simple_expr_portal_snapshot(expr.expr_id, se)?;
         // A different effective user must not ride the compiling user's
         // function EXECUTE decisions: fall to the slow path, which rebuilds.
-        if se.userid != miscinit_seams::get_user_id::call() {
+        if se.userid != miscinit_seams::get_user_id::call() || se.lxid != current_lxid() {
             let plan = se.plan;
             drop(se);
             put_simple(expr.expr_id, plan, SimpleState::Unknown);
@@ -1865,7 +1910,12 @@ impl<'a> Estate<'a> {
             SimpleTake::Skip => return Ok(None),
             SimpleTake::Ready(se) => {
                 let se = simple_expr_portal_snapshot(expr.expr_id, se)?;
-                match plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan) {
+                let valid = if se.lxid == current_lxid() {
+                    plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan)
+                } else {
+                    Ok(false)
+                };
+                match valid {
                     Ok(true) => return self.eval_simple_taken(expr, se).map(Some),
                     Ok(false) => {}
                     Err(e) => {
@@ -1922,25 +1972,34 @@ impl<'a> Estate<'a> {
         let Some((psrc, _)) = spi::SPI_plan_single_source(plan) else {
             return Ok(None);
         };
-        // Planning errors (const-fold, etc.) carry the parse-mode context
-        // line: C wraps GetCachedPlan in _SPI_error_callback
-        // (spi.c SPI_plan_get_cached_plan).
+        // exec_is_simple_query (pl_exec.c:8161): decided on the analyzed
+        // querytree before any generic plan is requested — an embedded
+        // SubPlan (hasSubLinks) survives the bare-Result test below, and C
+        // routes every such query through SPI, planned with its parameters.
+        {
+            let queries = plancache::SourceQueryList(psrc);
+            if queries.len() != 1 || !exec_is_simple_query(&queries[0]) {
+                return Ok(None);
+            }
+        }
+        // Planning reports (const-fold errors and warnings) carry the
+        // parse-mode context line: C wraps GetCachedPlan in
+        // _SPI_error_callback (spi.c:2097 SPI_plan_get_cached_plan).
+        let emit_cb = {
+            let (query, mode) = (expr.query.clone(), expr.parse_mode);
+            elog::push_emit_context_callback(Box::new(move |e| {
+                spi_error_context(e, &query, mode);
+            }))
+        };
         let cplan = plancache::GetCachedPlan(
             psrc,
             types_portal::ParamListHandle::NULL,
             None,
             types_portal::QueryEnvHandle::NULL,
-        )
-        .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
+        );
+        elog::pop_emit_context_callback(emit_cb);
+        let cplan = cplan.map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
         let built = (|| -> PgResult<Option<Box<SimpleExpr>>> {
-            // exec_is_simple_query (pl_exec.c): decided on the analyzed
-            // querytree, not just the plan shape — an embedded SubPlan
-            // (hasSubLinks) survives the bare-Result test below, and C
-            // routes every such query through SPI.
-            let queries = plancache::SourceQueryList(psrc);
-            if queries.len() != 1 || !exec_is_simple_query(&queries[0]) {
-                return Ok(None);
-            }
             let stmts = plancache::CachedPlanStmtList(cplan);
             if stmts.len() != 1 {
                 return Ok(None);
@@ -1983,6 +2042,7 @@ impl<'a> Estate<'a> {
                 psrc,
                 rettype: plan_expr.1,
                 userid: miscinit_seams::get_user_id::call(),
+                lxid: current_lxid(),
                 rettypmod: plan_expr.2,
                 mutable,
                 ctx,
@@ -3348,13 +3408,7 @@ impl<'a> Estate<'a> {
                     // erh = NULL. RECORD field access then 55000 via
                     // instantiate_empty_record_variable; a named composite
                     // instantiates empty on first field touch.
-                    if r.datatype.as_ref().is_some_and(|d| d.typtype == TYPTYPE_DOMAIN) {
-                        self.revalidate_rectypeid(target)?;
-                        adt_domains::domain_check(Datum::null(), true, self.rec_typeid(target))?;
-                        self.instantiate_empty_rec(target)?;
-                    } else {
-                        self.assign_record_var(target, None);
-                    }
+                    self.assign_rec_null(target)?;
                     return Ok(());
                 }
                 if valtype != RECORDOID && !lsyscache::typ::type_is_rowtype(valtype)? {
@@ -3993,13 +4047,13 @@ impl<'a> Estate<'a> {
     }
 
     // make_tuple_from_row (pl_exec.c:7491) shaped as a RecValue.
-    fn row_as_rec_value(&mut self, rowno: Dno) -> PgResult<RecValue> {
+    fn row_as_rec_value(&mut self, rowno: Dno, scratch: bool) -> PgResult<RecValue> {
         let (varnos, fieldnames) = match &self.func.datums[rowno as usize] {
             PlDatum::Row(r) => (r.varnos.clone(), r.fieldnames.clone()),
             _ => panic!("plpgsql: datum {rowno} is not a Row"),
         };
         let n = varnos.len();
-        let mcx = self.datum_ctx.mcx();
+        let mcx = if scratch { self.eval_ctx.mcx() } else { self.datum_ctx.mcx() };
         let mut td = tupdesc::CreateTemplateTupleDesc(mcx, n as i32)?;
         let mut values = Vec::with_capacity(n);
         let mut nulls = Vec::with_capacity(n);
@@ -4027,11 +4081,13 @@ impl<'a> Estate<'a> {
         td.tdtypeid = RECORDOID;
         td.tdtypmod = -1;
         let desc = RecDesc::from_tupdesc(&td);
-        for i in 0..n {
-            values[i] =
-                self.copy_to_datum_ctx(values[i], nulls[i], desc.typlens[i], desc.typbyvals[i])?;
+        if !scratch {
+            for i in 0..n {
+                values[i] =
+                    self.copy_to_datum_ctx(values[i], nulls[i], desc.typlens[i], desc.typbyvals[i])?;
+            }
         }
-        let owned = (0..n).map(|i| !nulls[i] && !desc.typbyvals[i]).collect();
+        let owned = (0..n).map(|i| !scratch && !nulls[i] && !desc.typbyvals[i]).collect();
         Ok(RecValue {
             desc,
             values,
@@ -4145,7 +4201,7 @@ impl<'a> Estate<'a> {
                 PlDatum::Row(row) => {
                     // exec_eval_datum ROW arm: rows materialize through their
                     // member variables (multiple OUT parameters).
-                    let rv = self.row_as_rec_value(row.dno)?;
+                    let rv = self.row_as_rec_value(row.dno, false)?;
                     self.ret_rec = Some(rv);
                     self.retisnull = false;
                     self.rettype = RECORDOID;
@@ -4605,6 +4661,7 @@ impl<'a> Estate<'a> {
 
         let (values, nulls) = self.setup_params_under_spi(expr, &paramnos, &argtypes)?;
         let before_lxid = current_lxid();
+        let frame = FrameGuard::push_spi(&expr.query, expr.parse_mode);
         let rc = spi::SPI_execute_plan_extended(
             plan,
             &values,
@@ -4618,6 +4675,7 @@ impl<'a> Estate<'a> {
             None,
         )
         .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
+        drop(frame);
         if rc < 0 {
             panic!(
                 "SPI_execute_plan_extended failed executing query \"{}\": rc {rc}",
@@ -5125,7 +5183,7 @@ impl<'a> Estate<'a> {
                     self.put_tuple_store_values(&v, &n)?;
                 }
                 PlDatum::Row(row) => {
-                    let rv = self.row_as_rec_value(row.dno)?;
+                    let rv = self.row_as_rec_value(row.dno, true)?;
                     let (v, n) = convert_values_by_position(
                         &rv.desc,
                         &rv.values,

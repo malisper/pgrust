@@ -1235,7 +1235,12 @@ fn compile_inline(src: &str) -> PgResult<PlFunction> {
         scratch: scan_cx.mcx(),
         last_endtoken_loc: -1,
     };
+    let cb_src = src.to_string();
+    let emit_guard = EmitCbGuard(elog::push_emit_context_callback(Box::new(move |e| {
+        pg_proc::function_parse_error_transpose(e, &cb_src);
+    })));
     let parse_result = parser.parse_function_body();
+    drop(emit_guard);
     let latest_line = parser.sc.latest_lineno();
     // C's inline callback always tries the position transpose (cbarg
     // .proc_source is set unconditionally for inline blocks).
@@ -1385,10 +1390,16 @@ fn plpgsql_exec_function(
             // Argument datums live in the caller's context for the call's
             // duration; no copy, not freeable (C assign_simple_var(...,
             // false) for IN args, pl_exec.c:565).
-            PlDatum::Var(_) => estate.set_var(dno, value, isnull, false),
+            PlDatum::Var(_) => {
+                if let Err(e) = estate.set_arg_var(dno, value, isnull) {
+                    return Err(attach_exec_context(e, &estate));
+                }
+            }
             PlDatum::Rec(_) => {
                 if isnull {
-                    estate.datums[dno as usize] = crate::exec::DatumVal::Rec(None);
+                    if let Err(e) = estate.assign_rec_null(dno) {
+                        return Err(attach_exec_context(e, &estate));
+                    }
                 } else {
                     match estate.exec_assign_value(dno, value, false, RECORDOID, -1) {
                         Ok(()) => {}
@@ -1465,7 +1476,8 @@ fn plpgsql_exec_function(
     }
 
     if func.fn_retistuple && !estate.retisnull {
-        let out = coerce_function_result_tuple(&mut estate, func, flinfo, fcinfo);
+        let direct = func.fn_rettype == estate.rettype && func.fn_rettype != RECORDOID;
+        let out = coerce_function_result_tuple(&mut estate, func, flinfo, fcinfo, direct);
         return match out {
             Ok(d) => {
                 fcinfo.isnull = false;
@@ -1575,6 +1587,7 @@ fn coerce_function_result_tuple(
     func: &PlFunction,
     flinfo: Option<&FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
+    direct: bool,
 ) -> PgResult<Datum> {
     use funcapi::TypeFuncClass;
 
@@ -1653,7 +1666,11 @@ fn coerce_function_result_tuple(
             let img = tup.header_ptr();
             core::mem::forget(tup);
             let result = Datum::from_usize(img as usize);
-            check_composite_domain_result(resolved.class, result, resolved.result_type_id)?;
+            // pl_exec.c:692-702: a rowtype known to match is transferred as
+            // is; the domain was checked when the value was formed.
+            if !direct {
+                check_composite_domain_result(resolved.class, result, resolved.result_type_id)?;
+            }
             Ok(result)
         }
         _ => {
@@ -2217,7 +2234,7 @@ mod tests {
             let mut fcinfo = fmgr::LocalFcinfo::<1>::new(types_core::InvalidOid);
             // SAFETY: result_ctx outlives the call.
             unsafe { fcinfo.set_result_mcx(result_ctx.mcx()) };
-            coerce_function_result_tuple(&mut estate, &func, Some(&flinfo), &mut fcinfo)
+            coerce_function_result_tuple(&mut estate, &func, Some(&flinfo), &mut fcinfo, false)
         };
 
         let desc_ctx: &'static mcx::MemoryContext =
