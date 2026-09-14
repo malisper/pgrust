@@ -189,7 +189,7 @@ export PATH="$(brew --prefix postgresql@18)/bin:$PATH"
 psql -h /tmp -p 5432 -U postgres -c "select version()"
 ```
 
-You should see `pgrust 0.3 (PostgreSQL 18.6 compatible)`.
+You should see `PostgreSQL 18.6 (pgrust 0.3)`.
 
 **macOS Intel:** the same flow works with `pgrust-0.3-macos-x86_64` in place
 of `pgrust-0.3-macos-arm64` (`brew --prefix` handles the different Homebrew
@@ -256,7 +256,7 @@ Leave the server running and connect from a second terminal:
 psql -h /tmp -p 5432 -U postgres -c "select version()"
 ```
 
-You should see `pgrust 0.3 (PostgreSQL 18.6 compatible)`.
+You should see `PostgreSQL 18.6 (pgrust 0.3)`.
 
 ### Stopping, restarting, cleaning up
 
