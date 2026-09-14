@@ -340,3 +340,12 @@ fn makeaclitem_non_utf8_privilege_is_invalid_parameter() {
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
     assert_eq!(err.message(), "unrecognized privilege type: \"\u{FFFD}\"");
 }
+
+// audit-18.6 fp-adt-acl-p3#1: acl.c:5258 keeps the membership lists in
+// TopMemoryContext, freed with the backend process; here the backend is a
+// thread, so the TLS slot must own (and drop) them rather than leak them.
+#[test]
+fn membership_cache_slot_is_dropped_with_the_thread() {
+    assert!(core::mem::needs_drop::<membership::MembershipSlot>());
+}
+

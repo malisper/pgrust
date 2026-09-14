@@ -323,6 +323,17 @@ fn calculate_database_size(db_oid: Oid) -> PgResult<i64> {
     Ok(totalsize)
 }
 
+// dbsize.c:194/307 hand the NameData bytes to get_database_oid /
+// get_tablespace_oid, whose not-found message carries them verbatim; a name
+// that is not UTF-8 cannot match any pgrust catalog row, so the lookup
+// failure is reported directly with C's bytes.
+fn undefined_name_raw(kind: &str, name: &[u8], sqlstate: ::types_error::SqlState) -> ::types_error::PgError {
+    let mut msg = format!("{kind} \"").into_bytes();
+    msg.extend_from_slice(name);
+    msg.extend_from_slice(b"\" does not exist");
+    ::types_error::PgError::error_raw_message(msg).with_sqlstate(sqlstate)
+}
+
 fn database_size_result(fcinfo: &mut Fcinfo, size: i64) -> PgResult<Datum> {
     if size == 0 {
         return Ok(fcinfo.return_null());
@@ -352,10 +363,14 @@ pub fn fc_pg_database_size_name(
     // SAFETY: catalog arg 0 is a non-null Name (strict fn).
     let name = unsafe { fcinfo.arg_name(0) };
     let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-    let dbname = core::str::from_utf8(&name[..end])
-        .expect("database name is valid UTF-8")
-        .to_owned();
-    let db_oid = dbcommands_seams::get_database_oid::call(fcinfo.result_mcx(), &dbname, false)?;
+    let Ok(dbname) = core::str::from_utf8(&name[..end]) else {
+        return Err(Box::new(undefined_name_raw(
+            "database",
+            &name[..end],
+            ::types_error::ERRCODE_UNDEFINED_DATABASE,
+        )));
+    };
+    let db_oid = dbcommands_seams::get_database_oid::call(fcinfo.result_mcx(), dbname, false)?;
     let size = calculate_database_size(db_oid)?;
     database_size_result(fcinfo, size)
 }
@@ -465,11 +480,15 @@ pub fn fc_pg_tablespace_size_name(
     // SAFETY: catalog arg 0 is a non-null Name (strict fn).
     let name = unsafe { fcinfo.arg_name(0) };
     let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-    let spcname = core::str::from_utf8(&name[..end])
-        .expect("tablespace name is valid UTF-8")
-        .to_owned();
+    let Ok(spcname) = core::str::from_utf8(&name[..end]) else {
+        return Err(Box::new(undefined_name_raw(
+            "tablespace",
+            &name[..end],
+            ::types_error::ERRCODE_UNDEFINED_OBJECT,
+        )));
+    };
     let tblspc_oid =
-        tablespace_seams::get_tablespace_oid::call(fcinfo.result_mcx(), &spcname, false)?;
+        tablespace_seams::get_tablespace_oid::call(fcinfo.result_mcx(), spcname, false)?;
     let size = calculate_tablespace_size(fcinfo.result_mcx(), tblspc_oid)?;
     tablespace_size_result(fcinfo, size)
 }

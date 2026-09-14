@@ -70,22 +70,14 @@ fn fc_aclitemin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
     }
 }
 
-// Out-function contract: the returned cstring aliases backend-thread scratch
-// (the nameout precedent) so array_out's unarmed per-element calls work.
-std::thread_local! {
-    static ACLITEMOUT_SCRATCH: core::cell::RefCell<Vec<u8>> =
-        const { core::cell::RefCell::new(Vec::new()) };
-}
-
-fn fc_aclitemout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// Out-function contract: the returned cstring aliases per-flinfo scratch
+// (the nameout precedent) so array_out's unarmed per-element calls work while
+// two aclitemout calls in one projection keep distinct results (acl.c:655).
+pub fn fc_aclitemout(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let item = arg_aclitem(fcinfo, 0);
-    ACLITEMOUT_SCRATCH.with(|c| {
-        let mut buf = c.borrow_mut();
-        buf.clear();
-        crate::io::aclitemout_into(&item, &mut buf)?;
-        buf.push(0);
-        Ok(Datum::from_usize(buf.as_ptr() as usize))
-    })
+    let mut buf = Vec::new();
+    crate::io::aclitemout_into(&item, &mut buf)?;
+    Ok(::types_fmgr::cstring_scratch(flinfo, "aclitemout", &buf))
 }
 
 // pub for the proofs suite (proofs/state-seam-probe); not part of the crate API.

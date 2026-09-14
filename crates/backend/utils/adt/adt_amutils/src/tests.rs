@@ -96,3 +96,12 @@ fn index_cache_lookup_failure_is_a_catchable_xx000() {
     assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
     assert_eq!(e.level(), types_error::ERROR);
 }
+
+// audit-18.6 fp-adt-amutils#1: amutils.c:97 text_to_cstring compares through
+// the first NUL, so a byteain-built name with an embedded NUL still matches.
+#[test]
+fn prop_names_stop_at_the_first_nul() {
+    assert!(matches!(lookup_prop_name(b"can_order\0junk"), Prop::CanOrder));
+    assert!(matches!(lookup_prop_name(b"CAN_ORDER\0"), Prop::CanOrder));
+    assert!(matches!(lookup_prop_name(b"\0can_order"), Prop::Unknown));
+}

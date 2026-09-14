@@ -711,3 +711,13 @@ fn combine_outside_an_aggregate_is_a_clean_error() {
     assert_eq!(err.message(), "aggregate function called in non-aggregate context");
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INTERNAL_ERROR);
 }
+
+// audit-18.6 fp-adt-array_userfuncs#1: array_userfuncs.c:1984 sorts slices
+// through a slice iterator, so a 2 x 33554432 array reserves two workspace
+// entries, not 67108864 x 16 bytes (which mcx rejects against MaxAllocSize).
+#[test]
+fn sort_workspace_counts_slices() {
+    assert_eq!(sort_item_count(true, 67108864, 2), 2);
+    assert_eq!(sort_item_count(false, 67108864, 2), 67108864);
+    assert_eq!(sort_item_count(true, 0, 0), 0);
+}

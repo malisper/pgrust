@@ -67,6 +67,8 @@ const AM_PROPNAMES: &[(&str, Prop)] = &[
 ];
 
 fn lookup_prop_name(name: &[u8]) -> Prop {
+    // amutils.c:97 text_to_cstring: the comparison stops at the first NUL.
+    let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())];
     for &(n, p) in AM_PROPNAMES {
         if n.len() == name.len() && n.bytes().zip(name).all(|(a, &b)| a == b.to_ascii_lowercase())
         {

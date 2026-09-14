@@ -1398,7 +1398,7 @@ fn examine_attribute<'mcx>(
         }
         None => (attr.atttypid, attr.attcollation),
     };
-    let typanalyze = syscache_seams::pg_type_typanalyze::call(atttypid)?;
+    let typanalyze = builtin_typanalyze(syscache_seams::pg_type_typanalyze::call(atttypid)?)?;
     let ty = syscache_seams::lookup_pg_type_shape::call(atttypid)?
         .expect("attribute type row");
 
@@ -1495,7 +1495,7 @@ fn examine_expression<'mcx>(
 ) -> PgResult<Option<VacAttrStats<'mcx>>> {
     let atttypid = nodes_core::node_funcs::expr_type(expr);
     let attcollid = nodes_core::node_funcs::expr_collation(expr);
-    let typanalyze = syscache_seams::pg_type_typanalyze::call(atttypid)?;
+    let typanalyze = builtin_typanalyze(syscache_seams::pg_type_typanalyze::call(atttypid)?)?;
     let ty = syscache_seams::lookup_pg_type_shape::call(atttypid)?
         .ok_or_else(|| cache_lookup_failed(atttypid))?;
 
@@ -1723,6 +1723,17 @@ fn expr_stats_row<'b>(
         }
     }
     Ok(Some(row))
+}
+
+// fmgr_info's LANGUAGE internal arm (fmgr.c:236-247): a pg_proc alias of a
+// closed-set typanalyze dispatches like the builtin it names (for a
+// non-array type, array_typanalyze.c:117's XX000 instead of the
+// internal-dispatch stub).
+fn builtin_typanalyze(typanalyze: Oid) -> PgResult<Oid> {
+    if typanalyze == InvalidOid || !fmgr_seams::internal_builtin_oid::is_installed() {
+        return Ok(typanalyze);
+    }
+    Ok(fmgr_seams::internal_builtin_oid::call(typanalyze)?.unwrap_or(typanalyze))
 }
 
 fn call_custom_typanalyze<'mcx>(

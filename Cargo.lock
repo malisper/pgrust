@@ -737,6 +737,7 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "types_startup",
+ "types_tuple",
 ]
 
 [[package]]
@@ -12122,6 +12123,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_rel",
+ "types_tuple",
 ]
 
 [[package]]

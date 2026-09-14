@@ -207,13 +207,29 @@ pub fn fc_jsonb_array_element_text(
     }
 }
 
-// Text-array argument decomposed to payload slices borrowed from the image.
+// Text-array argument deconstructed like C (jsonb_op.c:55 deconstruct_array:
+// 8-byte datums + null flags); payload slices are produced lazily so no
+// per-element slice vector is charged against MaxAllocSize.
+struct TextArrayElems<'mcx> {
+    elems: PgVec<'mcx, Datum>,
+    nulls: PgVec<'mcx, bool>,
+}
+
+impl<'mcx> TextArrayElems<'mcx> {
+    fn iter(&self) -> impl Iterator<Item = &'mcx [u8]> + '_ {
+        self.elems.iter().zip(self.nulls.iter()).filter(|(_, n)| !**n).map(|(d, _)| {
+            // SAFETY: non-null text element datums point into the flat image.
+            unsafe { PackedVarlena::from_ptr(d.as_usize() as *const u8) }.data()
+        })
+    }
+}
+
 fn text_array_elems<'mcx>(
     fcinfo: &Fcinfo,
     i: usize,
     mcx: Mcx<'mcx>,
     skip_nulls: bool,
-) -> PgResult<Option<PgVec<'mcx, &'mcx [u8]>>> {
+) -> PgResult<Option<TextArrayElems<'mcx>>> {
     // SAFETY: catalog arg i is a non-null text[] (strict fn).
     let p = unsafe { fcinfo.arg_ptr(i) };
     // SAFETY: a live varlena readable through its full VARSIZE_ANY.
@@ -224,16 +240,7 @@ fn text_array_elems<'mcx>(
         return Ok(None);
     }
     let (elems, nulls) = arrayfuncs::deconstruct_array_builtin(mcx, array, TEXTOID, true)?;
-    let mut out = mcx::vec_with_capacity_in(mcx, elems.len())?;
-    for (d, isnull) in elems.iter().zip(nulls.iter()) {
-        if *isnull {
-            continue;
-        }
-        // SAFETY: non-null text element datums point into the flat image.
-        let pv = unsafe { PackedVarlena::from_ptr(d.as_usize() as *const u8) };
-        out.push(pv.data());
-    }
-    Ok(Some(out))
+    Ok(Some(TextArrayElems { elems, nulls }))
 }
 
 fn extract_path(fcinfo: &mut Fcinfo, as_text: bool) -> PgResult<Datum> {
@@ -243,18 +250,24 @@ fn extract_path(fcinfo: &mut Fcinfo, as_text: bool) -> PgResult<Datum> {
         // C: get_jsonb_path_all — a null path element yields NULL.
         match text_array_elems(fcinfo, 1, mcx, false)? {
             None => None,
-            Some(path) => match crate::getfield::get_element(mcx, jb.as_bytes(), &path, as_text)? {
-                PathResult::Null => None,
-                PathResult::Jsonb(v) => Some(image_result(v)),
-                PathResult::Text(t) => Some(varlena_result(t)),
-                PathResult::Input => {
-                    let img = crate::build::item_to_jsonb_image(
-                        mcx,
-                        crate::container::JsonbItem::Binary(jb.as_bytes()),
-                    )?;
-                    Some(image_result(img))
+            Some(elems) => {
+                let mut path = mcx::vec_with_capacity_in(mcx, elems.elems.len())?;
+                for e in elems.iter() {
+                    path.push(e);
                 }
-            },
+                match crate::getfield::get_element(mcx, jb.as_bytes(), &path, as_text)? {
+                    PathResult::Null => None,
+                    PathResult::Jsonb(v) => Some(image_result(v)),
+                    PathResult::Text(t) => Some(varlena_result(t)),
+                    PathResult::Input => {
+                        let img = crate::build::item_to_jsonb_image(
+                            mcx,
+                            crate::container::JsonbItem::Binary(jb.as_bytes()),
+                        )?;
+                        Some(image_result(img))
+                    }
+                }
+            }
         }
     };
     match d {
@@ -296,9 +309,8 @@ pub fn fc_jsonb_exists_any(
     let jb = arg_jsonb(fcinfo, 0, mcx)?;
     let keys = text_array_elems(fcinfo, 1, mcx, true)?.expect("skip_nulls returns Some");
     let payload = jb.as_bytes();
-    Ok(Datum::from_bool(
-        keys.iter().any(|k| crate::ops::exists_key(payload, k)),
-    ))
+    let found = keys.iter().any(|k| crate::ops::exists_key(payload, k));
+    Ok(Datum::from_bool(found))
 }
 
 pub fn fc_jsonb_exists_all(
@@ -309,9 +321,8 @@ pub fn fc_jsonb_exists_all(
     let jb = arg_jsonb(fcinfo, 0, mcx)?;
     let keys = text_array_elems(fcinfo, 1, mcx, true)?.expect("skip_nulls returns Some");
     let payload = jb.as_bytes();
-    Ok(Datum::from_bool(
-        keys.iter().all(|k| crate::ops::exists_key(payload, k)),
-    ))
+    let found = keys.iter().all(|k| crate::ops::exists_key(payload, k));
+    Ok(Datum::from_bool(found))
 }
 
 fn contains_worker(fcinfo: &mut Fcinfo, commute: bool) -> PgResult<Datum> {
@@ -949,7 +960,8 @@ pub fn fc_jsonb_strip_nulls(
 ) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
     let jb = arg_jsonb(fcinfo, 0, mcx)?;
-    let strip_in_arrays = fcinfo.arg(1).as_bool();
+    // jsonfuncs.c:4552: the second argument exists only when PG_NARGS() == 2.
+    let strip_in_arrays = fcinfo.nargs() == 2 && fcinfo.arg(1).as_bool();
     let d = image_result(crate::mutate::strip_nulls(mcx, jb.as_bytes(), strip_in_arrays)?);
     Ok(d)
 }

@@ -51,11 +51,17 @@ pub(crate) const AF_INET6: i32 = 10;
 #[cfg(target_family = "wasm")]
 pub(crate) const AF_UNIX: i32 = 1;
 
+// proc.c:1124 AuxiliaryPidGetProc: only the auxiliary slots answer; a regular
+// slot that keeps a finished pooled worker's pid must not (pgstat_backend.c:124).
 pub(crate) fn aux_pid_get_proc(pid: i32) -> Option<&'static types_storage::storage::PGPROC> {
+    if pid == 0 {
+        return None;
+    }
     let procs = &lmgr_proc::ProcGlobal().allProcs;
-    procs
+    let base = lmgr_proc::AuxiliaryProcsBase() as usize;
+    procs[base..base + types_storage::storage::NUM_AUXILIARY_PROCS as usize]
         .iter()
-        .find(|p| p.pid.load(core::sync::atomic::Ordering::Relaxed) == pid && pid != 0)
+        .find(|p| p.pid.load(core::sync::atomic::Ordering::Relaxed) == pid)
 }
 
 // C pgstatfuncs.c:528-541 / 947-956 / 992-997 shared shape: numeric host and

@@ -4,6 +4,7 @@ use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use types_fmgr::{byref_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_rel::{AccessShareLock, RELKIND_HAS_PARTITIONS};
+use types_tuple::TupleDescData;
 
 pub static PARTITIONFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     FmgrBuiltin {
@@ -43,9 +44,13 @@ struct TreeRows {
     tuples: Vec<Vec<u8>>,
 }
 
-fn collect_tree_rows(flinfo: &FmgrInfo, fcinfo: &Fcinfo, rootrelid: Oid) -> PgResult<TreeRows> {
+fn collect_tree_rows(flinfo: &FmgrInfo, fcinfo: &mut Fcinfo, rootrelid: Oid) -> PgResult<TreeRows> {
+    let expected_desc = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    // SAFETY: expectedDesc contract — the executor armed it with the scan
+    // tupdesc, live for the duration of this call.
+    let expected = expected_desc.map(|p| unsafe { p.cast::<TupleDescData<'_>>().as_ref() });
     let mcx = fcinfo.result_mcx();
-    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, expected)?;
     if resolved.class != TypeFuncClass::Composite {
         return Err(Box::new(PgError::error("return type must be a row type")));
     }

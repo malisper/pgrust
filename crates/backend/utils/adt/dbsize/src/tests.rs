@@ -86,3 +86,20 @@ fn stat_failures_are_file_access_errors() {
     assert_eq!(builtins::tablespace_dir_size(&d.join("absent")).unwrap(), -1);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// audit-18.6 fp-adt-dbsize#1: dbsize.c:194/307 hand the NameData bytes to
+// get_database_oid / get_tablespace_oid; a non-UTF-8 name (SQL_ASCII
+// chr(255)::name) is C's not-found error with the bytes, never a panic.
+#[test]
+fn non_utf8_names_are_lookup_failures() {
+    let mut name = [0u8; 64];
+    name[0] = 0xff;
+    let mut fci = ::types_fmgr::LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, ::datum::Datum::from_usize(name.as_ptr() as usize));
+    let err = builtins::fc_pg_database_size_name(None, &mut fci).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_DATABASE);
+    assert_eq!(err.message(), "database \"\u{FFFD}\" does not exist");
+    let err = builtins::fc_pg_tablespace_size_name(None, &mut fci).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT);
+    assert_eq!(err.message(), "tablespace \"\u{FFFD}\" does not exist");
+}

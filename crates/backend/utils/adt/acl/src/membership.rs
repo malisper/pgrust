@@ -1,5 +1,4 @@
 use std::cell::{Cell, RefCell};
-use std::mem::ManuallyDrop;
 
 use cache_syscache::cacheinfo::{AUTHMEMMEMROLE, AUTHMEMROLEMEM, AUTHNAME, AUTHOID, DATABASEOID};
 use cache_syscache::{
@@ -27,18 +26,22 @@ pub(crate) enum RoleRecurseType {
     SetRole = 2,
 }
 
-struct MembershipCache {
+pub(crate) struct MembershipCache {
     role: [Oid; 3],
     roles: [Vec<Oid>; 3],
 }
 
+// C: TopMemoryContext lists living for the backend, reclaimed when its
+// process exits (acl.c:5258); here the backend is a thread, so the slot's TLS
+// destructor is what returns the lists.
+pub(crate) type MembershipSlot = RefCell<MembershipCache>;
+
 thread_local! {
-    // C: TopMemoryContext lists living for the backend; never dropped.
-    static CACHE: RefCell<ManuallyDrop<MembershipCache>> = const {
-        RefCell::new(ManuallyDrop::new(MembershipCache {
+    static CACHE: MembershipSlot = const {
+        RefCell::new(MembershipCache {
             role: [InvalidOid; 3],
             roles: [Vec::new(), Vec::new(), Vec::new()],
-        }))
+        })
     };
     static CACHED_DB_HASH: Cell<u32> = const { Cell::new(0) };
 }

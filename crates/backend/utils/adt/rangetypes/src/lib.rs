@@ -544,6 +544,18 @@ fn lower_gt_upper() -> PgError {
 // PACKED discipline). The previous gate here let an external pointer (tag
 // 0x01, which satisfies the 1B test) fall through to datum_write's panic
 // and rejected compressed bounds outright.
+fn canonical_result_flat<'m>(mcx: Mcx<'m>, val: Datum) -> PgResult<*const u8> {
+    let p = val.as_usize() as *const u8;
+    // SAFETY: live varlena header byte.
+    if unsafe { ::types_tuple::varatt::varatt_is_4b_u(p) } {
+        return Ok(p);
+    }
+    // SAFETY: live varlena image; varsize_any reads only header bytes.
+    let raw = unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
+    let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+    Ok(flat.leak().as_ptr())
+}
+
 fn detoast_bound_packed<'m>(mcx: Mcx<'m>, val: Datum) -> PgResult<Datum> {
     let p = val.as_usize() as *const u8;
     // SAFETY: live varlena header byte. Compressed = 4B tag ..10.
@@ -693,10 +705,15 @@ fn canonicalize<'m>(
             // so holding the RefMut across invoke double-borrows. The
             // placeholder's InvalidOid fn_oid only reaches the callee's
             // fn_extra memo, whose canonical fc consumers never read it.
-            let mut finfo = core::mem::replace(
-                &mut *pin.rng_canonical_finfo(),
-                FmgrInfo::unresolved(),
-            );
+            // The placeholder keeps fn_oid: a constructor the canonical
+            // function itself calls (rangetypes.c:2040 leaves the finfo
+            // installed) still sees the canonical and resolves it afresh.
+            let mut placeholder = FmgrInfo::unresolved();
+            placeholder.fn_oid = other;
+            let mut finfo = core::mem::replace(&mut *pin.rng_canonical_finfo(), placeholder);
+            if finfo.fn_kind == ::types_fmgr::FnKind::Unresolved {
+                finfo = ::fmgr_seams::fmgr_info::call(other)?;
+            }
             let r = finfo.invoke(&mut lfc);
             *pin.rng_canonical_finfo() = finfo;
             let r = r?;
@@ -718,7 +735,9 @@ fn canonicalize<'m>(
                     "function {other} returned NULL"
                 ))));
             }
-            let p = r.as_usize() as *const u8;
+            // rangetypes.c:2050 DatumGetRangeTypeP detoasts the result: a
+            // SQL-language canonical hands back its tuplestore's packed image.
+            let p = canonical_result_flat(mcx, r)?;
             // SAFETY: the canonical fn returned a live flat range varlena.
             let total = unsafe { ::types_tuple::varatt::varsize_any(p) };
             let mut out: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;

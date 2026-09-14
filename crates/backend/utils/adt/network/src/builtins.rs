@@ -233,7 +233,17 @@ pub fn fc_inet_set_masklen(
 ) -> PgResult<Datum> {
     let bits = fcinfo.arg_i32(1);
     let v = crate::inet_set_masklen(arg_inet(fcinfo, 0), bits)?;
-    inet_result(fcinfo, &v)
+    // network.c:337-343 clones VARSIZE_ANY(src) bytes and patches ip_bits, so
+    // a packed source stays packed (pg_column_size 7, not 10).
+    // SAFETY: strict fn: arg 0 is a live inet varlena (22 bytes max, never
+    // external or compressed).
+    let p = unsafe { fcinfo.arg_ptr(0) };
+    let src = unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
+    let mut img = [0u8; 22];
+    img[..src.len()].copy_from_slice(src);
+    let hdr = if unsafe { ::types_tuple::varatt::varatt_is_1b(p) } { 1 } else { 4 };
+    img[hdr + 1] = v.bits;
+    byref_result(fcinfo.result_mcx(), &img[..src.len()])
 }
 
 pub fn fc_cidr_set_masklen(

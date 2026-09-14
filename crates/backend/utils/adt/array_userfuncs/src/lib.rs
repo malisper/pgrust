@@ -786,6 +786,16 @@ pub fn array_reverse_n<'m>(
     )
 }
 
+// array_userfuncs.c:1984 sorts first-dimension slices through a slice
+// iterator: the workspace holds one entry per slice, never per element.
+pub(crate) fn sort_item_count(sliced: bool, nelems: usize, nitem: i32) -> usize {
+    if sliced {
+        nitem.max(0) as usize
+    } else {
+        nelems
+    }
+}
+
 // The datum sort is injected (the fmgr wrapper passes the tuplesort seam; a
 // direct tuplesort dep would cycle through fmgr_core). `subarray_type` =
 // Some(array typoid) when sorting the first dimension of a multidim array.
@@ -801,7 +811,8 @@ pub fn array_sort_with<'m>(
         deconstruct_array(mcx, array, meta.typlen, meta.typbyval, meta.typalign, true)?;
 
     let mut subimages: Vec<PgVec<'m, u8>> = Vec::new();
-    let mut items: PgVec<'m, NullableDatum> = vec_with_capacity_in(mcx, elems.len())?;
+    let mut items: PgVec<'m, NullableDatum> =
+        vec_with_capacity_in(mcx, sort_item_count(subarray_type.is_some(), elems.len(), dims[0]))?;
     match subarray_type {
         None => {
             for (i, &d) in elems.iter().enumerate() {

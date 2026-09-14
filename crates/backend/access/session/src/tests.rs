@@ -1287,7 +1287,10 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //   -4 OUT_SCRATCH thread_local! blocks (adt/uuid, adt_timestamp,
     //      scalar x2: xid8 and tid) — same defect, same per-FmgrInfo
     //      replacement. Non-session TLS.
-    assert_eq!(count_tree(crates), 587, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 586, re-pinned at bugs/batch-159: utils/adt/acl builtins.rs
+    // ACLITEMOUT_SCRATCH removed (aclitemout now uses the per-flinfo
+    // cstring_scratch like nameout; one shared buffer aliased two results).
+    assert_eq!(count_tree(crates), 586, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

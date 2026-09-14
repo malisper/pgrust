@@ -533,3 +533,33 @@ fn out_functions_do_not_alias_across_fmgrinfos() {
     assert_eq!(cs(d1), b"1.2.3.4");
     assert_eq!(cs(d2), b"5.6.7.8");
 }
+
+// audit-18.6 fp-adt-network#1: network.c:337 clones VARSIZE_ANY(src) bytes and
+// patches ip_bits, so set_masklen on a packed (heap-stored) inet keeps the
+// 1-byte header (pg_column_size 7) while a 4-byte-header source stays 10.
+#[test]
+fn set_masklen_keeps_the_source_header() {
+    let ctx = ::mcx::MemoryContext::new("t");
+    let payload = [PGSQL_AF_INET, 24, 192, 168, 1, 1];
+    let set = |src: &[u8]| -> Vec<u8> {
+        let mut fcinfo = ::types_fmgr::LocalFcinfo::<2>::new(0);
+        // SAFETY: mcx outlives the call.
+        unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+        fcinfo.set_arg(0, ::datum::Datum::from_usize(src.as_ptr() as usize));
+        fcinfo.set_arg(1, ::datum::Datum::from_i32(16));
+        let p = crate::builtins::fc_inet_set_masklen(None, &mut fcinfo).unwrap().as_usize()
+            as *const u8;
+        // SAFETY: the result is a live varlena of varsize_any bytes.
+        unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) }.to_vec()
+    };
+    let mut packed = vec![0u8];
+    packed.extend_from_slice(&payload);
+    // SAFETY: packed has room for the 1-byte header written here.
+    unsafe { ::types_tuple::varatt::set_varsize_short(packed.as_mut_ptr(), packed.len()) };
+    assert_eq!(set(&packed), [packed[0], PGSQL_AF_INET, 16, 192, 168, 1, 1]);
+    let mut full = ::datum::varlena::set_varsize_4b(4 + payload.len()).to_vec();
+    full.extend_from_slice(&payload);
+    let out = set(&full);
+    assert_eq!(out.len(), 10);
+    assert_eq!(&out[4..], &[PGSQL_AF_INET, 16, 192, 168, 1, 1]);
+}
