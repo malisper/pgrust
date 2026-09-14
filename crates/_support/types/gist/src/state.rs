@@ -346,8 +346,17 @@ pub struct GISTSearchHeapItem {
 
 pub struct GISTScanOpaqueData<'mcx> {
     pub giststate: GistState<'mcx>,
+    // C giststate->scanCxt (initGISTstate, gist.c:1550): parent of the
+    // temporary, queue and page data contexts.
+    pub scan_cxt: MemoryContext,
     // C giststate->tempCxt: reset after each keytest batch.
     pub temp: MemoryContext,
+    // C so->queueCxt once it diverges from scanCxt (second gistrescan).
+    pub queue_cxt: Option<MemoryContext>,
+    // C so->pageDataCxt (gistrescan, index-only scans).
+    pub page_data_cxt: Option<MemoryContext>,
+    // C so->queue != NULL: a rescan already ran.
+    pub queue_allocated: bool,
     pub queue: crate::pairingheap::PairingHeap<GISTSearchItem, fn(&GISTSearchItem, &GISTSearchItem) -> i32>,
     pub qual_ok: bool,
     pub firstCall: bool,

@@ -381,8 +381,8 @@ fn gist_scan_page(
 }
 
 // IOS reconstruction: form an index tuple over fetchTupdesc from the fetched
-// values into so.fetch_buf (C forms a heap tuple; StoreIndexTuple deforms to
-// the same column values).
+// values into so.fetch_buf (C forms a heap tuple, gistutil.c:720, so the
+// values are not re-compressed; StoreIndexTuple deforms to the same columns).
 // Extends fetch_buf: a realloc dangles every outstanding xs_itup into the
 // buffer — callers must run only from gist_scan_page's fill, after it nulls
 // xs_itup and before any item is published.
@@ -403,8 +403,12 @@ fn fetch_recontup(
             .fetchTupdesc
             .clone()
             .expect("gistrescan set fetchTupdesc for IOS");
-        let formed =
-            ::nbtree::itup::index_form_tuple(mcx, &tupdesc, &fetchatt[..natts], &isnull[..natts])?;
+        let formed = ::nbtree::itup::index_form_tuple_uncompressed(
+            mcx,
+            &tupdesc,
+            &fetchatt[..natts],
+            &isnull[..natts],
+        )?;
         let off = so.fetch_buf.len() as u32;
         // SAFETY: formed owned image of formed.size() bytes.
         let img = unsafe { core::slice::from_raw_parts(formed.as_ptr(), formed.size()) };
@@ -438,8 +442,12 @@ fn fetch_recontup_owned(
             .fetchTupdesc
             .clone()
             .expect("gistrescan set fetchTupdesc for IOS");
-        let formed =
-            ::nbtree::itup::index_form_tuple(mcx, &tupdesc, &fetchatt[..natts], &isnull[..natts])?;
+        let formed = ::nbtree::itup::index_form_tuple_uncompressed(
+            mcx,
+            &tupdesc,
+            &fetchatt[..natts],
+            &isnull[..natts],
+        )?;
         // SAFETY: formed owned image of formed.size() bytes.
         let img = unsafe { core::slice::from_raw_parts(formed.as_ptr(), formed.size()) };
         ReconTup::from_bytes(img)

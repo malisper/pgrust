@@ -257,6 +257,28 @@ pub fn index_form_tuple<'mcx>(
     values: &[Datum],
     isnull: &[bool],
 ) -> PgResult<ItupBuf<'mcx>> {
+    form_tuple(mcx, tupdesc, values, isnull, true)
+}
+
+/// index_form_tuple without the in-line compression step: the image an
+/// index-only scan hands back where C forms a heap tuple (gistFetchTuple,
+/// gistutil.c:720) so fetched values keep their original representation.
+pub fn index_form_tuple_uncompressed<'mcx>(
+    mcx: Mcx<'mcx>,
+    tupdesc: &TupleDescData<'_>,
+    values: &[Datum],
+    isnull: &[bool],
+) -> PgResult<ItupBuf<'mcx>> {
+    form_tuple(mcx, tupdesc, values, isnull, false)
+}
+
+fn form_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tupdesc: &TupleDescData<'_>,
+    values: &[Datum],
+    isnull: &[bool],
+    compress: bool,
+) -> PgResult<ItupBuf<'mcx>> {
     use ::types_tuple::varatt::{varatt_is_1b, varatt_is_1b_e, varsize_any};
     use ::types_tuple::{TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN};
 
@@ -294,7 +316,11 @@ pub fn index_form_tuple<'mcx>(
                 untoasted[i] = Datum::from_usize(flat.leak().as_ptr() as usize);
                 p = untoasted[i].as_usize() as *const u8;
             }
-            if !varatt_is_1b(p) && !varatt_is_compressed(p) && varsize_any(p) > TOAST_INDEX_TARGET {
+            if compress
+                && !varatt_is_1b(p)
+                && !varatt_is_compressed(p)
+                && varsize_any(p) > TOAST_INDEX_TARGET
+            {
                 let storage = tupdesc.attr(i).attstorage;
                 if storage == TYPSTORAGE_EXTENDED || storage == TYPSTORAGE_MAIN {
                     let compression = tupdesc.attr(i).attcompression;

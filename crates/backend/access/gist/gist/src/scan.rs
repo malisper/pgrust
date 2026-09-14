@@ -44,9 +44,15 @@ pub fn gistbeginscan<'mcx>(
         }
         giststate.fetchTupdesc = Some(std::rc::Rc::new(desc));
     }
+    let scan_cxt = mcx.context().new_child("GiST scan context");
+    let temp = scan_cxt.new_child_bump("GiST temporary context");
     let so = GISTScanOpaqueData {
         giststate,
-        temp: ::mcx::MemoryContext::new_bump("GiST temporary context"),
+        scan_cxt,
+        temp,
+        queue_cxt: None,
+        page_data_cxt: None,
+        queue_allocated: false,
         queue: PairingHeap::new(
             gist_search_item_cmp
                 as fn(
@@ -96,11 +102,18 @@ pub fn gistrescan(
         crate::non_gist_opaque()
     };
 
-    // queue reuse replaces C's scanCxt/queueCxt dance: reset + reuse slots.
+    // queue reuse replaces C's scanCxt/queueCxt dance: reset + reuse slots;
+    // gistscan.c:157: the queue context exists from the second rescan on.
+    if so.queue_allocated && so.queue_cxt.is_none() {
+        so.queue_cxt = Some(so.scan_cxt.new_child("GiST queue context"));
+    }
     so.queue.reset();
     so.cur_recontup = None;
 
     if scan.xs_want_itup {
+        if so.page_data_cxt.is_none() {
+            so.page_data_cxt = Some(so.scan_cxt.new_child("GiST page data context"));
+        }
         // Storage types == opcintypes: the index descriptor IS C's built
         // descriptor; the divergent case was built at beginscan.
         if so.giststate.fetchTupdesc.is_none() {
@@ -206,6 +219,7 @@ pub fn gistrescan(
     }
 
     scan.xs_itup = None;
+    so.queue_allocated = true;
     Ok(())
 }
 
