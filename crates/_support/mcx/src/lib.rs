@@ -1294,7 +1294,29 @@ impl MemoryContext {
         SESSION_ROOT_RETIRING.with(|r| r.set(true));
         let _guard = RetireFlagGuard;
         self.reset();
+        self.release_arena();
         self.poisoned.set(true);
+    }
+
+    // The keeper block leaves with the rest (C frees the whole tree at
+    // proc_exit); a blockless arena stays behind the retired shell.
+    fn release_arena(&mut self) {
+        match &mut self.backend {
+            Backend::Aset(a) => a.get_mut().release_keeper(),
+            Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
+                a.get_mut().release_keeper()
+            }
+            Backend::Generation(a) => *a.get_mut() = generation::GenArena::new(),
+            Backend::Malloc | Backend::Slab(_) => {}
+        }
+        let acct = &*self.acct;
+        acct.self_used.set(0);
+        acct.self_peak.set(0);
+        acct.arena_footprint.set(0);
+        acct.arena_nblocks.set(0);
+        acct.window_tail.set(0);
+        acct.live_chunk_bytes.set(0);
+        acct.free_chunks.set(0);
     }
 
     /// Post-teardown tripwire. Ordinary contexts are never poisoned, so this is
@@ -1737,6 +1759,9 @@ fn tree_stats_node(acct: &Acct) -> TreeStats {
         }
         None => false,
     });
+    // mcxt.c:1134-1137 links a new child at the head of firstchild: siblings
+    // walk newest-first (stats lines, pg_get_backend_memory_contexts ids).
+    children.reverse();
     let used = acct.self_used.get();
     let peak = acct.self_peak.get();
     let mut subtree_used = used;

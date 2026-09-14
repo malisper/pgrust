@@ -1,0 +1,22 @@
+-- bugs/batch-187-support-mcx: SQL-visible fixes in _support/mcx, expected
+-- captured from C 18.6.
+\set VERBOSITY verbose
+-- mcxt.c:1134-1137 MemoryContextCreate links a new child at the head of its
+-- parent's list: pg_get_backend_memory_contexts numbers siblings newest-first,
+-- so the cursor declared last gets the lowest context id.
+BEGIN;
+DECLARE b187_a CURSOR FOR SELECT 1;
+DECLARE b187_b CURSOR FOR SELECT 2;
+DECLARE b187_c CURSOR FOR SELECT 3;
+SELECT ident, path[3] - min(path[3]) OVER () AS id_offset
+  FROM pg_backend_memory_contexts
+ WHERE name = 'PortalContext' AND ident LIKE 'b187_%'
+ ORDER BY path;
+ ident  | id_offset 
+--------+-----------
+ b187_c |         0
+ b187_b |         1
+ b187_a |         2
+(3 rows)
+
+ROLLBACK;

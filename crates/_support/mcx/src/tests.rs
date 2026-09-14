@@ -283,6 +283,39 @@ fn stats_tree_reflects_hierarchy_and_prunes_dropped() {
     assert_eq!(t.subtree_used, 64);
 }
 
+// mcxt.c:1134-1137 MemoryContextCreate links the new node at the head of the
+// parent's firstchild list, so sibling walks (MemoryContextStats lines,
+// pg_get_backend_memory_contexts ids and paths) go newest-first.
+#[test]
+fn stats_tree_lists_siblings_newest_first() {
+    let root = MemoryContext::new("root");
+    let _a = root.new_child("a");
+    let _b = root.new_child("b");
+    let _c = root.new_child("c");
+    let names: alloc::vec::Vec<&str> = root.stats_tree().children.iter().map(|c| c.name).collect();
+    assert_eq!(names, ["c", "b", "a"]);
+}
+
+// mcxt.c:345 MemoryContextInit's tree dies with the backend; a retired
+// session root keeps its (poisoned) shell but no block, keeper included.
+#[test]
+fn session_root_retirement_releases_the_keeper() {
+    for mut ctx in [
+        MemoryContext::new("aset"),
+        MemoryContext::new_bump("bump"),
+        MemoryContext::new_bumpforget("bumpforget"),
+        MemoryContext::new_generation("generation"),
+    ] {
+        let v: PgVec<u8> = vec_with_capacity_in(ctx.mcx(), 64).unwrap();
+        drop(v);
+        assert!(ctx.stats().arena_footprint > 0, "{}: keeper retained over a reset", ctx.name());
+        ctx.retire_session_root();
+        assert_eq!(ctx.stats().arena_footprint, 0, "{}", ctx.name());
+        assert_eq!(ctx.stats().nblocks, 0, "{}", ctx.name());
+        assert_eq!(ctx.stats().used, 0, "{}", ctx.name());
+    }
+}
+
 #[test]
 fn child_may_outlive_parent_accounting_safely() {
     let child;

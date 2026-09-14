@@ -338,7 +338,15 @@ pub(crate) struct AllocSet {
 
 impl AllocSet {
     pub(crate) fn new() -> AllocSet {
-        let blocks = take_recycled_blocks();
+        Self::from_blocks(take_recycled_blocks())
+    }
+
+    // Session-root retirement: the keeper goes too; the next alloc grows one.
+    pub(crate) fn release_keeper(&mut self) {
+        *self = Self::from_blocks(alloc::vec::Vec::new());
+    }
+
+    fn from_blocks(blocks: alloc::vec::Vec<Block>) -> AllocSet {
         let mem_allocated = blocks.first().map_or(0, |b| b.size);
         crate::global_footprint::add(mem_allocated);
         debug_assert!(blocks.is_empty() || (blocks.len() == 1 && blocks[0].used == 0));

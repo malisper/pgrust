@@ -48,7 +48,15 @@ impl BumpArena {
     pub(crate) fn with_max_block_size(max_block_size: usize) -> BumpArena {
         assert!(max_block_size.is_power_of_two());
         assert!((INIT_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&max_block_size));
-        let blocks = take_recycled_blocks();
+        Self::from_blocks(take_recycled_blocks(), max_block_size)
+    }
+
+    // Session-root retirement: the keeper goes too; the next alloc grows one.
+    pub(crate) fn release_keeper(&mut self) {
+        *self = Self::from_blocks(alloc::vec::Vec::new(), self.max_block_size);
+    }
+
+    fn from_blocks(blocks: alloc::vec::Vec<Block>, max_block_size: usize) -> BumpArena {
         debug_assert!(blocks.is_empty() || (blocks.len() == 1 && blocks[0].used == 0));
         let mem_allocated = blocks.first().map_or(0, |b| b.size);
         crate::global_footprint::add(mem_allocated);
