@@ -1350,6 +1350,12 @@ fn append_parallel_worker_context(e: &mut PgError) {
     }
 }
 
+/// This worker's ParallelShared (the dsm segment analog); None outside a
+/// parallel worker.
+pub fn my_worker_shared() -> Option<Arc<ParallelShared>> {
+    MY_WORKER_SHARED.with(|s| s.borrow().clone())
+}
+
 pub fn ParallelWorkerReportLastRecEnd(last_rec_end: XLogRecPtr) -> PgResult<()> {
     MY_WORKER_SHARED.with(|s| {
         let shared = s.borrow();

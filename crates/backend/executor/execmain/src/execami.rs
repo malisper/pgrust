@@ -67,11 +67,12 @@ pub fn plan_implicit_scroll_ok(node: Option<Node<'_>>) -> bool {
 
 /// `IndexSupportsBackwardScan` (execAmi.c:603): does the index's AM support
 /// backward scanning? C reads pg_class.relam through the syscache and asks
-/// the AM routine for `amcanbackward`; the closed AM set answers statically:
-/// only btree and hash (nbtree.c bthandler / hash.c hashhandler set it) —
-/// every other in-tree AM (gist, spgist, gin, brin) and extension AM (bloom,
-/// hnsw) leaves it false. So an undeclared cursor over a GiST index scan is
-/// NO SCROLL: FETCH BACKWARD raises "cursor can only scan forward" (55000).
+/// the AM routine for `amcanbackward`; the closed AM set answers statically
+/// by handler kind: only btree and hash (nbtree.c bthandler / hash.c
+/// hashhandler set it) — every other in-tree AM (gist, spgist, gin, brin)
+/// and extension AM (bloom, hnsw) leaves it false. So an undeclared cursor
+/// over a GiST index scan is NO SCROLL: FETCH BACKWARD raises "cursor can
+/// only scan forward" (55000).
 fn index_supports_backward_scan(indexid: ::types_core::Oid) -> bool {
     // Seamless unit-fixture worlds (no syscache installed) carry no relam to
     // consult; they keep the btree answer the fixtures were written against.
@@ -79,7 +80,12 @@ fn index_supports_backward_scan(indexid: ::types_core::Oid) -> bool {
         return true;
     }
     match ::lsyscache::get_rel_relam(indexid) {
-        Ok(relam) => matches!(relam, ::types_core::BTREE_AM_OID | ::types_core::HASH_AM_OID),
+        // The AM's handler answers, so a CREATE ACCESS METHOD ... HANDLER
+        // bthandler index scrolls like btree (execAmi.c:617 amcanbackward).
+        Ok(relam) => matches!(
+            ::indexam::IndexAmKind::from_relam(relam),
+            ::indexam::IndexAmKind::Btree | ::indexam::IndexAmKind::Hash
+        ),
         // C: elog(ERROR, "cache lookup failed for relation %u") — a planned
         // index always exists; answer NO SCROLL rather than widen the policy.
         Err(_) => false,

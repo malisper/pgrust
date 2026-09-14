@@ -376,6 +376,15 @@ pub(crate) fn mark_hashed_subplans_stale<'mcx>(
         if !chg.overlap(all_param) {
             continue;
         }
+        // A rescan raised inside this SubPlan's own tree (buildSubPlanHash /
+        // ExecScanSubPlan drive it while its planstate is taken out) can only
+        // reach the SubPlans attached to nodes in that tree — C's ExecReScan
+        // updates the rescanned node's subPlan list, never the enclosing
+        // SubPlan — so a hashed SubPlan must not invalidate itself mid-build.
+        // SAFETY: es_query_cxt-lifetime cell; read-only peek at the take-out.
+        if unsafe { (*sstate.ps_cell.as_ptr()).is_none() } {
+            continue;
+        }
         let parmset = chg.intersect(all_param, mcx)?;
         sstate.chg_param.add_members(mcx, &parmset)?;
         if let Some(h) = sstate.hashed.as_mut() {

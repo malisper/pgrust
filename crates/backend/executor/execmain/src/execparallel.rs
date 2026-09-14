@@ -320,7 +320,23 @@ fn node_child_lists<'mcx>(node: Node<'mcx>) -> Vec<&'mcx NodeList<'mcx>> {
 // ExecSerializePlan, share-not-serialize: the dummy PlannedStmt is built in
 // the leader's executor arena and crosses by reference. The resjunk-clearing
 // copy is replaced by the worker-side junk-filter suppression in InitPlan
-// (same observable: junk columns reach the leader).
+// (same observable: junk columns reach the leader), applied to this one
+// statement only — a nested SELECT the worker runs (SPI in a PARALLEL SAFE
+// function) keeps its junk filter as in C.
+pub(crate) fn is_worker_root_pstmt(pstmt: &PlannedStmt<'_>) -> bool {
+    parallel::my_worker_shared()
+        .and_then(|shared| shared.private())
+        .and_then(|private| {
+            private.downcast_ref::<ParallelExecShared>().map(|exec| {
+                core::ptr::eq(
+                    exec.pstmt.0.cast::<()>(),
+                    (pstmt as *const PlannedStmt<'_>).cast::<()>(),
+                )
+            })
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn build_worker_pstmt<'mcx>(
     estate: &EStateData<'mcx>,
     plan_node: Node<'mcx>,
