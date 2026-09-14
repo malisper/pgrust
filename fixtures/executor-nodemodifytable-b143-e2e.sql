@@ -1,0 +1,115 @@
+-- bugs/batch-143-backend-executor-nodemodifytable: C-vs-pgrust parity for
+-- the ModifyTable fixes. Expected file captured from C 18.6
+-- (scripts/regress-diff.sh --capture), then HAND-EDITED at the two blocks
+-- marked "deliberate divergence" (C 18.6 is wrong there; see UPSTREAM-BUGS).
+\set VERBOSITY verbose
+
+-- fp-contrib-lo-b1#1: INSTEAD OF UPDATE hands lo_manage a NULL
+-- tg_updatedcols (ExecIRUpdateTriggers never sets it), so the old large
+-- object survives; the view's row is unchanged and still references it.
+CREATE EXTENSION lo;
+CREATE TABLE b143_lo(id int, img lo);
+CREATE VIEW b143_lo_v AS SELECT * FROM b143_lo;
+CREATE TRIGGER b143_lo_v_manage INSTEAD OF UPDATE ON b143_lo_v
+  FOR EACH ROW EXECUTE FUNCTION lo_manage(img);
+SELECT lo_create(901001);
+SELECT lo_create(901002);
+INSERT INTO b143_lo VALUES (1, 901001);
+UPDATE b143_lo_v SET img = 901002 WHERE id = 1;
+SELECT * FROM b143_lo;
+SELECT oid FROM pg_largeobject_metadata WHERE oid IN (901001, 901002) ORDER BY 1;
+CREATE TRIGGER b143_lo_manage BEFORE UPDATE ON b143_lo
+  FOR EACH ROW EXECUTE FUNCTION lo_manage(img);
+UPDATE b143_lo SET img = 901002 WHERE id = 1;
+SELECT oid FROM pg_largeobject_metadata WHERE oid IN (901001, 901002) ORDER BY 1;
+
+-- fp-commands-trigger-p3#1: the root's cross-partition UPDATE event runs
+-- TriggerEnabled with ExecGetAllUpdatedCols(root): an UPDATE OF <col>
+-- trigger's WHEN clause is evaluated (its side effect shows) even though
+-- the event itself is then dropped for the partitioned root.
+CREATE TABLE b143_cp(a int, b int) PARTITION BY LIST (a);
+CREATE TABLE b143_cp1 PARTITION OF b143_cp FOR VALUES IN (1);
+CREATE TABLE b143_cp2 PARTITION OF b143_cp FOR VALUES IN (2);
+CREATE FUNCTION b143_when() RETURNS bool LANGUAGE plpgsql AS
+  $$ BEGIN RAISE NOTICE 'b143 WHEN evaluated'; RETURN true; END $$;
+CREATE FUNCTION b143_fire() RETURNS trigger LANGUAGE plpgsql AS
+  $$ BEGIN RAISE NOTICE 'b143 fired % on %', TG_OP, TG_TABLE_NAME; RETURN NULL; END $$;
+CREATE TRIGGER b143_cp_trg AFTER UPDATE OF a ON b143_cp FOR EACH ROW
+  WHEN (b143_when()) EXECUTE FUNCTION b143_fire();
+INSERT INTO b143_cp VALUES (1, 10);
+UPDATE b143_cp SET a = 2 WHERE b = 10;
+UPDATE b143_cp SET b = 11 WHERE b = 10;
+UPDATE b143_cp SET a = 1, b = 12 WHERE b = 11;
+SELECT * FROM b143_cp;
+
+-- fp-executor-nodeModifyTable-p2#2: a generic plan prunes result relations
+-- at executor start; a row then routed into a pruned partition whose
+-- columns are reordered must still RETURN its own values and check its
+-- own WITH CHECK OPTION columns.
+-- DELIBERATE DIVERGENCE: C 18.6 pairs linitial(node->returningLists) /
+-- linitial(node->withCheckOptionLists) with the surviving first result
+-- relation's varno (execPartition.c:511,586,646), leaving the Vars unmapped;
+-- it returns (33, three, 2) for the row (2, three, 33) and evaluates the
+-- check option against the wrong column. The expected block below is
+-- hand-verified against the row values, not captured from C.
+CREATE TABLE b143_pr(a int, b text, c int) PARTITION BY LIST (a);
+CREATE TABLE b143_pr1 PARTITION OF b143_pr FOR VALUES IN (1);
+CREATE TABLE b143_pr2(c int, b text, a int);
+ALTER TABLE b143_pr ATTACH PARTITION b143_pr2 FOR VALUES IN (2);
+CREATE TABLE b143_pr3(b text, c int, a int);
+ALTER TABLE b143_pr ATTACH PARTITION b143_pr3 FOR VALUES IN (3);
+CREATE VIEW b143_prv AS SELECT * FROM b143_pr WHERE c > 10 WITH CHECK OPTION;
+INSERT INTO b143_pr VALUES (2, 'two', 22), (3, 'three', 33);
+SET plan_cache_mode = force_generic_plan;
+PREPARE b143_up(int, int) AS
+  UPDATE b143_pr SET a = $2 WHERE a = $1 RETURNING a, b, c, tableoid::regclass;
+EXECUTE b143_up(3, 2);
+EXECUTE b143_up(2, 1);
+EXECUTE b143_up(1, 3);
+PREPARE b143_up2(int, int) AS
+  UPDATE b143_pr SET a = $2 WHERE a = $1 RETURNING old.a, old.c, new.a, new.c;
+EXECUTE b143_up2(3, 2);
+PREPARE b143_upv(int, int) AS UPDATE b143_prv SET a = $2 WHERE a = $1 RETURNING a, b, c;
+EXECUTE b143_upv(2, 3);
+EXECUTE b143_upv(3, 2);
+PREPARE b143_upv2(int, int) AS UPDATE b143_prv SET a = $2, c = 5 WHERE a = $1 RETURNING a, b, c;
+EXECUTE b143_upv2(2, 3);
+RESET plan_cache_mode;
+SELECT tableoid::regclass, * FROM b143_pr ORDER BY a;
+
+-- fp-executor-nodeModifyTable-p2#1: the NEW TABLE transition row of a
+-- routed INSERT carries the stored generated value the leaf computed.
+-- DELIBERATE DIVERGENCE: C 18.6 captures the pre-routing root slot
+-- (ExecPrepareTupleRouting, nodeModifyTable.c:4148) when the leaf has no
+-- BEFORE ROW trigger, so a reordered partition shows NULL for the generated
+-- column ("new: (1,)") while a same-layout partition shows the value.
+-- Hand-verified expected: (1,2) and (2,4).
+CREATE TABLE b143_tp(a int, g int GENERATED ALWAYS AS (a * 2) STORED) PARTITION BY LIST (a);
+CREATE TABLE b143_tp1(g int GENERATED ALWAYS AS (a * 2) STORED, a int);
+ALTER TABLE b143_tp ATTACH PARTITION b143_tp1 FOR VALUES IN (1);
+CREATE TABLE b143_tp2 PARTITION OF b143_tp FOR VALUES IN (2);
+CREATE FUNCTION b143_tp_stmt() RETURNS trigger LANGUAGE plpgsql AS $$
+  DECLARE r record;
+  BEGIN
+    FOR r IN SELECT * FROM newtab ORDER BY 1 LOOP RAISE NOTICE 'new: %', r; END LOOP;
+    RETURN NULL;
+  END $$;
+CREATE TRIGGER b143_tp_ins AFTER INSERT ON b143_tp REFERENCING NEW TABLE AS newtab
+  FOR EACH STATEMENT EXECUTE FUNCTION b143_tp_stmt();
+INSERT INTO b143_tp VALUES (1), (2);
+SELECT * FROM b143_tp ORDER BY a;
+
+-- fp-executor-nodeModifyTable-p2#3 / fp-executor-execUtils#1: RETURNING
+-- projections and the root cross-partition event over many rows (the
+-- per-row memory is measured out of band; this pins the results).
+CREATE TABLE b143_rt AS SELECT i, repeat('x', 20) AS t FROM generate_series(1, 2000) i;
+WITH s AS (UPDATE b143_rt SET i = i RETURNING t || t || i::text AS r)
+  SELECT count(*), sum(length(r)) FROM s;
+CREATE TABLE b143_mv(a int, b text) PARTITION BY LIST (a);
+CREATE TABLE b143_mv1 PARTITION OF b143_mv FOR VALUES IN (1);
+CREATE TABLE b143_mv2 PARTITION OF b143_mv FOR VALUES IN (2);
+CREATE FUNCTION b143_mv_f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+CREATE TRIGGER b143_mv_au AFTER UPDATE ON b143_mv FOR EACH ROW EXECUTE FUNCTION b143_mv_f();
+INSERT INTO b143_mv SELECT 1, 'x' FROM generate_series(1, 2000);
+UPDATE b143_mv SET a = 2;
+SELECT tableoid::regclass, count(*) FROM b143_mv GROUP BY 1 ORDER BY 1;

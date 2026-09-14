@@ -193,6 +193,9 @@ pub struct ResultRelExec<'mcx> {
     // C ri_ChildToRootMap + ri_ChildToRootMapValid (ExecGetChildToRootMap):
     // outer None = unresolved, inner None = no conversion needed.
     child_to_root: Option<Option<mcx::PgVec<'mcx, i16>>>,
+    // C ri_ancestorResultRels (ExecGetAncestorResultRels, execMain.c:1444):
+    // the partition's ancestor oids, resolved once per relation.
+    partition_ancestors: Option<mcx::PgVec<'mcx, Oid>>,
     // ri_GeneratedExprsI / ri_GeneratedExprsU: the UPDATE set skips generated
     // columns depending on no target column (ExecInitGenerated).
     generated_exprs: Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
@@ -1329,6 +1332,7 @@ fn init_result_rel<'mcx>(
         trig_when: ::trigger::TriggerWhenCache::default(),
         all_updated_cols: None,
         child_to_root: None,
+        partition_ancestors: None,
         generated_exprs: None,
         generated_exprs_u: None,
         virtual_nn_exprs: None,
@@ -1427,6 +1431,21 @@ fn begin_leaf_foreign_insert<'mcx>(
     Ok(())
 }
 
+// The plan-list index of rels[0] (C mtstate->resultRelInfo[0]): after
+// init-time pruning it is not 0 whenever the first result relation was
+// pruned. C reads linitial(node->returningLists) / linitial(node->
+// withCheckOptionLists) against firstVarno (execPartition.c:511,586,646),
+// which pairs a pruned relation's list with a surviving relation's varno
+// and leaves those Vars unmapped (deliberate divergence, see UPSTREAM-BUGS).
+fn first_rel_list_index(mt: &ModifyTableState<'_>) -> usize {
+    let first_rti = mt.rels[0].rti;
+    mt.plan
+        .resultRelations
+        .iter()
+        .position(|rti| rti as u32 == first_rti)
+        .unwrap_or(0)
+}
+
 // ExecInitPartitionInfo's RETURNING leg as nodes: the first returningList
 // with Vars translated to the leaf's attnos (NIL without RETURNING).
 fn leaf_returning_nodes<'mcx>(
@@ -1452,7 +1471,7 @@ fn leaf_returning_nodes<'mcx>(
     let attmap = tupdesc::build_attrmap_by_name_if_req(mcx, &leaf.rd_att, &first.rd_att, false)?;
     let rlist = node
         .returningLists
-        .nth(0)
+        .nth(first_rel_list_index(mt))
         .as_list()
         .expect("returningLists cell is a List");
     for tle_node in rlist {
@@ -4547,6 +4566,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) -> PgResult<()> {
         // the struct is forgotten, so drop them here like trig_fmgr's.
         r.trig_when = ::trigger::TriggerWhenCache::default();
         r.child_to_root = None;
+        r.partition_ancestors = None;
         r.generated_exprs = None;
         r.generated_exprs_u = None;
         r.virtual_nn_exprs = None;
@@ -5694,7 +5714,7 @@ fn exec_init_root_returning<'mcx>(
     let root_rti = mt.root.as_ref().expect("checked").rti;
     let rlist = node
         .returningLists
-        .nth(0)
+        .nth(first_rel_list_index(mt))
         .as_list()
         .expect("returningLists cell is a List");
     let (root_desc, root_reltype, attmap) = {
@@ -5847,7 +5867,12 @@ fn exec_cross_partition_update_foreign_key<'mcx>(
 
     // ExecGetAncestorResultRels: the source partition's ancestors up to the
     // query's target root; the root's own triggers are processed below.
-    for anc in pg_inherits::get_partition_ancestors(mcx, src_oid)?.iter() {
+    if mt.rel().partition_ancestors.is_none() {
+        let ancestors = pg_inherits::get_partition_ancestors(mcx, src_oid)?;
+        mt.rel_mut().partition_ancestors = Some(ancestors);
+    }
+    let ancestors = mt.rel().partition_ancestors.as_ref().expect("resolved above");
+    for anc in ancestors.iter() {
         if *anc == root_oid {
             break;
         }
@@ -5889,6 +5914,8 @@ fn exec_cross_partition_update_foreign_key<'mcx>(
     let Some(root_td) = mt.root_rel().trigdesc.clone() else {
         return Ok(());
     };
+    // ExecARUpdateTriggers → ExecGetAllUpdatedCols(rootRelInfo) (trigger.c:3210).
+    ensure_all_updated_cols(mt, estate, true)?;
     let new_tid = estate.es_tupleTable[inserted_slot.0 as usize]
         .base()
         .tts_tid;
@@ -5896,6 +5923,12 @@ fn exec_cross_partition_update_foreign_key<'mcx>(
         root, rels, router, ..
     } = &mut *mt;
     let root_r = root.as_mut().unwrap_or(&mut rels[0]);
+    let ResultRelExec {
+        trig_when: root_trig_when,
+        all_updated_cols: root_updated_cols,
+        ..
+    } = root_r;
+    let root_updated_cols = root_updated_cols.as_ref();
     let EStateData { es_relations, .. } = &*estate;
     let src_rel = es_relations[(src_rti - 1) as usize]
         .as_ref()
@@ -5928,8 +5961,8 @@ fn exec_cross_partition_update_foreign_key<'mcx>(
 
     let mut when = ::trigger::TriggerWhenEval {
         mcx,
-        cache: &mut root_r.trig_when,
-        modified_cols: None,
+        cache: root_trig_when,
+        modified_cols: root_updated_cols,
     };
     ::trigger::ExecARUpdateTriggers(
         mcx,
@@ -5945,9 +5978,7 @@ fn exec_cross_partition_update_foreign_key<'mcx>(
         true,
         src_conv.as_ref(),
         dst_conv.as_ref(),
-        // CP-update root: tg_updatedcols follows this path's WHEN (None) — a
-        // pre-existing partition-move limitation, not exercised by lo/tcn.
-        None,
+        root_updated_cols,
     )
 }
 
@@ -6668,7 +6699,8 @@ fn row_triggers_common<'mcx>(
         // Stable across the call: nothing reassigns all_updated_cols after
         // ensure_all_updated_cols above, and leaf_updated_cols is a local
         // that outlives the loop.
-        let updatedcols_ptr = if event_op == types_trigger::TRIGGER_EVENT_UPDATE {
+        // C ExecIRUpdateTriggers (trigger.c:3227) leaves tg_updatedcols NULL.
+        let updatedcols_ptr = if event_op == types_trigger::TRIGGER_EVENT_UPDATE && !instead {
             match &leaf_updated_cols {
                 Some(b) => b as *const _ as usize,
                 None => mt
@@ -7292,7 +7324,10 @@ fn exec_process_returning<'mcx>(
             // C mtstate->mt_merge_action: under MERGE, `cmd` is the fired
             // action's command type; MERGE_SUPPORT_FUNC steps read it.
             state.set_merge_action(Some(cmd));
-            state.arm_result_mcx(mcx);
+            // C ExecProject: the row lives in the econtext's per-tuple memory,
+            // reset above before the next row (nodeModifyTable.c:4252).
+            // SAFETY: the projected row is consumed before that reset.
+            unsafe { state.arm_result_mcx_raw(estate.ecxt(ec).per_tuple_mcx()) };
             let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
             let tlen = table.len();
             assert!(t < tlen && p < tlen && r < tlen);
@@ -7594,7 +7629,7 @@ fn resolve_leaf_wco<'mcx>(
         let params = estate.param_bind();
         let wlist = node
             .withCheckOptionLists
-            .nth(0)
+            .nth(first_rel_list_index(mt))
             .as_list()
             .expect("withCheckOptionLists cell is a List");
         for wco_node in wlist {
@@ -7655,7 +7690,7 @@ fn resolve_leaf_returning<'mcx>(
     let first_rti = mt.rels[0].rti;
     let rlist = node
         .returningLists
-        .nth(0)
+        .nth(first_rel_list_index(mt))
         .as_list()
         .expect("returningLists cell is a List");
     let (leaf_desc, leaf_reltype, attmap) = {
@@ -10776,7 +10811,7 @@ mcx::forget_safe_struct!(
         update_cols, update_colnos, ri_FdwRoutine, ri_usesFdwDirectModify;
         indexes, project_new, project_returning, check_exprs, partition_check, trigdesc,
         trig_fmgr, trig_instr, trig_old_slot, trig_when, all_updated_cols, child_to_root,
-        generated_exprs, generated_exprs_u, virtual_nn_exprs, wco_exprs, merge, ri_FdwState },
+        partition_ancestors, generated_exprs, generated_exprs_u, virtual_nn_exprs, wco_exprs, merge, ri_FdwState },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
