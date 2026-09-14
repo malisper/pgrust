@@ -54,7 +54,6 @@ pub(crate) fn check_for_interrupts() -> ::types_error::PgResult<()> {
 // SpGistState per spginsert call, but the state is pure derived data).
 pub struct SpgInsertAmCache<'mcx> {
     pub state: SpGistState<'mcx>,
-    pub temp: MemoryContext,
 }
 
 /// spginsert.
@@ -67,25 +66,26 @@ pub fn spginsert<'mcx>(
     amcache: &mut Option<SpgInsertAmCache<'mcx>>,
 ) -> PgResult<bool> {
     if amcache.is_none() {
-        *amcache = Some(SpgInsertAmCache {
-            state: initSpGistState(mcx, r)?,
-            temp: MemoryContext::new_bump("SP-GiST insert temporary context"),
-        });
+        *amcache = Some(SpgInsertAmCache { state: initSpGistState(mcx, r)? });
     }
     let cache = amcache.as_mut().expect("just initialized");
     // C re-runs initSpGistState per call; only redirectXid can change.
     cache.state.redirectXid = xact::GetTopTransactionIdIfAny();
 
+    // spginsert.c:215-241: the context lives for one call (created and
+    // deleted per row, so a row trigger never observes it).
+    let mut temp = MemoryContext::new_bump("SP-GiST insert temporary context");
     loop {
         let done = {
-            let mcx = cache.temp.mcx();
+            let mcx = temp.mcx();
             spgdoinsert(mcx, r, &mut cache.state, ht_ctid, values, isnull)?
         };
-        cache.temp.reset();
+        temp.reset();
         if done {
             break;
         }
     }
+    drop(temp);
 
     SpGistUpdateMetaPage(r)?;
     Ok(false)

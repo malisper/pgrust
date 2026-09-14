@@ -297,11 +297,12 @@ pub fn index_opclass_options(
 // GetIndexInputType (spgutils.c); single-key AM.
 fn get_index_input_type(index: &Relation<'_>) -> PgResult<Oid> {
     let opcintype = index.rd_opcintype[spgKeyColumn];
-    const ANYOID_LOW: Oid = 2276; // "any"
+    // IsPolymorphicType (pg_type.h): ANYOID is not a member, so an opclass
+    // declared FOR TYPE "any" keeps "any" as its nominal input type.
     let polymorphic = matches!(
         opcintype,
         2277 | 2283 | 2776 | 3500 | 3831 | 5077 | 5078 | 5079 | 5080 | 4537 | 4538
-    ) || opcintype == ANYOID_LOW;
+    );
     if !polymorphic {
         return Ok(opcintype);
     }

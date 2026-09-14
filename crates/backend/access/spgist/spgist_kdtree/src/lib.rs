@@ -198,21 +198,22 @@ fn fc_spg_kd_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     let by_x = input.level % 2 != 0;
     let mut which: i32 = (1 << 1) | (1 << 2);
     for key in scankeys {
-        // SAFETY: point-typed (box for ContainedBy) scankey arguments.
-        let query = unsafe { point_at(key.sk_argument) };
+        // SAFETY: point-typed argument under the strategies that call it (C's
+        // DatumGetPointP is a bare cast; an unrecognized strategy never decodes).
+        let query = || unsafe { point_at(key.sk_argument) };
         match key.sk_strategy {
             RTLeftStrategyNumber => {
-                if by_x && FPlt(query.x, coord) {
+                if by_x && FPlt(query().x, coord) {
                     which &= 1 << 1;
                 }
             }
             RTRightStrategyNumber => {
-                if by_x && FPgt(query.x, coord) {
+                if by_x && FPgt(query().x, coord) {
                     which &= 1 << 2;
                 }
             }
             RTSameStrategyNumber => {
-                let q = if by_x { query.x } else { query.y };
+                let q = if by_x { query().x } else { query().y };
                 if FPlt(q, coord) {
                     which &= 1 << 1;
                 } else if FPgt(q, coord) {
@@ -220,12 +221,12 @@ fn fc_spg_kd_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
                 }
             }
             RTBelowStrategyNumber | RTOldBelowStrategyNumber => {
-                if !by_x && FPlt(query.y, coord) {
+                if !by_x && FPlt(query().y, coord) {
                     which &= 1 << 1;
                 }
             }
             RTAboveStrategyNumber | RTOldAboveStrategyNumber => {
-                if !by_x && FPgt(query.y, coord) {
+                if !by_x && FPgt(query().y, coord) {
                     which &= 1 << 2;
                 }
             }

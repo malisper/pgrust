@@ -75,3 +75,12 @@ fn bbox_exactness() {
         assert!(!is_bounding_box_test_exact(s));
     }
 }
+
+#[test]
+fn scankey_subtype_error_formats_the_oid_signed() {
+    let ctx = ::mcx::MemoryContext::new("t");
+    let mut sk = ScanKeyData::empty();
+    sk.sk_subtype = 0x8000_0000;
+    let err = scankey_bbox(ctx.mcx(), &sk, None).unwrap_err();
+    assert_eq!(err.message(), "unrecognized scankey subtype: -2147483648");
+}

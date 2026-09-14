@@ -43,7 +43,8 @@ fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
 #[inline(never)]
 fn unrecognized_scankey_subtype(subtype: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!(
-        "unrecognized scankey subtype: {subtype}"
+        "unrecognized scankey subtype: {}",
+        subtype as i32
     )))
 }
 const VOIDOID: Oid = 2278;

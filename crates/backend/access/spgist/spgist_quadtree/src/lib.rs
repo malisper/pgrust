@@ -275,29 +275,30 @@ fn fc_spg_quad_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
 
     let mut which: i32 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4);
     for key in scankeys {
-        // SAFETY: point-typed (box for ContainedBy) scankey arguments.
-        let query = unsafe { point_at(key.sk_argument) };
+        // SAFETY: point-typed argument under the strategies that call it (C's
+        // DatumGetPointP is a bare cast; an unrecognized strategy never decodes).
+        let query = || unsafe { point_at(key.sk_argument) };
         match key.sk_strategy {
             RTLeftStrategyNumber => {
-                if point_right(&centroid, &query) {
+                if point_right(&centroid, &query()) {
                     which &= (1 << 3) | (1 << 4);
                 }
             }
             RTRightStrategyNumber => {
-                if point_left(&centroid, &query) {
+                if point_left(&centroid, &query()) {
                     which &= (1 << 1) | (1 << 2);
                 }
             }
             RTSameStrategyNumber => {
-                which &= 1 << getQuadrant(&centroid, &query)?;
+                which &= 1 << getQuadrant(&centroid, &query())?;
             }
             RTBelowStrategyNumber | RTOldBelowStrategyNumber => {
-                if point_above(&centroid, &query) {
+                if point_above(&centroid, &query()) {
                     which &= (1 << 2) | (1 << 3);
                 }
             }
             RTAboveStrategyNumber | RTOldAboveStrategyNumber => {
-                if point_below(&centroid, &query) {
+                if point_below(&centroid, &query()) {
                     which &= (1 << 1) | (1 << 4);
                 }
             }
@@ -374,14 +375,15 @@ fn fc_spg_quad_leaf_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
 
     let mut res = true;
     for key in scankeys {
-        // SAFETY: point-typed (box for ContainedBy) scankey arguments.
-        let query = unsafe { point_at(key.sk_argument) };
+        // SAFETY: point-typed argument under the strategies that call it (C's
+        // DatumGetPointP is a bare cast; an unrecognized strategy never decodes).
+        let query = || unsafe { point_at(key.sk_argument) };
         res = match key.sk_strategy {
-            RTLeftStrategyNumber => point_left(&datum, &query),
-            RTRightStrategyNumber => point_right(&datum, &query),
-            RTSameStrategyNumber => point_eq(&datum, &query),
-            RTBelowStrategyNumber | RTOldBelowStrategyNumber => point_below(&datum, &query),
-            RTAboveStrategyNumber | RTOldAboveStrategyNumber => point_above(&datum, &query),
+            RTLeftStrategyNumber => point_left(&datum, &query()),
+            RTRightStrategyNumber => point_right(&datum, &query()),
+            RTSameStrategyNumber => point_eq(&datum, &query()),
+            RTBelowStrategyNumber | RTOldBelowStrategyNumber => point_below(&datum, &query()),
+            RTAboveStrategyNumber | RTOldAboveStrategyNumber => point_above(&datum, &query()),
             RTContainedByStrategyNumber => {
                 // SAFETY: query is a box for this strategy.
                 let boxQuery = unsafe { box_at(key.sk_argument) };
