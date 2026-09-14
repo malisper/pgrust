@@ -225,7 +225,7 @@ fn version_string_default_is_postgres_first() {
     assert_eq!(
         crate::introspect::pg_version_str(),
         format!(
-            "PostgreSQL 18.6 (pgrust 0.3-beta) on {}, 64-bit",
+            "PostgreSQL 18.6 (pgrust 0.3) on {}, 64-bit",
             env!("PGRUST_TARGET_TRIPLE")
         )
     );
@@ -245,7 +245,7 @@ fn version_string_pgrust_first_renders_the_legacy_form() {
     assert_eq!(
         s,
         format!(
-            "pgrust 0.3-beta (PostgreSQL 18.6 compatible) on {}, 64-bit",
+            "pgrust 0.3 (PostgreSQL 18.6 compatible) on {}, 64-bit",
             env!("PGRUST_TARGET_TRIPLE")
         )
     );
