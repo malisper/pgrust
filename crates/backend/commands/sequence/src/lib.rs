@@ -1118,7 +1118,15 @@ pub fn SequenceChangePersistence(mcx: Mcx<'_>, relid: Oid, newrelpersistence: u8
     };
     let mut tuple = heaptuple::heap_copytuple(mcx, &view)?;
     catalog_index::RelationSetNewRelfilenumber(mcx, &seqrel, newrelpersistence)?;
-    fill_seq_with_data(&seqrel, &mut tuple, newrelpersistence)?;
+    // C's relcache rebuild refreshes seqrel->rd_rel->relpersistence in place
+    // (relcache.c RelationClearRelation), so fill_seq_with_data's buffer
+    // extension carries the NEW persistence (BM_PERMANENT for a now-logged
+    // sequence, else checkpoints skip the page). Our handle keeps the pre-CCI
+    // row: re-open for the rebuilt entry.
+    let fresh = sequence_open(mcx, relid, NoLock)?;
+    debug_assert_eq!(fresh.rd_rel.relpersistence, newrelpersistence);
+    fill_seq_with_data(&fresh, &mut tuple, newrelpersistence)?;
+    fresh.close(NoLock)?;
     bufmgr::UnlockReleaseBuffer(buf)?;
 
     seqrel.close(NoLock)

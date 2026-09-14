@@ -31,7 +31,7 @@ pub fn blinsert<'mcx>(
     let imcx = insert_ctx.mcx();
 
     let mut blstate = init_bloom_state(index)?;
-    let itup = bloom_form_tuple(&mut blstate, ht_ctid, values, isnull)?;
+    let itup = bloom_form_tuple(imcx, &mut blstate, ht_ctid, values, isnull)?;
     let size = blstate.size_of_bloom_tuple;
 
     let meta_buffer = bufmgr::ReadBuffer(index, BLOOM_METAPAGE_BLKNO)?;

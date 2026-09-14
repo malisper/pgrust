@@ -233,8 +233,16 @@ impl<'a, 'mcx> TriggerWhenEval<'a, 'mcx> {
         rewrite_manip::ChangeVarNodes(self.mcx, qual, 1, INNER_VAR, 0)?;
         rewrite_manip::ChangeVarNodes(self.mcx, qual, 2, OUTER_VAR, 0)?;
         let implicit = clauses::make_ands_implicit(self.mcx, Some(qual))?;
+        // ExecPrepareQual: expression_planner on each arm (named-argument
+        // calls are only reordered here).
+        let mut planned = types_nodes::list::NodeList::nil();
+        for e in implicit.iter() {
+            let folded = clauses::eval_const_expressions(self.mcx, e)?;
+            nodes_core::fix_opfuncids(folded)?;
+            planned.lappend(self.mcx, folded)?;
+        }
         self.cache.states[idx] =
-            execexpr::exec_init_qual(self.mcx, &implicit, execexpr::ParamBind::NONE)?;
+            execexpr::exec_init_qual(self.mcx, &planned, execexpr::ParamBind::NONE)?;
         Ok(())
     }
 

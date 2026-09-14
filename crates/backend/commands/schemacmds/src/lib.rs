@@ -169,9 +169,9 @@ pub fn CreateSchemaCommand<'mcx>(
 
     guc::AtEOXact_GUC(true, save_nestlevel);
 
-    if saved_uid != owner_uid {
-        miscinit::SetUserIdAndSecContext(saved_uid, save_sec_context);
-    }
+    // schemacmds.c:239: unconditional — an element's expression may have
+    // changed the effective user (set_config('role', ...)).
+    miscinit::SetUserIdAndSecContext(saved_uid, save_sec_context);
     Ok(namespace_id)
 }
 

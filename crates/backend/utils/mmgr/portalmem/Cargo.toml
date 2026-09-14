@@ -9,6 +9,7 @@ datum = { path = "../../../../_support/types/datum" }
 elog = { path = "../../error/elog" }
 funcapi = { path = "../../fmgr/funcapi" }
 mcx = { path = "../../../../_support/mcx" }
+hashfn = { path = "../../../../common/hashfn" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 varlena = { path = "../../adt/varlena" }
 types_core = { path = "../../../../_support/types/types_core" }

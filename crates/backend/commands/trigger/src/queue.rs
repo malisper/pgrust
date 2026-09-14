@@ -676,6 +676,12 @@ fn invoke_events(
     // (the executor's per-tuple context rides the same arm; an exact-
     // accounting Aset would demand every arena object be released first).
     let mut scratch = ::mcx::MemoryContext::new_bump("AfterTriggerTupleContext");
+    // Events without a queuing-time snapshot resolve their descriptor once
+    // per firing cycle: C's ExecGetTriggerResultRel keeps the trig-target
+    // ResultRelInfo (and its CopyTriggerDesc) for the whole
+    // afterTriggerInvokeEvents estate, so a trigger dropping itself mid-cycle
+    // still fires for the remaining events.
+    let mut cycle_descs: Vec<(Oid, Option<Rc<TriggerDesc<'static>>>)> = Vec::new();
     let mut i = 0;
     loop {
         // Borrow per event: firing re-enters the queue (RI SPI queries,
@@ -701,6 +707,17 @@ fn invoke_events(
         )) = next
         else {
             break;
+        };
+        let desc = match desc {
+            Some(d) => Some(d),
+            None => match cycle_descs.iter().find(|(r, _)| *r == relid) {
+                Some((_, d)) => d.clone(),
+                None => {
+                    let d = relcache::RelationGetTriggerDesc(relid)?;
+                    cycle_descs.push((relid, d.clone()));
+                    d
+                }
+            },
         };
         // trigger.c:4547: MemoryContextReset(per_tuple_context) per event —
         // fetched tuples, converted images and the rebuilt tg_updatedcols

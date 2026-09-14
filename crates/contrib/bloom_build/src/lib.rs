@@ -21,6 +21,7 @@ pub struct IndexBuildResult {
 
 struct BloomBuildState {
     blstate: BloomState,
+    tmp_ctx: mcx::MemoryContext,
     indtuples: f64,
     data: Box<[u8; BLCKSZ]>,
     count: i32,
@@ -62,6 +63,7 @@ pub fn blbuild<'mcx>(
 
     let mut buildstate = BloomBuildState {
         blstate: init_bloom_state(index)?,
+        tmp_ctx: mcx::MemoryContext::new_bump("Bloom build temporary context"),
         indtuples: 0.0,
         data: Box::new([0u8; BLCKSZ]),
         count: 0,
@@ -77,8 +79,10 @@ pub fn blbuild<'mcx>(
         true,
         /* progress */ true,
         |_index, tid, values, isnull, _tuple_is_alive| {
-            // C's per-tuple tmpCtx reset == the owned tuple Vec dropping here.
-            let itup = bloom_form_tuple(&mut bs.blstate, tid, values, isnull)?;
+            // C's per-tuple tmpCtx: the detoast scratch is reset per tuple;
+            // the owned tuple Vec drops on its own.
+            bs.tmp_ctx.reset();
+            let itup = bloom_form_tuple(bs.tmp_ctx.mcx(), &mut bs.blstate, tid, values, isnull)?;
             let size = bs.blstate.size_of_bloom_tuple;
             if page_add_item(&mut bs.data[..], size, &itup) {
                 bs.count += 1;

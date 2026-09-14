@@ -52,6 +52,7 @@ aclchk = { path = "../../backend/catalog/aclchk" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 genam = { path = "../../backend/access/index/genam" }
 table = { path = "../../backend/access/table/table" }
+inval_seams = { path = "../../backend/utils/cache/inval_seams" }
 spi = { path = "../../backend/executor/spi" }
 
 [dev-dependencies]

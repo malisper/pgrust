@@ -77,6 +77,7 @@ pub fn blgetbitmap(
             (&scan.keyData, &mut **so)
         };
         if so.sign.is_none() {
+            let scratch = mcx::MemoryContext::new_bump("Bloom scan key context");
             let mut sign = vec![0 as BloomSignatureWord; so.state.opts.bloom_length as usize];
             for skey in keys.iter().take(nkeys) {
                 // Bloom-indexable operators are assumed strict: NULL matches nothing.
@@ -85,6 +86,7 @@ pub fn blgetbitmap(
                     return Ok(0);
                 }
                 sign_value(
+                    scratch.mcx(),
                     &mut so.state,
                     &mut sign,
                     skey.sk_argument,

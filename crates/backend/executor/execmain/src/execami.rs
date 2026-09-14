@@ -440,6 +440,13 @@ fn rescan_mark_initplans<'mcx>(
             );
             *slot = Some(ps);
             r?;
+            // UpdateChangedParamSet on the CTE producer: its chgParam stays
+            // pending until a CteScan pulls from it (nodeCtescan.c:324).
+            for pid in sp.setParam.iter() {
+                if let Some(shared) = estate.cte_shared_slot(pid as usize).as_mut() {
+                    shared.producer_chg = true;
+                }
+            }
         }
         let mcx = estate.es_query_cxt;
         let owned = match chg_owned.as_mut() {

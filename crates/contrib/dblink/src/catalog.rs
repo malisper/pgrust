@@ -25,7 +25,11 @@ fn get_rel_from_relname<'mcx>(
 ) -> PgResult<Relation<'mcx>> {
     let names = varlena::textToQualifiedNameList(mcx, rawname)?;
     let parts: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
-    // table_openrv: RangeVarGetRelid(lockmode) then open with the lock held.
+    // table_openrv: relation.c:152 accepts invalidations even under an
+    // existing lock (GRANT/REVOKE lock nothing), then RangeVarGetRelid.
+    if lockmode != types_rel::NoLock {
+        inval_seams::accept_invalidation_messages::call()?;
+    }
     let relid = catalog_namespace::RangeVarGetRelidFromNameBytes(&parts, lockmode, false)?;
     let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
     let aclresult = aclchk::pg_class_aclcheck(rel.rd_id, miscinit::GetUserId(), aclmode)?;

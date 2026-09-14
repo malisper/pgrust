@@ -99,6 +99,10 @@ pub type SubplanEvalHook = for<'a, 'b, 'mcx> unsafe fn(
 pub struct CteShared {
     pub tuplestore: ::tuplestore::Tuplestore,
     pub eof_cte: bool,
+    /// C `leader->cteplanstate->chgParam != NULL`: set when the CTE
+    /// initplan's changed-param mark lands, cleared by the first pull from
+    /// the producer (ExecProcNode's rescan).
+    pub producer_chg: bool,
     /// Rows pulled from the CTE subplan; the materialize-once probe.
     pub fills: u32,
 }

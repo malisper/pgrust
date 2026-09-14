@@ -646,13 +646,15 @@ fn pg_cursor_rows_filters_and_orders() {
 
     let ctx = MemoryContext::new("pg_cursor scratch");
     let rows = pg_cursor_rows(ctx.mcx()).unwrap();
+    // C's hash_seq order: string_hash('second') lands in bucket 9,
+    // 'first' in bucket 10 (hashtext(name) & 15 on 18.6).
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].name.as_str(), "first");
-    assert_eq!(rows[0].statement.as_str(), "select 1");
-    assert!(!rows[0].is_holdable);
-    assert_eq!(rows[0].creation_time, 777_000);
-    assert_eq!(rows[1].name.as_str(), "second");
-    assert!(rows[1].is_holdable);
+    assert_eq!(rows[1].name.as_str(), "first");
+    assert_eq!(rows[1].statement.as_str(), "select 1");
+    assert!(!rows[1].is_holdable);
+    assert_eq!(rows[1].creation_time, 777_000);
+    assert_eq!(rows[0].name.as_str(), "second");
+    assert!(rows[0].is_holdable);
     drop(rows);
 
     for p in [&first, &hidden, &undefined, &second] {
@@ -711,4 +713,44 @@ fn unnamed_portal_context_ident_is_unnamed() {
     let again = CreatePortal("", false, false).unwrap();
     assert_eq!(ident_of(&again).as_deref(), Some("<unnamed>"));
     PortalDrop(&again, false).unwrap();
+}
+
+// C 18.6 (hashtext = hash_bytes): '' -> bucket 13, 'a' -> 1, 'b' -> 0 in
+// the fresh 16-bucket table, so a walk holds b before a; the per-statement
+// unnamed portal comes and goes without disturbing that.
+#[test]
+fn dynahash_scan_order_is_bucket_then_chain() {
+    let mut o = DynaOrder::new();
+    let unnamed = PortalName::new("");
+    o.insert(unnamed);
+    o.remove(&unnamed);
+    o.insert(PortalName::new("a"));
+    o.insert(unnamed);
+    o.remove(&unnamed);
+    o.insert(PortalName::new("b"));
+    let names: Vec<&str> = o.iter().map(|n| n.as_str()).collect();
+    assert_eq!(names, ["b", "a"]);
+    assert_eq!(o.nentries, 2);
+    // Chains keep insertion order (HASH_ENTER links new entries last).
+    let mut o = DynaOrder::new();
+    for n in ["a", "b", "a2"] {
+        o.insert(PortalName::new(n));
+    }
+    let a_bucket = o.bucket(DynaOrder::hash(&PortalName::new("a")));
+    let first_a = o.iter().position(|n| n.as_str() == "a").unwrap();
+    assert_eq!(a_bucket, 1);
+    assert!(first_a >= 1);
+    // 17 live entries split bucket 0 into bucket 16 (max_bucket 16).
+    let mut o = DynaOrder::new();
+    for i in 0..17 {
+        o.insert(PortalName::new(&format!("c{i}")));
+    }
+    assert_eq!(o.max_bucket, 16);
+    assert_eq!(o.buckets.len(), 17);
+    assert_eq!(o.iter().count(), 17);
+    for (b, chain) in o.buckets.iter().enumerate() {
+        for n in chain {
+            assert_eq!(o.bucket(DynaOrder::hash(n)), b);
+        }
+    }
 }

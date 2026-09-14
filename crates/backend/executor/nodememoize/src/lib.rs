@@ -478,8 +478,8 @@ fn eval_key<'mcx>(
             let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
             // SAFETY: the per-tuple context outlives this eval (reset-only).
             unsafe { expr.arm_result_mcx_raw(per_tuple) };
-            let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-            let r = exec_eval_expr(expr, &mut slots)?;
+            // ExecEvalExpr: a pending initplan Param in the key runs here.
+            let r = ::executils::exec_eval_expr_with_subplans(expr, estate, ecxt)?;
             Ok((r.value, r.isnull))
         }
     }

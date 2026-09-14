@@ -89,6 +89,8 @@ impl<'mcx> CteScanState<'mcx> {
         }
 
         if eof_tuplestore && !shared.eof_cte {
+            // ExecProcNode(cteplanstate) services (clears) its chgParam.
+            shared.producer_chg = false;
             let hook = estate
                 .es_cte_proc_hook
                 .expect("CteScanNext before execmain installed es_cte_proc_hook");
@@ -187,7 +189,7 @@ pub fn exec_init_cte_scan<'mcx>(
         slot @ None => {
             let mut ts = Tuplestore::begin_heap(true, false, init_small::globals::work_mem());
             ts.set_eflags(eflags)?;
-            *slot = Some(CteShared { tuplestore: ts, eof_cte: false, fills: 0 });
+            *slot = Some(CteShared { tuplestore: ts, eof_cte: false, fills: 0, producer_chg: false });
             (0, true)
         }
         Some(shared) => {
@@ -254,43 +256,27 @@ pub fn exec_rescan_cte_scan<'mcx>(
         .cte_shared_slot(param)
         .as_mut()
         .unwrap_or_else(|| panic!("ExecReScanCteScan: es_cte_shared[{param}] missing"));
-    let ts = &mut shared.tuplestore;
-    ts.select_read_pointer(node.readptr)?;
-    ts.rescan()?;
+    // nodeCtescan.c:324: clear while the producer's chgParam is pending
+    // (cleared by whoever reads it first), else rewind our own pointer.
+    if shared.producer_chg {
+        shared.tuplestore.clear();
+        shared.eof_cte = false;
+    } else {
+        let ts = &mut shared.tuplestore;
+        ts.select_read_pointer(node.readptr)?;
+        ts.rescan()?;
+    }
     Ok(())
 }
 
-/// C `leader->cteplanstate->chgParam != NULL` = producer `allParam ∩ chg`.
-/// `cteParam` is linkage only (subselect.c); not a change signal.
+/// The chgParam-bearing rescan entry: C's test is the producer's own
+/// pending chgParam, not this node's, so both arms share one body.
 pub fn exec_rescan_cte_scan_chg<'mcx>(
     node: &mut CteScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+    _chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
 ) -> PgResult<()> {
-    let producer_changed = {
-        let idx = (node.cte_plan_id - 1) as usize;
-        let producer = estate
-            .es_plannedstmt
-            .expect("ExecReScanCteScan: es_plannedstmt set")
-            .subplans
-            .nth(idx)
-            .expect("ExecReScanCteScan: CTE subplan present")
-            .as_plan()
-            .expect("ExecReScanCteScan: CTE subplan is a plan");
-        chg.overlap(&producer.allParam)
-    };
-    if !producer_changed {
-        return exec_rescan_cte_scan(node, estate);
-    }
-    execscan::exec_scan_rescan(&mut node.ss, estate);
-    let param = node.cte_param as usize;
-    let shared = estate
-        .cte_shared_slot(param)
-        .as_mut()
-        .unwrap_or_else(|| panic!("ExecReScanCteScan: es_cte_shared[{param}] missing"));
-    shared.tuplestore.clear();
-    shared.eof_cte = false;
-    Ok(())
+    exec_rescan_cte_scan(node, estate)
 }
 
 mcx::forget_safe_struct!(

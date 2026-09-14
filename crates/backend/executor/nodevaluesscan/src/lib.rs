@@ -97,22 +97,29 @@ impl<'mcx> ScanNode<'mcx> for ValuesScanState<'mcx> {
             assert_eq!(row.len(), natts, "values row length vs scan tupdesc");
         }
 
-        for (resind, expr) in row.iter().enumerate() {
-            // C builds the row's eval state in the per-row context and drops
-            // it at the next reset; the R/W-expanded-datum read-only force is
-            // a no-op here (expanded datums are unmodeled).
-            let d = {
-                let pb = estate.param_bind();
-                let mcx = estate.ecxt(self.rowcontext).per_tuple_mcx();
-                let mut state =
-                    exec_init_expr(mcx, Some(expr), pb)?.expect("non-NULL values expression");
-                // C evaluates in the per-row context (CurrentMemoryContext);
-                // by-ref results (RowExpr forms) need the frames armed with it.
-                state.arm_result_mcx(mcx);
-                let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-                exec_eval_expr(&mut state, &mut slots)?
-            };
-            let base = estate.slot_mut(self.ss.ss_ScanTupleSlot).base_mut();
+        // C builds the row's eval state in the per-row context and drops
+        // it at the next reset; the R/W-expanded-datum read-only force is
+        // a no-op here (expanded datums are unmodeled). ExecInitExprList
+        // compiles (and permission-checks) every column before any runs.
+        let mut states = Vec::with_capacity(row.len());
+        let pb = estate.param_bind();
+        let mcx = estate.ecxt(self.rowcontext).per_tuple_mcx();
+        for expr in row.iter() {
+            let mut state =
+                exec_init_expr(mcx, Some(expr), pb)?.expect("non-NULL values expression");
+            // C evaluates in the per-row context (CurrentMemoryContext);
+            // by-ref results (RowExpr forms) need the frames armed with it.
+            state.arm_result_mcx(mcx);
+            states.push(state);
+        }
+        let mut vals = Vec::with_capacity(states.len());
+        for state in states.iter_mut() {
+            let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+            vals.push(exec_eval_expr(state, &mut slots)?);
+        }
+        drop(states);
+        let base = estate.slot_mut(self.ss.ss_ScanTupleSlot).base_mut();
+        for (resind, d) in vals.into_iter().enumerate() {
             base.tts_values[resind] = d.value;
             base.tts_isnull[resind] = d.isnull;
         }

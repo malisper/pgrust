@@ -85,6 +85,88 @@ impl core::hash::Hash for PortalName {
     }
 }
 
+// The C PortalHashTable's dynahash iteration order (hash_create with
+// PORTALS_PER_USER=16 buckets, HASH_STRINGS): every hash_seq_search walk in
+// portalmem.c visits portals bucket by bucket, each chain in insertion order,
+// with linear-hashing splits once the entry count passes the bucket count.
+// User-visible through PreCommit_Portals (which WITH HOLD cursor is
+// materialized first) and pg_cursors, so the order is tracked beside the
+// PgHashMap. Splits are never deferred by an in-progress walk here (C's
+// has_seq_scans): a walk that creates a 17th+ portal is not a shape we hit.
+struct DynaOrder {
+    buckets: Vec<Vec<PortalName>>,
+    max_bucket: u32,
+    low_mask: u32,
+    high_mask: u32,
+    nentries: usize,
+}
+
+impl DynaOrder {
+    fn new() -> DynaOrder {
+        let nbuckets = PORTALS_PER_USER as u32;
+        DynaOrder {
+            buckets: (0..nbuckets).map(|_| Vec::new()).collect(),
+            max_bucket: nbuckets - 1,
+            low_mask: nbuckets - 1,
+            high_mask: (nbuckets << 1) - 1,
+            nentries: 0,
+        }
+    }
+
+    fn hash(name: &PortalName) -> u32 {
+        hashfn::string_hash(name.bytes(), MAX_PORTALNAME_LEN)
+    }
+
+    // dynahash.c calc_bucket.
+    fn bucket(&self, hash: u32) -> usize {
+        let mut b = hash & self.high_mask;
+        if b > self.max_bucket {
+            b &= self.low_mask;
+        }
+        b as usize
+    }
+
+    // dynahash.c expand_table: one new bucket, the split source re-linked in
+    // chain order.
+    fn expand(&mut self) {
+        let new_bucket = self.max_bucket + 1;
+        self.buckets.push(Vec::new());
+        self.max_bucket = new_bucket;
+        let old_bucket = (new_bucket & self.low_mask) as usize;
+        if new_bucket > self.high_mask {
+            self.low_mask = self.high_mask;
+            self.high_mask = new_bucket | self.low_mask;
+        }
+        let chain = core::mem::take(&mut self.buckets[old_bucket]);
+        for name in chain {
+            let b = self.bucket(Self::hash(&name));
+            self.buckets[b].push(name);
+        }
+    }
+
+    // HASH_ENTER: the split check precedes the insert; new entries chain last.
+    fn insert(&mut self, name: PortalName) {
+        if self.nentries > self.max_bucket as usize {
+            self.expand();
+        }
+        let b = self.bucket(Self::hash(&name));
+        self.buckets[b].push(name);
+        self.nentries += 1;
+    }
+
+    fn remove(&mut self, name: &PortalName) {
+        let b = self.bucket(Self::hash(name));
+        if let Some(pos) = self.buckets[b].iter().position(|n| n == name) {
+            self.buckets[b].remove(pos);
+            self.nentries -= 1;
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &PortalName> {
+        self.buckets.iter().flatten()
+    }
+}
+
 // Pool caps: C parks up to 100 small contexts (aset.c context_freelists) and
 // pfrees PortalData into TopPortalContext's freelists; a backend rarely has
 // more than a few portals alive, so a small cap bounds parked keeper blocks.
@@ -96,6 +178,7 @@ struct PortalManager {
     // entries[i]'s hash key (the name string cannot carry a split character).
     keys: PgVec<'static, PortalName>,
     index: PgHashMap<'static, PortalName, u32>,
+    order: DynaOrder,
     unnamed_counter: u32,
     // Per-statement recycling, C's shape: dropped PortalContexts park whole
     // (keeper block intact — aset.c context_freelists) and dropped portal
@@ -160,8 +243,22 @@ fn session_teardown_portals() {
     });
 }
 
+impl PortalManager {
+    // The i-th portal of a hash_seq_search walk.
+    fn nth_in_scan_order(&self, i: usize) -> Option<Portal<'static>> {
+        let key = self.order.iter().nth(i)?;
+        self.index.get(key).map(|&idx| self.entries[idx as usize].clone())
+    }
+
+    fn scan_order(&self) -> impl Iterator<Item = &Portal<'static>> {
+        self.order
+            .iter()
+            .filter_map(|key| self.index.get(key).map(|&idx| &self.entries[idx as usize]))
+    }
+}
+
 fn portal_at(i: usize) -> Option<Portal<'static>> {
-    with_mgr(|m| m.entries.get(i).cloned()).flatten()
+    with_mgr(|m| m.nth_in_scan_order(i)).flatten()
 }
 
 #[track_caller]
@@ -194,6 +291,7 @@ pub fn EnablePortalManager() {
             entries,
             keys,
             index: PgHashMap::with_capacity_in(PORTALS_PER_USER, hash_cx.mcx()),
+            order: DynaOrder::new(),
             unnamed_counter: 0,
             free_contexts: Vec::new(),
             free_portals: Vec::new(),
@@ -321,6 +419,7 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
         m.entries.push(portal.clone());
         m.keys.push(key);
         m.index.insert(key, i);
+        m.order.insert(key);
         Ok(portal)
     })?
 }
@@ -660,7 +759,9 @@ const PARKED_PORTAL_MAX: usize = 8;
 fn remove_from_table(portal: &Portal<'static>) -> Option<Portal<'static>> {
     with_mgr(|m| {
         let i = m.entries.iter().position(|e| e.ptr_eq(portal))?;
-        m.index.remove(&m.keys.swap_remove(i));
+        let key = m.keys.swap_remove(i);
+        m.index.remove(&key);
+        m.order.remove(&key);
         let removed = m.entries.swap_remove(i);
         if i < m.entries.len() {
             m.index.insert(m.keys[i], i as u32);
@@ -916,6 +1017,7 @@ pub fn TakeParkedPortal(plansource: PlanSourceHandle) -> PgResult<Option<Portal<
         m.entries.push(shell.clone());
         m.keys.push(key);
         m.index.insert(key, i);
+        m.order.insert(key);
     })?;
     Ok(Some(shell))
 }
@@ -976,8 +1078,7 @@ pub fn PortalAttachPlanContext(portal: &Portal<'static>, ctx: Box<MemoryContext>
 pub fn PortalHashTableDeleteAll() -> PgResult<()> {
     loop {
         let next = with_mgr(|m| {
-            m.entries
-                .iter()
+            m.scan_order()
                 .find(|p| p.borrow().status != PORTAL_ACTIVE)
                 .cloned()
         });
@@ -1291,7 +1392,7 @@ pub struct PgCursorRow<'a> {
 pub fn pg_cursor_rows<'a>(mcx: Mcx<'a>) -> PgResult<PgVec<'a, PgCursorRow<'a>>> {
     let mut rows: PgVec<'a, PgCursorRow<'a>> = PgVec::new_in(mcx);
     with_mgr(|m| -> PgResult<()> {
-        for portal in m.entries.iter() {
+        for portal in m.scan_order() {
             let p = portal.borrow();
             if !p.visible {
                 continue;
@@ -1349,7 +1450,7 @@ pub fn HoldPinnedPortals() -> PgResult<()> {
 pub fn ForgetPortalSnapshots() -> PgResult<()> {
     let mut num_portal_snaps: i32 = 0;
     with_mgr(|m| {
-        for portal in m.entries.iter() {
+        for portal in m.scan_order() {
             let mut p = portal.borrow_mut();
             if p.portalSnapshot.take().is_some() {
                 num_portal_snaps += 1;

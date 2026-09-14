@@ -84,14 +84,18 @@ fn read_metapage_options(index: &Relation<'_>) -> PgResult<BloomOptions> {
 }
 
 pub fn sign_value(
+    mcx: Mcx<'_>,
     state: &mut BloomState,
     sign: &mut [BloomSignatureWord],
     value: Datum,
     attno: usize,
 ) -> PgResult<()> {
     let collation = state.collations[attno];
-    let hash_val = types_fmgr::function_call1_coll(&mut state.hash_fn[attno], collation, value)?.as_i32()
-        as u32;
+    // blutils.c:283 FunctionCall1Coll in CurrentMemoryContext: a toasted
+    // text datum is detoasted by hashtext into `mcx`.
+    let hash_val =
+        types_fmgr::function_call1_coll_in(&mut state.hash_fn[attno], collation, mcx, value)?
+            .as_i32() as u32;
     add_value_bits(
         sign,
         attno,
@@ -103,6 +107,7 @@ pub fn sign_value(
 }
 
 pub fn bloom_form_tuple(
+    mcx: Mcx<'_>,
     state: &mut BloomState,
     iptr: &types_tuple::itemptr::ItemPointerData,
     values: &[Datum],
@@ -120,7 +125,7 @@ pub fn bloom_form_tuple(
         if isnull[i] {
             continue;
         }
-        sign_value(state, &mut sign, values[i], i)?;
+        sign_value(mcx, state, &mut sign, values[i], i)?;
     }
     for (i, w) in sign.iter().enumerate() {
         tuple[BLOOM_TUPLE_HDR_SZ + 2 * i..BLOOM_TUPLE_HDR_SZ + 2 * i + 2]

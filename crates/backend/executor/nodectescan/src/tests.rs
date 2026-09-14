@@ -126,7 +126,7 @@ fn filled_shared(mcx: Mcx<'static>, desc: &Rc<TupleDescData<'static>>) -> (CteSh
         ts.puttupleslot(&mut slot, mcx).unwrap();
     }
     assert!(!ts.in_memory(), "rig precondition: the store spilled");
-    (CteShared { tuplestore: ts, eof_cte: true, fills: ROWS as u32 }, images)
+    (CteShared { tuplestore: ts, eof_cte: true, fills: ROWS as u32, producer_chg: false }, images)
 }
 
 fn cte_plan(mcx: Mcx<'static>) -> CteScan<'static> {

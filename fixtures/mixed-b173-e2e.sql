@@ -1,0 +1,134 @@
+-- bugs/batch-173-mixed-xhigh: SQL-reachable legs, expected captured from C 18.6.
+-- fp-commands-schemacmds#1: CREATE SCHEMA restores the effective user
+-- unconditionally (schemacmds.c:239), even when an element changed it.
+CREATE ROLE b173_u2;
+CREATE SCHEMA b173_sx CREATE TABLE p(x text) PARTITION BY LIST (x) CREATE TABLE p1 PARTITION OF p FOR VALUES IN (set_config('role','b173_u2',false));
+SELECT current_user, session_user;
+RESET ROLE;
+DROP SCHEMA b173_sx CASCADE;
+DROP ROLE b173_u2;
+-- fp-commands-trigger-p2#1: WHEN predicates go through expression_planner
+-- (named-argument calls are reordered there).
+CREATE FUNCTION b173_gt(a int, b int) RETURNS bool LANGUAGE sql AS 'select $1 > $2';
+CREATE TABLE b173_t(x int);
+CREATE FUNCTION b173_tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'fired %', NEW.x; RETURN NEW; END $$;
+CREATE TRIGGER b173_tr BEFORE INSERT ON b173_t FOR EACH ROW WHEN (b173_gt(b => 0, a => NEW.x)) EXECUTE FUNCTION b173_tf();
+INSERT INTO b173_t VALUES (1), (-1);
+SELECT * FROM b173_t ORDER BY 1;
+DROP TABLE b173_t;
+DROP FUNCTION b173_gt, b173_tf;
+-- fp-commands-trigger-p2#2: a deferred trigger dropping itself still fires
+-- for the cycle's remaining events (the estate's trigger descriptor copy).
+CREATE TABLE b173_td(x int);
+CREATE FUNCTION b173_tfd() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'fired %', NEW.x; EXECUTE 'DROP TRIGGER b173_trd ON b173_td'; RETURN NULL; END $$;
+CREATE CONSTRAINT TRIGGER b173_trd AFTER INSERT ON b173_td DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION b173_tfd();
+BEGIN;
+INSERT INTO b173_td VALUES (1),(2);
+COMMIT;
+SELECT tgname FROM pg_trigger WHERE tgrelid = 'b173_td'::regclass;
+DROP TABLE b173_td;
+DROP FUNCTION b173_tfd;
+-- fp-contrib-bloom-blutils#1: hashing a compressed text datum at index build.
+CREATE EXTENSION IF NOT EXISTS bloom;
+CREATE TABLE b173_tb(s text);
+INSERT INTO b173_tb SELECT repeat('x', 5000) || i FROM generate_series(1,3) i;
+SELECT pg_column_compression(s) FROM b173_tb LIMIT 1;
+CREATE INDEX b173_tb_i ON b173_tb USING bloom(s);
+INSERT INTO b173_tb VALUES (repeat('y', 6000));
+SET enable_seqscan = off;
+SELECT length(s) FROM b173_tb WHERE s = repeat('y', 6000);
+RESET enable_seqscan;
+DROP TABLE b173_tb;
+-- fp-executor-b2#1: a correlated inner CteScan rescans by rewinding once
+-- another reader has consumed the producer (nodeCtescan.c:324).
+SELECT (WITH c AS MATERIALIZED (SELECT t.x AS v) SELECT (SELECT v FROM c WHERE v = t.x) FROM c c2) AS r FROM (VALUES (1),(2),(3)) t(x);
+SELECT (WITH c AS MATERIALIZED (SELECT t.x AS v) SELECT max((SELECT v FROM c WHERE v = c2.v)) FROM c c2) AS r FROM (VALUES (1),(2),(3)) t(x);
+-- fp-executor-b5#1: every VALUES column is initialized (permission-checked)
+-- before any is evaluated, so the nextval never runs.
+CREATE SEQUENCE b173_s;
+CREATE FUNCTION b173_priv() RETURNS int LANGUAGE sql AS 'select 1';
+REVOKE EXECUTE ON FUNCTION b173_priv() FROM public;
+CREATE ROLE b173_u;
+GRANT USAGE ON SEQUENCE b173_s TO b173_u;
+SET ROLE b173_u;
+SELECT * FROM (VALUES (nextval('b173_s'), b173_priv())) v;
+SELECT * FROM (VALUES (nextval('b173_s'), 1), (2, b173_priv())) v;
+RESET ROLE;
+SELECT last_value, is_called FROM b173_s;
+DROP SEQUENCE b173_s;
+DROP FUNCTION b173_priv;
+DROP ROLE b173_u;
+-- fp-executor-nodeMemoize#1: a cache key carrying a pending initplan Param.
+CREATE TABLE b173_ma(x int);
+CREATE TABLE b173_mb(y int);
+INSERT INTO b173_ma SELECT i % 10 FROM generate_series(1,1000) i;
+INSERT INTO b173_mb SELECT i FROM generate_series(1,1000) i;
+CREATE INDEX ON b173_mb(y);
+ANALYZE b173_ma;
+ANALYZE b173_mb;
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SELECT count(*) FROM b173_ma JOIN b173_mb ON b173_mb.y = b173_ma.x + (SELECT 1);
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+DROP TABLE b173_ma, b173_mb;
+-- fp-mb-mbutils#1: pg_convert returns the detoasted input when no
+-- conversion happens (mbutils.c:599).
+CREATE TABLE b173_tc(s text, b bytea);
+INSERT INTO b173_tc VALUES (repeat('a',5000), convert_to(repeat('a',5000),'UTF8'));
+SELECT pg_column_compression(s), pg_column_compression(convert_to(s,'UTF8')), pg_column_size(convert_to(s,'UTF8')), pg_column_compression(convert_from(b,'UTF8')), pg_column_compression(convert(b,'UTF8','UTF8')) FROM b173_tc;
+DROP TABLE b173_tc;
+-- fp-mmgr-portalmem#1: PreCommit_Portals holds WITH HOLD cursors in the
+-- portal hash table's dynahash order (string_hash buckets, chains in
+-- insertion order, splits past 16 entries), visible through nextval.
+CREATE SEQUENCE b173_sp;
+BEGIN;
+DECLARE a NO SCROLL CURSOR WITH HOLD FOR SELECT nextval('b173_sp');
+DECLARE b NO SCROLL CURSOR WITH HOLD FOR SELECT nextval('b173_sp');
+COMMIT;
+FETCH ALL FROM a;
+FETCH ALL FROM b;
+CLOSE a;
+CLOSE b;
+ALTER SEQUENCE b173_sp RESTART;
+BEGIN;
+DECLARE c1 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c1', nextval('b173_sp');
+DECLARE c2 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c2', nextval('b173_sp');
+DECLARE c3 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c3', nextval('b173_sp');
+DECLARE c4 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c4', nextval('b173_sp');
+DECLARE c5 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c5', nextval('b173_sp');
+DECLARE c6 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c6', nextval('b173_sp');
+DECLARE c7 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c7', nextval('b173_sp');
+DECLARE c8 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c8', nextval('b173_sp');
+DECLARE c9 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c9', nextval('b173_sp');
+DECLARE c10 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c10', nextval('b173_sp');
+DECLARE c11 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c11', nextval('b173_sp');
+DECLARE c12 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c12', nextval('b173_sp');
+DECLARE c13 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c13', nextval('b173_sp');
+DECLARE c14 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c14', nextval('b173_sp');
+DECLARE c15 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c15', nextval('b173_sp');
+DECLARE c16 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c16', nextval('b173_sp');
+DECLARE c17 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c17', nextval('b173_sp');
+DECLARE c18 NO SCROLL CURSOR WITH HOLD FOR SELECT 'c18', nextval('b173_sp');
+COMMIT;
+SELECT name FROM pg_cursors;
+FETCH ALL FROM c1;
+FETCH ALL FROM c2;
+FETCH ALL FROM c3;
+FETCH ALL FROM c4;
+FETCH ALL FROM c5;
+FETCH ALL FROM c6;
+FETCH ALL FROM c7;
+FETCH ALL FROM c8;
+FETCH ALL FROM c9;
+FETCH ALL FROM c10;
+FETCH ALL FROM c11;
+FETCH ALL FROM c12;
+FETCH ALL FROM c13;
+FETCH ALL FROM c14;
+FETCH ALL FROM c15;
+FETCH ALL FROM c16;
+FETCH ALL FROM c17;
+FETCH ALL FROM c18;
+CLOSE ALL;
+DROP SEQUENCE b173_sp;

@@ -3,7 +3,7 @@
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{InvalidOid, Oid};
-use types_error::{PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERROR};
+use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERROR};
 use types_nodes::{FdwKind, FdwRoutine, NodeTag};
 
 use crate::options::{text_body, untransform_options, varlena_image, OptionPair};
@@ -335,14 +335,37 @@ pub fn GetFdwRoutine(fdwhandler: Oid) -> PgResult<FdwKind> {
             .into());
     }
     let datum = fmgr_core::oid_function_call0_coll(fdwhandler, InvalidOid)?;
+    fdw_kind_from_handler_result(datum, fdwhandler)
+}
+
+// foreign.c:343-345: a handler alias of a non-FdwRoutine-returning builtin
+// (an internal-language void_in) reaches this as a catchable elog(ERROR).
+fn fdw_kind_from_handler_result(datum: Datum, fdwhandler: Oid) -> PgResult<FdwKind> {
     let p = datum.as_usize() as *const FdwRoutine;
     // SAFETY: handler functions are in-tree dfmgr-registered builtins that
     // return a pointer datum to a `static FdwRoutine`; the tag read mirrors
     // C's `IsA(routine, FdwRoutine)` check on the same trust boundary.
     if p.is_null() || unsafe { (*p).tag } != NodeTag::T_FdwRoutine {
-        panic!("foreign-data wrapper handler function {fdwhandler} did not return an FdwRoutine struct");
+        return Err(Box::new(PgError::error(format!(
+            "foreign-data wrapper handler function {fdwhandler} did not return an FdwRoutine struct"
+        ))));
     }
     Ok(unsafe { (*p).kind })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_handler_result_is_an_error_not_a_panic() {
+        let err = fdw_kind_from_handler_result(Datum::from_usize(0), 4242).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "foreign-data wrapper handler function 4242 did not return an FdwRoutine struct"
+        );
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
 }
 
 /// GetFdwRoutineByServerId (foreign.c): the no-handler error surface plus the

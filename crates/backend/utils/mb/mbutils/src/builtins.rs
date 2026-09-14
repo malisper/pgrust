@@ -41,7 +41,8 @@ fn convert_common(
     crate::pg_verify_mbstr(src_encoding, src, false)?;
     let mcx = fcinfo.result_mcx();
     match crate::pg_do_encoding_conversion(mcx, src, src_encoding, dest_encoding)? {
-        None => Ok(fcinfo.arg(string_arg)),
+        // mbutils.c:599 PG_RETURN_BYTEA_P(string): the detoasted image.
+        None => Ok(Datum::from_usize(string.as_ptr() as usize)),
         Some(out) => {
             let mut image = ::mcx::vec_with_capacity_in(mcx, VARHDRSZ + out.len())?;
             ::mcx::vec_append_bytes(&mut image, &[0u8; VARHDRSZ])?;
