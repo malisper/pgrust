@@ -1482,7 +1482,10 @@ pub fn fc_pg_tablespace_location(
             .into());
     }
     // misc.c:363: cstring_to_text(targetpath) -- the readlink bytes verbatim.
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_family = "wasm")]
+    use std::os::wasi::ffi::OsStrExt;
     Ok(varlena_result(varlena::cstring_to_text(mcx, target.as_os_str().as_bytes())?))
 }
 

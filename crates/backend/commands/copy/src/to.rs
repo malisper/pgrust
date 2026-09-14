@@ -264,8 +264,15 @@ pub fn BeginCopyTo<'mcx: 's, 's>(
             // "not a directory, default buffer".
             let (is_dir, blksize) = match fd::with_allocated_stdio(copy_file, |f| f.metadata()) {
                 Some(Ok(m)) => {
-                    use std::os::unix::fs::MetadataExt;
-                    (m.is_dir(), m.blksize() as usize)
+                    #[cfg(not(target_family = "wasm"))]
+                    let blksize = {
+                        use std::os::unix::fs::MetadataExt;
+                        m.blksize() as usize
+                    };
+                    // wasi stat carries no st_blksize: stdio_bufsize's default.
+                    #[cfg(target_family = "wasm")]
+                    let blksize = 0usize;
+                    (m.is_dir(), blksize)
                 }
                 Some(Err(e)) => return Err(crate::could_not_stat_file(filename, &e)),
                 None => panic!("COPY TO: AllocateFile index {copy_file} vanished"),

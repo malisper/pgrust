@@ -152,7 +152,10 @@ fn find_in_paths(basename: &str, paths: &[String]) -> PgResult<Option<String>> {
 }
 
 fn exists_in_paths(basename: &[u8], paths: &[String]) -> PgResult<bool> {
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_family = "wasm")]
+    use std::os::wasi::ffi::OsStrExt;
     for path in paths {
         let full = std::path::Path::new(&absolute_search_path(path)?)
             .join(std::ffi::OsStr::from_bytes(basename));

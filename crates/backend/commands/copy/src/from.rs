@@ -1693,6 +1693,12 @@ pub fn EndCopyFrom(cstate: CopyFromState<'_, '_>) -> PgResult<()> {
 // ClosePipeFromProgram (copyfrom.c): pclose and check the wait status. A
 // SIGPIPE death is expected — and not an error — when COPY FROM PROGRAM
 // stopped reading before the child reached EOF.
+// wasm32-wasip1's libc has no SIGPIPE (and no popen); carry the POSIX value.
+#[cfg(not(target_family = "wasm"))]
+const SIGPIPE: i32 = libc::SIGPIPE;
+#[cfg(target_family = "wasm")]
+const SIGPIPE: i32 = 13;
+
 fn close_pipe_from_program(fd: i32, filename: &str, raw_reached_eof: bool) -> PgResult<()> {
     let pclose_rc = fd::ClosePipeStream(fd)?;
     if pclose_rc == -1 {
@@ -1702,7 +1708,7 @@ fn close_pipe_from_program(fd: i32, filename: &str, raw_reached_eof: bool) -> Pg
             .errmsg("could not close pipe to external command: %m")
             .finish(loc("EndCopyFrom"))?;
     } else if pclose_rc != 0 {
-        if !raw_reached_eof && wait_error::wait_result_is_signal(pclose_rc, libc::SIGPIPE) {
+        if !raw_reached_eof && wait_error::wait_result_is_signal(pclose_rc, SIGPIPE) {
             return Ok(());
         }
         return Err(Box::new(

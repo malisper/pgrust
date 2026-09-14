@@ -168,6 +168,20 @@ mod mac_mincore {
 /// Residency scan of this thread's stack region. Read-only; used by the
 /// `pgrust: memctx` census. None when bounds or mincore are unavailable.
 pub fn stack_census() -> Option<StackCensus> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        stack_census_impl()
+    }
+    // No mincore (wasm32-wasip1 and the rest): stack_region() has no arm
+    // there either — the census is simply unavailable.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn stack_census_impl() -> Option<StackCensus> {
     let marker = 0u8;
     let (lo, hi) = stack_region()?;
     let page = page_size();

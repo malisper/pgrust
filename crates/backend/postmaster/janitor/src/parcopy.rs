@@ -66,7 +66,10 @@
 
 use std::ffi::CString;
 use std::io::Read as _;
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_family = "wasm")]
+use std::os::wasi::ffi::OsStrExt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -362,13 +365,15 @@ fn copy_one_file(
     }
     let mut from = std::fs::File::open(src).map_err(|e| io_failure("open file", src, &e))?;
     let mut to = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(knobs.file_mode)
-            .open(dst)
-            .map_err(|e| io_failure("create file", dst, &e))?
+        let mut oo = std::fs::OpenOptions::new();
+        oo.write(true).create_new(true);
+        // wasi has no file modes (OpenOptionsExt::mode is unix-only).
+        #[cfg(not(target_family = "wasm"))]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            oo.mode(knobs.file_mode);
+        }
+        oo.open(dst).map_err(|e| io_failure("create file", dst, &e))?
     };
     let mut buf = vec![0u8; 8 * 8192];
     loop {
@@ -396,7 +401,7 @@ fn copy_one_file(
 /// unconditionally on macOS, a durability-primitive upgrade over the
 /// serial path this module replaces (CopyKnobs.writethrough's rationale).
 fn fsync_file_raw(f: &std::fs::File, path: &str, knobs: CopyKnobs) -> Result<(), CopyFailure> {
-    use std::os::unix::io::AsRawFd;
+    use std::os::fd::AsRawFd;
     let fd = f.as_raw_fd();
     #[cfg(target_os = "macos")]
     if knobs.writethrough {
@@ -466,6 +471,18 @@ fn clone_file_raw(
         });
     }
     Ok(())
+}
+
+// Neither clone arm (wasm32-wasip1 and the rest): file_copy_method=clone
+// cannot be honoured — fail the file like copydir's ereport would.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn clone_file_raw(
+    _src: &str,
+    dst: &str,
+    _abort: &AtomicBool,
+    _knobs: CopyKnobs,
+) -> Result<(), CopyFailure> {
+    Err(io_failure("clone file", dst, &std::io::Error::from(std::io::ErrorKind::Unsupported)))
 }
 
 #[cfg(target_os = "linux")]
