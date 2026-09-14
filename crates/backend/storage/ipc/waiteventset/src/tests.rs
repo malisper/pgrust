@@ -458,3 +458,30 @@ fn drain_error_messages_match_c() {
     assert_eq!(DRAIN_EOF_MESSAGE, eof);
     assert_eq!(DRAIN_READ_FAILED_MESSAGE, failed);
 }
+
+// waiteventset.c:1362: a failed readiness syscall clears `waiting` before
+// the ERROR; the fd-park must not survive the error into the next wait.
+#[test]
+fn readiness_error_ends_the_fd_park() {
+    setup_backend();
+    let latch = owned_latch();
+    let set = CreateWaitEventSet(1).unwrap();
+    AddWaitEventToSet(set, WL_LATCH_SET, PGINVALID_SOCKET, Some(latch), None).unwrap();
+
+    // Point the readiness fd at /dev/null: the kernel block fails (EBADF /
+    // EINVAL), the non-EINTR ERROR path.
+    let raw = run_with_set(set, |s| s.backend.raw_fd());
+    let devnull = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+    assert!(devnull >= 0);
+    assert_eq!(unsafe { libc::dup2(devnull, raw) }, raw);
+    unsafe { libc::close(devnull) };
+    let mut occurred = [WaitEvent::default(); 1];
+    assert!(WaitEventSetWait(set, 10, &mut occurred, 0).is_err());
+    FreeWaitEventSet(set);
+
+    let set = CreateWaitEventSet(1).unwrap();
+    AddWaitEventToSet(set, WL_LATCH_SET, PGINVALID_SOCKET, Some(latch), None).unwrap();
+    let n = WaitEventSetWait(set, 10, &mut occurred, 0).unwrap();
+    assert_eq!(n, 0);
+    FreeWaitEventSet(set);
+}

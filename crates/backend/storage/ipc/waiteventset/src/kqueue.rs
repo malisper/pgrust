@@ -48,6 +48,11 @@ impl BackendSet {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn raw_fd(&self) -> i32 {
+        self.kqueue_fd
+    }
+
     pub(crate) fn free(&self) {
         // SAFETY: closing our kqueue fd.
         unsafe { libc::close(self.kqueue_fd) };

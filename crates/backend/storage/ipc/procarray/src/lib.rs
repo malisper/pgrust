@@ -667,9 +667,12 @@ pub fn ProcArrayAdd(procno: ProcNumber) -> PgResult<()> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
     let proc = GetPGProcByNumber(procno);
+    // procarray.c:476: the executing backend waits, never the proc being
+    // added (a prepared-xact dummy has no semaphore).
+    let my_procno = MyProc().unwrap_or(procno);
 
-    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, procno)?;
-    LWLockAcquire(XidGenLock(), LW_EXCLUSIVE, procno)?;
+    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, my_procno)?;
+    LWLockAcquire(XidGenLock(), LW_EXCLUSIVE, my_procno)?;
 
     // SAFETY: [PAL] serialized by ProcArrayLock
     let num_procs = unsafe { arrayP.numProcs.get() };

@@ -473,8 +473,10 @@ fn wait_loop(
             latch,
             block_timeout,
             &mut occurred_events[returned_events as usize..],
-        )?;
+        );
 
+        // waiteventset.c:1362 clears `waiting` before the readiness error
+        // is raised: the fd-park must end on the error path too.
         if let Some(l) = latch {
             if fd_parked {
                 waiter::end_fd_park();
@@ -483,6 +485,7 @@ fn wait_loop(
                 l.set_maybe_sleeping(false);
             }
         }
+        let rc = rc?;
 
         if rc == -1 {
             // Events already gathered: the zero-timeout extra poll is done.

@@ -7,8 +7,8 @@ use types_core::BackendType;
 // over the my_backend() call-site count or InitProcess FATALs mid-suite.
 const MAX_CONNECTIONS: i32 = 24;
 // Bump when claim_other() call sites grow: the claimable simulated-backend
-// range is MAX_BACKENDS - MAX_CONNECTIONS (20 today for 19 claim_other()s).
-const MAX_WORKER_PROCESSES: i32 = 13;
+// range is MAX_BACKENDS - MAX_CONNECTIONS (21 today for 20 claim_other()s).
+const MAX_WORKER_PROCESSES: i32 = 14;
 const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
 
@@ -22,6 +22,10 @@ static RECOVERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 // pgstat wait reporting trace: each start pushes its wait_event_info, each
 // end pushes 0.
 static WAIT_EVENTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+// Every fake-semaphore lock, by the thread that took it: the LWLock waiter
+// identity a contended acquisition sleeps under.
+static SEMA_LOCKS: Mutex<Vec<(std::thread::ThreadId, ProcNumber)>> = Mutex::new(Vec::new());
 
 struct RecoveryOn;
 impl RecoveryOn {
@@ -50,6 +54,11 @@ fn setup() {
         // the leader clears its membership; no leader runs in these tests,
         // so the fake semaphore plays the leader for a group member.
         pg_sema_seams::pg_semaphore_lock::set(|procno| {
+            SEMA_LOCKS
+                .lock()
+                .unwrap()
+                .push((std::thread::current().id(), procno));
+            std::thread::yield_now();
             let proc = GetPGProcByNumber(procno);
             if proc.procArrayGroupMember.load(Relaxed) {
                 proc.procArrayGroupNext
@@ -1446,4 +1455,47 @@ fn replication_horizons_xmin_includes_slot_xmin() {
 
     assert_eq!(catalog_xmin, 3600);
     assert_eq!(xmin, 3700);
+}
+
+// procarray.c:476: ProcArrayAdd contends for ProcArrayLock as the executing
+// backend, never as the proc being added -- a prepared-xact dummy PGPROC has
+// no semaphore to sleep on (PREPARE TRANSACTION under a busy ProcArrayLock).
+#[test]
+fn procarray_add_waits_as_the_executing_backend() {
+    // The holder thread parks ProcArrayLock for 100ms; serialize against the
+    // MyProc-less tests (expire_*), whose contended acquire cannot wait.
+    let _g = test_lock();
+    let me = my_backend();
+    let dummy = MAX_BACKENDS + types_storage::storage::NUM_AUXILIARY_PROCS;
+    assert!(dummy < lmgr_proc::ProcGlobal().allProcs.len() as ProcNumber);
+    GetPGProcByNumber(dummy).pgxactoff.store(-1, Relaxed);
+
+    let holder_procno = claim_other();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, holder_procno).expect("holder acquire");
+        tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        LWLockRelease(ProcArrayLock()).expect("holder release");
+    });
+    rx.recv().unwrap();
+
+    let tid = std::thread::current().id();
+    SEMA_LOCKS.lock().unwrap().retain(|(t, _)| *t != tid);
+    ProcArrayAdd(dummy).expect("ProcArrayAdd dummy");
+    let waited: Vec<ProcNumber> = SEMA_LOCKS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _)| *t == tid)
+        .map(|(_, p)| *p)
+        .collect();
+    holder.join().unwrap();
+    ProcArrayRemove(dummy, InvalidTransactionId).expect("remove dummy");
+
+    assert!(!waited.is_empty(), "the add never contended for ProcArrayLock");
+    assert!(
+        waited.iter().all(|&p| p == me),
+        "contended ProcArrayAdd slept as {waited:?}, expected the executing backend {me}"
+    );
 }

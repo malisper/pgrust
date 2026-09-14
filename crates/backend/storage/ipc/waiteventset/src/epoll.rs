@@ -28,6 +28,11 @@ impl BackendSet {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn raw_fd(&self) -> i32 {
+        self.epoll_fd
+    }
+
     pub(crate) fn free(&self) {
         // SAFETY: closing our epoll fd.
         unsafe { libc::close(self.epoll_fd) };
