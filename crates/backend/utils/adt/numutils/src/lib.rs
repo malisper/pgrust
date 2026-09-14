@@ -370,13 +370,20 @@ pub fn pg_strtoint32_bytes(s: &[u8]) -> PgResult<i32> {
     match core::str::from_utf8(s) {
         Ok(s) => pg_strtoint32(s),
         Err(_) => {
-            let mut msg = b"invalid input syntax for type integer: \"".to_vec();
+            // C overflows on the digit run before it reaches the non-ASCII
+            // byte: the ASCII prefix decides between 22003 and 22P02.
+            let ascii = s.iter().position(|&b| b >= 0x80).unwrap_or(s.len());
+            // SAFETY: bytes below 0x80 are ASCII, hence valid UTF-8.
+            let prefix = unsafe { core::str::from_utf8_unchecked(&s[..ascii]) };
+            let oor = matches!(pg_strtoint32(prefix), Err(e) if e.sqlstate() == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+            let (mut msg, tail, code) = if oor {
+                (b"value \"".to_vec(), b"\" is out of range for type integer".as_slice(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+            } else {
+                (b"invalid input syntax for type integer: \"".to_vec(), b"\"".as_slice(), ERRCODE_INVALID_TEXT_REPRESENTATION)
+            };
             msg.extend_from_slice(s);
-            msg.push(b'"');
-            Err(Box::new(
-                PgError::error_raw_message(msg)
-                    .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
-            ))
+            msg.extend_from_slice(tail);
+            Err(Box::new(PgError::error_raw_message(msg).with_sqlstate(code)))
         }
     }
 }

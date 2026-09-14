@@ -1,7 +1,7 @@
 use ::mcx::{Mcx, PgVec};
 use ::regex::RegexecResult;
 use ::ts_locale::TsLexeme;
-use ::types_error::{PgError, PgResult, ERRCODE_INVALID_REGULAR_EXPRESSION};
+use ::types_error::PgResult;
 
 use crate::{
     check_stack_depth, new_bytes, Affix, AffixReg, IspellDict, FF_COMPOUNDBEGIN,
@@ -165,16 +165,7 @@ impl<'mcx> IspellDict<'mcx> {
                 let data = ::mbutils::pg_mb2wchar_with_len(self.mcx, out)?;
                 let res =
                     ::regex_core::regex_export_free_error::seam_pg_regexec(re, &data, 0, &mut [])?;
-                match res {
-                    RegexecResult::Matched => Ok((true, new_baselen)),
-                    RegexecResult::NoMatch => Ok((false, new_baselen)),
-                    RegexecResult::Failed(f) => Err(PgError::error(format!(
-                        "regular expression failed: {}",
-                        f.message
-                    ))
-                    .with_sqlstate(ERRCODE_INVALID_REGULAR_EXPRESSION)
-                    .into()),
-                }
+                Ok((regexec_applies(&res), new_baselen))
             }
         }
     }
@@ -564,4 +555,10 @@ fn add_norm<'out>(
 #[inline]
 fn bncmp_eq(a: &[u8], b: &[u8], n: usize) -> bool {
     crate::bncmp(a, b, n) == core::cmp::Ordering::Equal
+}
+
+// CheckAffix (spell.c): only REG_OKAY applies the affix; every other
+// pg_regexec result (REG_ETOOBIG from the stack guard included) is no match.
+pub(crate) fn regexec_applies(res: &RegexecResult) -> bool {
+    matches!(res, RegexecResult::Matched)
 }

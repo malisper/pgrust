@@ -70,7 +70,13 @@ fn make_env() -> TrgmEnv<'static> {
     TrgmEnv {
         max_encoding_len: mbutils::pg_database_encoding_max_length(),
         mblen: &|s| mbutils::pg_mblen(s),
-        isalnum: &|s| !s.is_empty() && ts_locale::t_isalnum(s),
+        isalnum: &|s| {
+            !s.is_empty()
+                && match ts_locale::t_isalnum(s) {
+                    Ok(b) => b,
+                    Err(e) => std::panic::panic_any(e),
+                }
+        },
         tolower: &|s| {
             let m = MemoryContext::new("pg_trgm tolower scratch");
             oracle_compat::casemap::str_tolower(m.mcx(), s, DEFAULT_COLLATION_OID)

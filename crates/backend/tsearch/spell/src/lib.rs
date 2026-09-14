@@ -201,8 +201,8 @@ fn pg_mblen_clamped(s: &[u8]) -> usize {
 }
 
 #[inline]
-fn t_isalpha(s: &[u8]) -> bool {
-    !s.is_empty() && ::ts_locale::t_isalpha(s)
+fn t_isalpha(s: &[u8]) -> PgResult<bool> {
+    Ok(!s.is_empty() && ::ts_locale::t_isalpha(s)?)
 }
 
 #[inline]

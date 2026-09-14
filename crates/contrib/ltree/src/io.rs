@@ -33,15 +33,15 @@ fn is_space_c_locale(c: u8) -> bool {
 }
 
 #[inline]
-fn is_label(s: &[u8], charlen: usize) -> bool {
+fn is_label(s: &[u8], charlen: usize) -> Result<bool, PgError> {
     let c = s[0];
     if c == b'_' || c == b'-' {
-        return true;
+        return Ok(true);
     }
     // charlen comes from the caller's already-validated mblen() for this
     // position, exactly as C's ISLABEL -> t_isalnum_cstr recomputes the same
     // pg_mblen_cstr the scan loop just took.
-    ::ts_locale::t_isalnum(&s[..charlen])
+    Ok(::ts_locale::t_isalnum(&s[..charlen])?)
 }
 
 // The regression .out compares sqlstate + message + (sometimes) detail, so we
@@ -159,7 +159,7 @@ pub fn parse_ltree(buf: &[u8]) -> Result<Vec<u8>, PgError> {
         let cl = mblen(&buf[i..])?;
         match state {
             LTPRS_WAITNAME => {
-                if is_label(&buf[i..], cl) {
+                if is_label(&buf[i..], cl)? {
                     list[lptr_idx].start = i;
                     list[lptr_idx].wlen = 0;
                     state = LTPRS_WAITDELIM;
@@ -172,7 +172,7 @@ pub fn parse_ltree(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                     finish_nodeitem(buf, &mut list[lptr_idx], i, false, pos)?;
                     lptr_idx += 1;
                     state = LTPRS_WAITNAME;
-                } else if !is_label(&buf[i..], cl) {
+                } else if !is_label(&buf[i..], cl)? {
                     return Err(syntax_at("ltree", pos));
                 }
             }
@@ -325,7 +325,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
         let c = buf[i];
         match state {
             LQPRS_WAITLEVEL => {
-                if is_label(&buf[i..], cl) {
+                if is_label(&buf[i..], cl)? {
                     level_alloc_check(num_or)?;
                     levels[cur].variants.push(NodeItem {
                         start: i,
@@ -354,7 +354,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                 }
             }
             LQPRS_WAITVAR => {
-                if is_label(&buf[i..], cl) {
+                if is_label(&buf[i..], cl)? {
                     // upstream 7f019f34140a (18.4): ltree: Fix overflows with lquery parsing
                     if levels[cur].variants.len() >= u16::MAX as usize {
                         return Err(prog_limit_detail(
@@ -395,7 +395,7 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                     finish_variant(buf, &mut levels[cur].variants[lvar], i, pos)?;
                     state = LQPRS_WAITLEVEL;
                     nextlev!();
-                } else if is_label(&buf[i..], cl) {
+                } else if is_label(&buf[i..], cl)? {
                     if levels[cur].variants[lvar].flag != 0 {
                         return Err(syntax_at("lquery", pos));
                     }
@@ -794,7 +794,7 @@ fn gettoken_query(st: &mut QprsState) -> Result<Tok, PgError> {
                     st.count += 1;
                     st.i += 1;
                     return Ok(Tok { kind: OPEN, val: 0, lenval: 0, strval: 0, flag: 0 });
-                } else if !st.at_end() && is_label(&st.buf[st.i..], charlen) {
+                } else if !st.at_end() && is_label(&st.buf[st.i..], charlen)? {
                     st.state = INOPERAND;
                     strval = st.i;
                     lenval = charlen as i32;
@@ -813,7 +813,7 @@ fn gettoken_query(st: &mut QprsState) -> Result<Tok, PgError> {
                 }
             }
             INOPERAND => {
-                if !st.at_end() && is_label(&st.buf[st.i..], charlen) {
+                if !st.at_end() && is_label(&st.buf[st.i..], charlen)? {
                     if flag != 0 {
                         return Err(PgError::error("modifiers syntax error")
                             .with_sqlstate(ERRCODE_SYNTAX_ERROR));

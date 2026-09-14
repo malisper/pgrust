@@ -13,6 +13,7 @@ types_error = { path = "../../../_support/types/types_error" }
 regex = { path = "../../../_support/types/regex" }
 regex_core = { path = "../../regex/regex_core" }
 mbutils = { path = "../../utils/mb/mbutils" }
+pg_qsort = { path = "../../../_support/pg_qsort" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 ts_locale = { path = "../ts_locale" }
 

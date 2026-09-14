@@ -193,7 +193,8 @@ fn ts_headline_common(fcinfo: &mut Fcinfo, cfg: Option<Oid>, has_opts: bool) -> 
         ));
     }
 
-    let opts = if has_opts {
+    // C: PG_NARGS() > 3 && PG_GETARG_POINTER(3).
+    let opts = if has_opts && fcinfo.nargs() > base + 2 && fcinfo.arg(base + 2).as_usize() != 0 {
         Some(::ts_cache::deserialize_deflist(mcx, text_data(fcinfo, base + 2)?)?)
     } else {
         None

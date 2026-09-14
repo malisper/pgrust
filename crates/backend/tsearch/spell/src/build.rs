@@ -467,7 +467,7 @@ impl<'mcx> IspellDict<'mcx> {
             } else if state == PAE_WAIT_FIND {
                 if t_iseq(c, b'-') {
                     state = PAE_INFIND;
-                } else if t_isalpha(c) || t_iseq(c, b'\'') {
+                } else if t_isalpha(c)? || t_iseq(c, b'\'') {
                     repl.extend_from_slice(&c[..clen]);
                     state = PAE_INREPL;
                 } else if !isspace(c[0]) {
@@ -476,7 +476,7 @@ impl<'mcx> IspellDict<'mcx> {
             } else if state == PAE_INFIND {
                 if t_iseq(c, b',') {
                     state = PAE_WAIT_REPL;
-                } else if t_isalpha(c) {
+                } else if t_isalpha(c)? {
                     find.extend_from_slice(&c[..clen]);
                 } else if !isspace(c[0]) {
                     return Err(config_file_error("syntax error".into()).into());
@@ -484,7 +484,7 @@ impl<'mcx> IspellDict<'mcx> {
             } else if state == PAE_WAIT_REPL {
                 if t_iseq(c, b'-') {
                     break;
-                } else if t_isalpha(c) {
+                } else if t_isalpha(c)? {
                     repl.extend_from_slice(&c[..clen]);
                     state = PAE_INREPL;
                 } else if !isspace(c[0]) {
@@ -493,7 +493,7 @@ impl<'mcx> IspellDict<'mcx> {
             } else if state == PAE_INREPL {
                 if t_iseq(c, b'#') {
                     break;
-                } else if t_isalpha(c) {
+                } else if t_isalpha(c)? {
                     repl.extend_from_slice(&c[..clen]);
                 } else if !isspace(c[0]) {
                     return Err(config_file_error("syntax error".into()).into());
@@ -600,9 +600,8 @@ impl<'mcx> IspellDict<'mcx> {
             };
             self.set_compound_affix_flag_value(&mut key, &sflag, 0)?;
 
-            if let Ok(idx) = self
-                .compound_affix_flags
-                .binary_search_by(|probe| Self::cmpcmdflag(probe, &key))
+            if let Some(idx) =
+                c_bsearch(&self.compound_affix_flags, |probe| Self::cmpcmdflag(probe, &key))
             {
                 flag |= self.compound_affix_flags[idx].value;
             }
@@ -666,13 +665,13 @@ impl<'mcx> IspellDict<'mcx> {
         drop(rd);
 
         if self.compound_affix_flags.len() > 1 {
-            let mut tmp: Vec<CompoundAffixFlag> =
+            let tmp: Vec<CompoundAffixFlag> =
                 self.compound_affix_flags.iter().cloned().collect();
-            tmp.sort_by(Self::cmpcmdflag);
+            let order = pg_qsort_order(&tmp, Self::cmpcmdflag);
             let mut rebuilt: PgVec<CompoundAffixFlag> = PgVec::new_in(mcx);
             rebuilt.try_reserve(tmp.len()).map_err(|_| mcx.oom(tmp.len()))?;
-            for e in tmp {
-                rebuilt.push(e);
+            for &i in &order {
+                rebuilt.push(tmp[i].clone());
             }
             self.compound_affix_flags = rebuilt;
         }
@@ -1497,16 +1496,54 @@ fn sort_spell_by<'mcx>(
 }
 
 // cmpaffix: type first, then strcmp over repl for prefixes / strbcmp for suffixes.
+fn cmpaffix(a1: &Affix, a2: &Affix) -> core::cmp::Ordering {
+    match a1.type_.cmp(&a2.type_) {
+        core::cmp::Ordering::Equal => {}
+        ord => return ord,
+    }
+    if a1.type_ == FF_PREFIX {
+        bcmp(&a1.repl, &a2.repl)
+    } else {
+        strbcmp(&a1.repl, &a2.repl)
+    }
+}
+
+fn ord_to_c(o: core::cmp::Ordering) -> i32 {
+    match o {
+        core::cmp::Ordering::Less => -1,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    }
+}
+
+// C's qsort (pg_qsort) is unstable, and the order it leaves equal affixes in
+// is the order NormalizeSubWord emits their normal forms; sort a permutation
+// with the same comparator so the tie order matches C's.
+fn pg_qsort_order<T>(v: &[T], mut cmp: impl FnMut(&T, &T) -> core::cmp::Ordering) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..v.len()).collect();
+    ::pg_qsort::pg_qsort(&mut order, |&a, &b| ord_to_c(cmp(&v[a], &v[b])));
+    order
+}
+
 fn sort_affix(affixes: &mut PgVec<Affix>) {
-    affixes.as_mut_slice().sort_by(|a1, a2| {
-        match a1.type_.cmp(&a2.type_) {
-            core::cmp::Ordering::Equal => {}
-            ord => return ord,
+    let order = pg_qsort_order(affixes, cmpaffix);
+    let mut taken: Vec<Option<Affix>> = affixes.drain(..).map(Some).collect();
+    for &i in &order {
+        affixes.push(taken[i].take().expect("permutation"));
+    }
+}
+
+// libc bsearch's probe sequence: with duplicate keys C lands on the
+// upper-middle entry, which is the value getCompoundAffixFlagValue returns.
+fn c_bsearch<T>(v: &[T], mut cmp: impl FnMut(&T) -> core::cmp::Ordering) -> Option<usize> {
+    let (mut l, mut u) = (0usize, v.len());
+    while l < u {
+        let idx = (l + u) / 2;
+        match cmp(&v[idx]) {
+            core::cmp::Ordering::Less => l = idx + 1,
+            core::cmp::Ordering::Greater => u = idx,
+            core::cmp::Ordering::Equal => return Some(idx),
         }
-        if a1.type_ == FF_PREFIX {
-            bcmp(&a1.repl, &a2.repl)
-        } else {
-            strbcmp(&a1.repl, &a2.repl)
-        }
-    });
+    }
+    None
 }

@@ -4,7 +4,8 @@ use std::sync::OnceLock;
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::DEFAULT_COLLATION_OID;
 use ::types_error::{
-    PgError, PgResult, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
+    PgError, PgResult, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_CONFIG_FILE_ERROR,
+    ERRCODE_INVALID_PARAMETER_VALUE,
 };
 use ::wchar::PG_UTF8;
 
@@ -49,15 +50,15 @@ fn classify(
     s: &[u8],
     byte_class: unsafe extern "C" fn(c_int) -> c_int,
     wide_class: unsafe extern "C" fn(u32) -> c_int,
-) -> bool {
+) -> PgResult<bool> {
     debug_assert!(!s.is_empty());
     if s.is_empty() {
-        return false;
+        return Ok(false);
     }
     let clen = ::mbutils::pg_mblen_range(s).unwrap_or(1) as usize;
     if clen == 1 || ::pg_locale::database_ctype_is_c() {
         // SAFETY: pure ctype call on an unsigned-char-range value.
-        return unsafe { byte_class(s[0] as c_int) } != 0;
+        return Ok(unsafe { byte_class(s[0] as c_int) } != 0);
     }
     let mut mb = [0u8; 8];
     mb[..clen].copy_from_slice(&s[..clen]);
@@ -65,17 +66,25 @@ fn classify(
     // SAFETY: mb is NUL-terminated; at most WC_BUF_LEN wchars written.
     let n = unsafe { mbstowcs(wc.as_mut_ptr(), mb.as_ptr() as *const c_char, WC_BUF_LEN) };
     if n == usize::MAX {
-        return false;
+        // char2wchar (pg_locale_libc.c): pg_verifymbstr might not return.
+        ::mbutils::pg_verifymbstr(&s[..clen], false)?;
+        return Err(Box::new(
+            PgError::error("invalid multibyte character for locale")
+                .with_sqlstate(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+                .with_hint(
+                    "The server's LC_CTYPE locale is probably incompatible with the database encoding.",
+                ),
+        ));
     }
     // SAFETY: pure wctype call.
-    unsafe { wide_class(wc[0] as u32) != 0 }
+    Ok(unsafe { wide_class(wc[0] as u32) != 0 })
 }
 
-pub fn t_isalpha(s: &[u8]) -> bool {
+pub fn t_isalpha(s: &[u8]) -> PgResult<bool> {
     classify(s, isalpha, iswalpha)
 }
 
-pub fn t_isalnum(s: &[u8]) -> bool {
+pub fn t_isalnum(s: &[u8]) -> PgResult<bool> {
     classify(s, isalnum, iswalnum)
 }
 
@@ -312,4 +321,38 @@ pub fn searchstoplist(s: &StopList<'_>, key: &[u8]) -> bool {
     s.stop
         .binary_search_by(|w| w.as_slice().cmp(key))
         .is_ok()
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use core::ffi::{c_char, c_int};
+
+    extern "C" {
+        fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
+    }
+
+    // char2wchar (pg_locale_libc.c): when mbstowcs rejects the bytes under a
+    // non-C LC_CTYPE, pg_verifymbstr raises 22021 rather than the classifier
+    // answering "not alphanumeric".
+    #[test]
+    fn mbstowcs_failure_raises_invalid_byte_sequence() {
+        let mut set = false;
+        for name in [c"C.UTF-8", c"en_US.UTF-8", c"en_US.utf8"] {
+            // SAFETY: process-global setlocale; this crate has no other test.
+            if !unsafe { setlocale(libc::LC_CTYPE, name.as_ptr()) }.is_null() {
+                set = true;
+                break;
+            }
+        }
+        if !set {
+            return;
+        }
+        ::mbutils::SetDatabaseEncoding(::wchar::PG_UTF8).unwrap();
+        ::pg_locale::set_database_ctype_is_c(false);
+        assert_eq!(super::t_isalnum("é".as_bytes()).unwrap(), true);
+        assert_eq!(super::t_isalpha("1".as_bytes()).unwrap(), false);
+        let err = super::t_isalnum(b"\xc3(").unwrap_err();
+        assert_eq!(err.sqlstate(), ::types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE);
+        assert_eq!(err.message(), "invalid byte sequence for encoding \"UTF8\": 0xc3 0x28");
+    }
 }

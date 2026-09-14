@@ -200,7 +200,7 @@ impl<'mcx> HeadlineJsonState<'mcx> {
         // family — a bogus config must win over bogus options).
         let map = cache_bind::config_map(mcx, cfg)?;
         let prsentry = ::ts_cache::lookup_ts_parser_cache(map.prs_id)?;
-        let opts = if has_opts {
+        let opts = if has_opts && fcinfo.nargs() > base + 2 && fcinfo.arg(base + 2).as_usize() != 0 {
             Some(::ts_cache::deserialize_deflist(
                 mcx,
                 text_data(fcinfo, base + 2)?,

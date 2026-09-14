@@ -20053,6 +20053,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "pg_locale",
+ "pg_qsort",
  "regex",
  "regex_core",
  "stack_depth",

@@ -218,37 +218,37 @@ impl<'s, 'e, 'mcx> QueryParser<'s, 'e, 'mcx> {
         Ok(Some(false))
     }
 
-    fn parse_or_operator(&mut self) -> bool {
+    fn parse_or_operator(&mut self) -> PgResult<bool> {
         let input = self.vals.input;
         let start = self.vals.off;
         if input.len() < start + 2 {
-            return false;
+            return Ok(false);
         }
         if !input[start].eq_ignore_ascii_case(&b'o') || !input[start + 1].eq_ignore_ascii_case(&b'r')
         {
-            return false;
+            return Ok(false);
         }
         let mut ptr = start + 2;
         if ptr >= input.len() {
-            return false;
+            return Ok(false);
         }
         if input[ptr] == b'-'
             || input[ptr] == b'_'
-            || ::ts_locale::t_isalnum(&input[ptr..])
+            || ::ts_locale::t_isalnum(&input[ptr..])?
         {
-            return false;
+            return Ok(false);
         }
         loop {
             ptr += (::mbutils::pg_mblen(&input[ptr..]) as usize).max(1);
             if ptr >= input.len() {
-                return false;
+                return Ok(false);
             }
             if !ts_isspace(input[ptr]) {
                 break;
             }
         }
         self.vals.off = start + 2;
-        true
+        Ok(true)
     }
 
     // gettoken_query_*; Ok(None) = PT_ERR with soft error already recorded.
@@ -399,7 +399,7 @@ impl<'s, 'e, 'mcx> QueryParser<'s, 'e, 'mcx> {
                 PState::WaitOperator => {
                     if self.at_end() {
                         return Ok(Tok::End);
-                    } else if self.parse_or_operator() {
+                    } else if self.parse_or_operator()? {
                         self.state = PState::WaitOperand;
                         return Ok(Tok::Opr(OP_OR));
                     } else if is_ts_operator(self.cur()) {

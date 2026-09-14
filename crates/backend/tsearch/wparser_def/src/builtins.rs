@@ -199,9 +199,16 @@ fn srf_drive(
 ) -> PgResult<Datum> {
     let flinfo = flinfo.unwrap_or_else(|| panic!("{name}: NULL flinfo"));
     if !flinfo.has_fn_extra() {
-        let rows = collect(fcinfo)?;
-        let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(rows));
+        // SRF_FIRSTCALL_INIT precedes the parser lookup (wparser.c).
+        ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        let rows = match collect(fcinfo) {
+            Ok(rows) => rows,
+            Err(e) => {
+                ::funcapi::end_MultiFuncCall(flinfo);
+                return Err(e);
+            }
+        };
+        ::funcapi::per_MultiFuncCall(flinfo).user_fctx = Some(Box::new(rows));
     }
     let fctx = ::funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
@@ -250,6 +257,10 @@ fn parser_lex_descrs(mcx: ::mcx::Mcx<'_>, prsid: ::types_core::Oid) -> PgResult<
         mcx,
         Datum::from_usize(0),
     )?;
+    // tt_process_call: a NULL list is an empty set.
+    if d.as_usize() == 0 {
+        return Ok(Vec::new());
+    }
     // SAFETY: internal-arg contract (fc_prsd_lextype above): lextype methods
     // return *mut Vec<LexDescr> and the caller takes ownership.
     Ok(*unsafe { Box::from_raw(d.as_usize() as *mut Vec<LexDescr>) })

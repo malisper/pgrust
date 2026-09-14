@@ -401,3 +401,65 @@ fn loader_errors_carry_readline_context() {
         "an error inside tsearch_readline has no line text (C dares not print it)"
     );
 }
+
+// spell.c NISortAffixes: qsort (pg_qsort, unstable) orders equal-repl affixes,
+// and NormalizeSubWord emits normal forms in that order. Eight suffixes
+// (seven with repl "ies", one "es" in the middle so the input is not
+// presorted) — oracle: C 18.6 ts_lexize('flies').
+#[test]
+fn equal_repl_affixes_keep_pg_qsort_tie_order() {
+    std::env::set_var(
+        "PGRUST_PGSHAREDIR",
+        format!("{}/fixtures", env!("CARGO_MANIFEST_DIR")),
+    );
+    let mcx = static_mcx();
+    let d = make_dict(mcx, "spell_qsort_ties", "spell_qsort_ties").unwrap();
+    assert_eq!(
+        lexize(mcx, &d, "flies"),
+        Some(vec!["fl", "fle", "fli", "fla", "flo", "fly", "flu"].into_iter().map(String::from).collect())
+    );
+    assert_eq!(lexize(mcx, &d, "fles"), Some(vec!["fl".to_string()]));
+}
+
+// spell.c getCompoundAffixFlagValue: bsearch over CompoundAffixFlags with
+// duplicate flag names picks libc's upper-middle probe (3 entries: the
+// second; 4 entries: the third), not the last. Oracle: C 18.6 ts_lexize.
+#[test]
+fn duplicate_compound_flag_names_resolve_as_libc_bsearch() {
+    std::env::set_var(
+        "PGRUST_PGSHAREDIR",
+        format!("{}/fixtures", env!("CARGO_MANIFEST_DIR")),
+    );
+    let mcx = static_mcx();
+    let mut failures = Vec::new();
+    let both: &[(&str, Option<&[&str]>)] = &[
+        ("foo", Some(&["foo"])),
+        ("foobar", Some(&["foo", "bar"])),
+        ("barfoo", Some(&["bar", "foo"])),
+    ];
+    let only_in_compound: &[(&str, Option<&[&str]>)] =
+        &[("foo", Some(&["foo"])), ("foobar", None), ("barfoo", None)];
+    for (name, cases) in [
+        ("spell_cmpflag_dup2", both),
+        ("spell_cmpflag_dup3", both),
+        ("spell_cmpflag_dup4", only_in_compound),
+        ("spell_cmpflag_dup5", both),
+    ] {
+        let d = make_dict(mcx, name, name).unwrap();
+        check(mcx, &d, cases, &mut failures, name);
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+// spell.c CheckAffix: pg_regexec results other than REG_OKAY (REG_ETOOBIG
+// from the execution stack guard among them) mean the affix does not apply;
+// they never abort lexization.
+#[test]
+fn regexec_failure_is_no_match_not_an_error() {
+    use ::regex::{RegexFailure, RegexecResult};
+    assert!(crate::normalize::regexec_applies(&RegexecResult::Matched));
+    assert!(!crate::normalize::regexec_applies(&RegexecResult::NoMatch));
+    assert!(!crate::normalize::regexec_applies(&RegexecResult::Failed(RegexFailure {
+        message: "regular expression is too complex".to_string(),
+    })));
+}

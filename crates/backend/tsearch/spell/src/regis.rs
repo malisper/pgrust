@@ -32,7 +32,7 @@ pub fn rs_is_regis(str: &[u8]) -> PgResult<bool> {
     while off < str.len() {
         let c = &str[off..];
         if state == RS_IN_WAIT {
-            if t_isalpha(c) {
+            if t_isalpha(c)? {
             } else if t_iseq(c, b'[') {
                 state = RS_IN_ONEOF;
             } else {
@@ -41,13 +41,13 @@ pub fn rs_is_regis(str: &[u8]) -> PgResult<bool> {
         } else if state == RS_IN_ONEOF {
             if t_iseq(c, b'^') {
                 state = RS_IN_NONEOF;
-            } else if t_isalpha(c) {
+            } else if t_isalpha(c)? {
                 state = RS_IN_ONEOF_IN;
             } else {
                 return Ok(false);
             }
         } else if state == RS_IN_ONEOF_IN || state == RS_IN_NONEOF {
-            if t_isalpha(c) {
+            if t_isalpha(c)? {
             } else if t_iseq(c, b']') {
                 state = RS_IN_WAIT;
             } else {
@@ -77,7 +77,7 @@ pub fn rs_compile<'mcx>(mcx: Mcx<'mcx>, issuffix: bool, str: &[u8]) -> PgResult<
         let ch = &c[..clen];
 
         if state == RS_IN_WAIT {
-            if t_isalpha(c) {
+            if t_isalpha(c)? {
                 push_node(mcx, &mut r.nodes, RegisNodeKind::OneOf, &mut cur)?;
                 let idx = cur.expect("node started");
                 copy_char_into(mcx, &mut r.nodes[idx].data, ch)?;
@@ -91,7 +91,7 @@ pub fn rs_compile<'mcx>(mcx: Mcx<'mcx>, issuffix: bool, str: &[u8]) -> PgResult<
             if t_iseq(c, b'^') {
                 r.nodes[cur.expect("node started")].kind = RegisNodeKind::NoneOf;
                 state = RS_IN_NONEOF;
-            } else if t_isalpha(c) {
+            } else if t_isalpha(c)? {
                 let idx = cur.expect("node started");
                 copy_char_into(mcx, &mut r.nodes[idx].data, ch)?;
                 state = RS_IN_ONEOF_IN;
@@ -99,7 +99,7 @@ pub fn rs_compile<'mcx>(mcx: Mcx<'mcx>, issuffix: bool, str: &[u8]) -> PgResult<
                 return Err(invalid_regis_pattern(str).into());
             }
         } else if state == RS_IN_ONEOF_IN || state == RS_IN_NONEOF {
-            if t_isalpha(c) {
+            if t_isalpha(c)? {
                 let idx = cur.expect("node started");
                 copy_char_into(mcx, &mut r.nodes[idx].data, ch)?;
             } else if t_iseq(c, b']') {

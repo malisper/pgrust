@@ -9,7 +9,7 @@ use ::mcx::Mcx;
 use ::ts_cache::DefListItem;
 use ::ts_parse::headline::{HeadlineParsedText, HeadlineWordEntry};
 use ::types_error::{
-    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE,
 };
 
 use crate::parser::{
@@ -535,22 +535,10 @@ fn opt_err(msg: String) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
-// pg_strtoint32 (numutils.c) over the option value's raw bytes: it accepts
-// only ASCII (whitespace, sign, digits, '_'), so a value that is not UTF-8
-// (SQL_ASCII database, `chr(171)`) is the syntax error, whose message
-// quotes the bytes verbatim.
+// pg_strtoint32 (numutils.c) over the option value's raw bytes (SQL_ASCII
+// database, `chr(171)`): the message quotes the bytes verbatim.
 fn headline_int_opt(s: &[u8]) -> PgResult<i32> {
-    match core::str::from_utf8(s) {
-        Ok(s) => numutils::pg_strtoint32(s),
-        Err(_) => {
-            let mut m = b"invalid input syntax for type integer: \"".to_vec();
-            m.extend_from_slice(s);
-            m.push(b'"');
-            Err(Box::new(
-                PgError::error_raw_message(m).with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION),
-            ))
-        }
-    }
+    numutils::pg_strtoint32_bytes(s)
 }
 
 // prsd_headline (wparser_def.c) body over deserialize_deflist items.
