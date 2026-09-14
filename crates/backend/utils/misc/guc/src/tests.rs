@@ -11,6 +11,16 @@ thread_local! {
     static SENT: RefCell<Vec<(u8, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
 }
 
+// Emit-log-hook capture; the hook is per thread and one test installs it.
+static EMITTED: std::sync::Mutex<Vec<types_error::PgError>> = std::sync::Mutex::new(Vec::new());
+
+// A role pg_parameter_aclcheck_set denies (see setup).
+const DENIED_ROLE: types_core::Oid = 0xB168;
+
+fn capture_emitted(error: &types_error::PgError, _output_to_server: &mut bool) {
+    EMITTED.lock().unwrap_or_else(|e| e.into_inner()).push(error.clone());
+}
+
 // application_name's value backing (guc_tables::backing) is process-global;
 // tests that read or write it must not overlap across test threads.
 static APPLICATION_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -42,8 +52,16 @@ fn setup() {
         crate::init_seams();
         xact_seams::is_in_parallel_mode::set(|| false);
         scalar_seams::parse_bool::set(test_parse_bool);
-        aclchk_seams::pg_parameter_aclcheck_set::set(|_, _| Ok(true));
+        aclchk_seams::pg_parameter_aclcheck_set::set(|_, role| Ok(role != DENIED_ROLE));
         mbutils_seams::get_database_encoding::set(|| 6);
+        mbutils_seams::pg_server_to_client::set(|mcx, s| {
+            if !s.starts_with(b"conv:") {
+                return Ok(None);
+            }
+            let mut out = mcx::vec_with_capacity_in(mcx, s.len()).expect("test alloc");
+            out.extend(s.iter().map(u8::to_ascii_uppercase));
+            Ok(Some(out))
+        });
         pqcomm_seams::pq_putmessage::set(|msgtype, body| {
             SENT.with(|s| s.borrow_mut().push((msgtype, body.to_vec())));
             Ok(0)
@@ -1190,4 +1208,106 @@ fn describe_config_rows_match_c() {
         assert_ne!(guc_name_compare(a, b), std::cmp::Ordering::Greater, "{a} before {b}");
     }
     assert!(lines.len() >= 300, "only {} rows", lines.len());
+}
+
+// reapply_stacked_values (guc.c:5054): oldvarstack is captured before the
+// recursion, so an entry the recursion pushed takes this level's nest level
+// even when this level's own assignment was rejected.
+#[test]
+fn reapply_adjusts_recursion_pushed_entry_when_own_assignment_fails() {
+    setup();
+    AtStart_GUC();
+    assert_eq!(set_session("b168nest.v", Some("one")).unwrap(), 1);
+    let inner = NewGUCNestLevel();
+    let rc = set_config_option_ext(
+        "b168nest.v",
+        Some("two"),
+        PGC_USERSET,
+        PGC_S_SESSION,
+        DENIED_ROLE,
+        GUC_ACTION_SET,
+        true,
+        ErrorLevel(0),
+        false,
+    )
+    .unwrap();
+    assert_eq!(rc, 1);
+    DefineCustomStringVariable("b168nest.v", Some("desc"), None, None, PGC_SUSET, 0).unwrap();
+    assert_eq!(show("b168nest.v"), Some("one".to_string()));
+    AtEOXact_GUC(false, inner);
+    assert_eq!(show("b168nest.v"), Some(String::new()));
+    AtEOXact_GUC(true, 1);
+}
+
+// MarkGUCPrefixReserved (guc.c:5298): the removal WARNINGs come in
+// guc_hashtab bucket order (C 18.6 on these names: zed b c a f g d e h
+// long_name_x) and run the error-context callbacks like any ereport.
+#[test]
+fn prefix_reservation_warnings_in_hash_order_with_context() {
+    setup();
+    for name in ["a", "b", "c", "d", "e", "f", "g", "h", "long_name_x", "zed"] {
+        assert_eq!(set_session(&format!("postgres_fdw.{name}"), Some("1")).unwrap(), 1);
+    }
+    let callback = elog::push_emit_context_callback(Box::new(|e| {
+        e.add_context_line("SQL statement \"LOAD 'postgres_fdw'\"");
+    }));
+    let prev = elog::set_emit_log_hook(Some(capture_emitted));
+    MarkGUCPrefixReserved("postgres_fdw");
+    elog::set_emit_log_hook(prev);
+    elog::pop_emit_context_callback(callback);
+    let emitted = std::mem::take(&mut *EMITTED.lock().unwrap_or_else(|e| e.into_inner()));
+    let names: Vec<String> = emitted
+        .iter()
+        .map(|e| {
+            assert_eq!(e.level, types_error::WARNING);
+            assert_eq!(e.detail(), Some("\"postgres_fdw\" is now a reserved prefix."));
+            assert_eq!(e.context(), Some("SQL statement \"LOAD 'postgres_fdw'\""));
+            e.message()
+                .trim_start_matches("invalid configuration parameter name \"postgres_fdw.")
+                .trim_end_matches("\", removing it")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(names, ["zed", "b", "c", "a", "f", "g", "d", "e", "h", "long_name_x"]);
+}
+
+// ReportGUCOption (guc.c:2645) sends both strings through pq_sendstring's
+// client_encoding conversion.
+#[test]
+fn parameter_status_is_sent_in_client_encoding() {
+    setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    elog::config::set_where_to_send_output(types_dest::CommandDest::Remote);
+    begin_reporting_guc_options();
+    SENT.with(|s| s.borrow_mut().clear());
+    assert_eq!(set_session("application_name", Some("conv:psql")).unwrap(), 1);
+    report_changed_guc_options();
+    let frames = SENT.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].1, b"application_name\0CONV:PSQL\0".to_vec());
+    assert_eq!(show("application_name"), Some("conv:psql".to_string()));
+}
+
+// guc.c:5245: a postmaster-time (shared_preload_libraries) custom definition
+// survives into a child's rebuilt registry, ahead of its reserved prefix.
+#[test]
+fn inherited_custom_definitions_survive_child_registry_rebuild() {
+    setup();
+    DefineCustomStringVariable("b168pre.name", Some("desc"), None, Some("boot"), PGC_USERSET, 0)
+        .unwrap();
+    MarkGUCPrefixReserved("b168pre");
+    let definitions = custom_string_definitions();
+    assert!(definitions.iter().any(|d| d.name == "b168pre.name"));
+    let prefixes = reserved_class_prefixes();
+    std::thread::spawn(move || {
+        setup();
+        inherit_reserved_class_prefixes(&prefixes);
+        inherit_custom_string_definitions(&definitions);
+        crate::store::initialize_guc_options_for_child(&[]).unwrap();
+        assert_eq!(show("b168pre.name"), Some("boot".to_string()));
+        assert_eq!(set_session("b168pre.name", Some("x")).unwrap(), 1);
+        assert_eq!(show("b168pre.name"), Some("x".to_string()));
+    })
+    .join()
+    .unwrap();
 }

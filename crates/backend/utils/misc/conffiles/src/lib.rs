@@ -16,13 +16,24 @@ fn is_absolute_path(location: &str) -> bool {
 // separators without touching the filesystem, so not-yet-existing paths work.
 fn canonicalize_path_lexically(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
+    let absolute = path.has_root();
+    let mut depth = 0usize;
     for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                out.pop();
+                if depth > 0 {
+                    out.pop();
+                    depth -= 1;
+                } else if !absolute {
+                    // path.c:488: a relative path keeps its irreducible "..".
+                    out.push("..");
+                }
             }
-            Component::Normal(part) => out.push(part),
+            Component::Normal(part) => {
+                out.push(part);
+                depth += 1;
+            }
             Component::RootDir | Component::Prefix(_) => out.push(component.as_os_str()),
         }
     }
@@ -56,7 +67,8 @@ fn resolve(
         Err(error.into())
     } else {
         if elog::message_level_is_interesting(elevel) {
-            elog::emit_error_report_for(&error);
+            // ereport: error-context callbacks (the hba tokenizer's line) run.
+            let _ = elog::ThrowErrorData(error);
         }
         Ok(ConfFilesInDir {
             filenames: Vec::new(),
@@ -136,10 +148,15 @@ pub fn get_conf_files_in_dir(
         }
 
         let filename = canonicalize_path_lexically(&directory.join(&name));
-        // get_dirent_type(filename, de, look_through_symlinks=true, elevel).
-        match std::fs::metadata(&filename) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => filenames.push(filename),
+        // get_dirent_type(filename, de, look_through_symlinks=true, elevel):
+        // d_type answers without a stat; symlinks (and DT_UNKNOWN) stat.
+        let is_dir = match entry.file_type() {
+            Ok(file_type) if !file_type.is_symlink() => Ok(file_type.is_dir()),
+            _ => std::fs::metadata(&filename).map(|metadata| metadata.is_dir()),
+        };
+        match is_dir {
+            Ok(true) => {}
+            Ok(false) => filenames.push(filename),
             Err(error) => {
                 let pg_error = io_error(
                     elevel,

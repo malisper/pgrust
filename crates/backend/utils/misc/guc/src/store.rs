@@ -163,7 +163,8 @@ pub fn initialize_guc_options() -> PgResult<()> {
 // overwrite — other threads (the postmaster's maybe_adjust_io_workers) read
 // them concurrently.
 pub fn initialize_guc_options_for_child(snapshot: &[NondefaultGuc]) -> PgResult<()> {
-    initialize_guc_options_impl(|name| !snapshot.iter().any(|v| v.name == name))
+    initialize_guc_options_impl(|name| !snapshot.iter().any(|v| v.name == name))?;
+    crate::redefine_inherited_custom_variables()
 }
 
 // Same suppression contract, keyed on a shared base snapshot (guc::layers):
@@ -172,7 +173,8 @@ pub fn initialize_guc_options_for_child(snapshot: &[NondefaultGuc]) -> PgResult<
 pub fn initialize_guc_options_for_child_base(
     base: &crate::layers::GucBaseSnapshot,
 ) -> PgResult<()> {
-    initialize_guc_options_impl(|name| !base.contains(name))
+    initialize_guc_options_impl(|name| !base.contains(name))?;
+    crate::redefine_inherited_custom_variables()
 }
 
 fn initialize_guc_options_impl(publish: impl Fn(&str) -> bool) -> PgResult<()> {

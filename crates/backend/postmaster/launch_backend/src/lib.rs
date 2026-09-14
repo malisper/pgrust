@@ -355,6 +355,7 @@ macro_rules! inherited {
             // and keeps their GUC prefixes reserved.
             file_list: dfmgr::FileList,
             reserved_class_prefixes: Vec<String>,
+            custom_string_definitions: Vec<guc::CustomStringDefinition>,
             $($field: $ty,)+
         }
         impl Inherited {
@@ -364,6 +365,7 @@ macro_rules! inherited {
                     max_safe_fds: fd::max_safe_fds(),
                     file_list: dfmgr::file_list_snapshot(),
                     reserved_class_prefixes: guc::reserved_class_prefixes(),
+                    custom_string_definitions: guc::custom_string_definitions(),
                     $($field: init_small::globals::$get(),)+
                 }
             }
@@ -374,6 +376,7 @@ macro_rules! inherited {
                 fd::vfd::set_max_safe_fds_value(self.max_safe_fds);
                 dfmgr::file_list_inherit(&self.file_list);
                 guc::inherit_reserved_class_prefixes(&self.reserved_class_prefixes);
+                guc::inherit_custom_string_definitions(&self.custom_string_definitions);
                 $(init_small::globals::$set(self.$field);)+
             }
         }

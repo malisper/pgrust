@@ -117,7 +117,8 @@ pub fn ParseConfigFile(
 
     // Reject direct recursion (canonicalization above makes strcmp likely to
     // match; indirect recursion is caught by the depth limit).
-    if calling_file.is_some_and(|calling_file| abs_path == calling_file) {
+    // strcmp, not Path equality: a trailing separator is a different file.
+    if calling_file.is_some_and(|calling_file| abs_path.as_os_str() == calling_file.as_os_str()) {
         let error = ereport(elevel)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(format!(

@@ -29,6 +29,21 @@ fn absolute_location_forms() {
         PathBuf::from("/etc/shared/extra.conf")
     );
 
+    // path.c:488: a relative calling file (ALTER SYSTEM's
+    // "postgresql.auto.conf") keeps an irreducible leading "..".
+    assert_eq!(
+        absolute_config_location("../parent.conf", Some(Path::new("postgresql.auto.conf"))),
+        PathBuf::from("../parent.conf")
+    );
+    assert_eq!(
+        absolute_config_location("../dir/../p.conf", Some(Path::new("postgresql.auto.conf"))),
+        PathBuf::from("../p.conf")
+    );
+    assert_eq!(
+        absolute_config_location("../../x.conf", Some(Path::new("/postgresql.conf"))),
+        PathBuf::from("/x.conf")
+    );
+
     init_small::globals::SetDataDir("/var/lib/pgdata");
     assert_eq!(
         absolute_config_location("postgresql.auto.conf", None),
@@ -122,5 +137,51 @@ fn error_surface_matches_c() {
     assert_eq!(
         out.err_msg.as_deref(),
         Some("could not open directory \"/nonexistent_conffiles_test_dir\"")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn subdirectory_is_skipped_by_dirent_type_without_stat() {
+    use std::os::unix::fs::PermissionsExt;
+    setup();
+    let dir = tempdir("noexec");
+    std::fs::create_dir(dir.join("sub.conf")).unwrap();
+    // No search permission: stat of the entries fails, d_type still answers.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let out = get_conf_files_in_dir(dir.to_str().unwrap(), None, LOG);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = out.unwrap();
+    assert_eq!(out.err_msg, None);
+    assert!(out.filenames.is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// Emit-log-hook capture; the hook is per thread and one test installs it.
+static EMITTED: std::sync::Mutex<Vec<types_error::PgError>> = std::sync::Mutex::new(Vec::new());
+
+fn capture_emitted(error: &types_error::PgError, _output_to_server: &mut bool) {
+    EMITTED.lock().unwrap_or_else(|e| e.into_inner()).push(error.clone());
+}
+
+#[test]
+fn soft_error_runs_error_context_callbacks() {
+    setup();
+    let callback = elog::push_emit_context_callback(Box::new(|e| {
+        e.add_context_line("line 7 of configuration file \"/x/pg_hba.conf\"");
+    }));
+    let prev = elog::set_emit_log_hook(Some(capture_emitted));
+    let out = get_conf_files_in_dir("/nonexistent_conffiles_ctx_dir", None, LOG).unwrap();
+    elog::set_emit_log_hook(prev);
+    elog::pop_emit_context_callback(callback);
+    assert!(out.err_msg.is_some());
+    let emitted = std::mem::take(&mut *EMITTED.lock().unwrap_or_else(|e| e.into_inner()));
+    assert_eq!(emitted.len(), 1);
+    assert!(emitted[0]
+        .message()
+        .starts_with("could not open configuration directory \"/nonexistent_conffiles_ctx_dir\""));
+    assert_eq!(
+        emitted[0].context(),
+        Some("line 7 of configuration file \"/x/pg_hba.conf\"")
     );
 }

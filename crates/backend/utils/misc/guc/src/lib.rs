@@ -88,15 +88,62 @@ thread_local! {
     // session-scoped TLS here, seeded from the postmaster's list at child
     // launch the way fork inherits it (shared_preload_libraries _PG_init
     // reservations hold in every backend).
-    static RESERVED_CLASS_PREFIX: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static RESERVED_CLASS_PREFIX: RefCell<InheritedCustomState> = const {
+        RefCell::new(InheritedCustomState { prefixes: Vec::new(), definitions: Vec::new() })
+    };
+}
+
+// reserved_class_prefix plus the DefineCustomStringVariable calls made on
+// this thread; the postmaster's copy is what a child inherits.
+struct InheritedCustomState {
+    prefixes: Vec<String>,
+    definitions: Vec<CustomStringDefinition>,
 }
 
 pub fn reserved_class_prefixes() -> Vec<String> {
-    RESERVED_CLASS_PREFIX.with(|s| s.borrow().clone())
+    RESERVED_CLASS_PREFIX.with(|s| s.borrow().prefixes.clone())
 }
 
 pub fn inherit_reserved_class_prefixes(prefixes: &[String]) {
-    RESERVED_CLASS_PREFIX.with(|s| *s.borrow_mut() = prefixes.to_vec());
+    RESERVED_CLASS_PREFIX.with(|s| s.borrow_mut().prefixes = prefixes.to_vec());
+}
+
+// A DefineCustomStringVariable call, replayable into a child's rebuilt
+// registry: C's definitions live in the postmaster's address space and
+// survive fork, so a shared_preload_libraries definition holds in every
+// backend (guc.c:5245).
+#[derive(Clone)]
+pub struct CustomStringDefinition {
+    pub name: &'static str,
+    pub short_desc: Option<&'static str>,
+    pub long_desc: Option<&'static str>,
+    pub boot_val: Option<String>,
+    pub context: GucContext,
+    pub flags: i32,
+}
+
+pub fn custom_string_definitions() -> Vec<CustomStringDefinition> {
+    RESERVED_CLASS_PREFIX.with(|s| s.borrow().definitions.clone())
+}
+
+pub fn inherit_custom_string_definitions(definitions: &[CustomStringDefinition]) {
+    RESERVED_CLASS_PREFIX.with(|s| s.borrow_mut().definitions = definitions.to_vec());
+}
+
+// Re-runs the inherited definitions into a freshly built child registry
+// (before the value restore, which needs the real variable to exist).
+pub fn redefine_inherited_custom_variables() -> PgResult<()> {
+    for d in custom_string_definitions() {
+        define_custom_string_variable(
+            d.name,
+            d.short_desc,
+            d.long_desc,
+            d.boot_val.as_deref(),
+            d.context,
+            d.flags,
+        )?;
+    }
+    Ok(())
 }
 
 pub fn reset_guc_check_error() {
@@ -346,7 +393,11 @@ pub fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResul
             return Ok(false);
         }
         let reserved = RESERVED_CLASS_PREFIX.with(|s| {
-            s.borrow().iter().find(|p| p.len() == class_len && name.starts_with(p.as_str())).cloned()
+            s.borrow()
+                .prefixes
+                .iter()
+                .find(|p| p.len() == class_len && name.starts_with(p.as_str()))
+                .cloned()
         });
         if let Some(rcprefix) = reserved {
             if !skip_errors {
@@ -378,6 +429,28 @@ pub fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResul
 // their original order (reapply_stacked_values, guc.c:5041); a
 // non-placeholder of that name is "attempt to redefine parameter".
 pub fn DefineCustomStringVariable(
+    name: &'static str,
+    short_desc: Option<&'static str>,
+    long_desc: Option<&'static str>,
+    boot_val: Option<&str>,
+    context: GucContext,
+    flags: i32,
+) -> PgResult<()> {
+    define_custom_string_variable(name, short_desc, long_desc, boot_val, context, flags)?;
+    RESERVED_CLASS_PREFIX.with(|s| {
+        s.borrow_mut().definitions.push(CustomStringDefinition {
+            name,
+            short_desc,
+            long_desc,
+            boot_val: boot_val.map(str::to_owned),
+            context,
+            flags,
+        })
+    });
+    Ok(())
+}
+
+fn define_custom_string_variable(
     name: &'static str,
     short_desc: Option<&'static str>,
     long_desc: Option<&'static str>,
@@ -484,6 +557,8 @@ fn reapply_stacked_values(
         }
     };
     if let Some(entry) = stack {
+        // guc.c:5054 oldvarstack: captured before the recursion.
+        let depth_before = store::with_store(|reg| reg.stack_depth(name)).unwrap_or(0);
         let prior = stack_string(&entry.prior);
         reapply_stacked_values(
             name,
@@ -494,7 +569,6 @@ fn reapply_stacked_values(
             entry.source,
             entry.srole,
         );
-        let depth_before = store::with_store(|reg| reg.stack_depth(name)).unwrap_or(0);
         match entry.state {
             model::GUC_SAVE => apply(curvalue, curscontext, cursource, cursrole, GUC_ACTION_SAVE),
             model::GUC_SET => apply(curvalue, curscontext, cursource, cursrole, GUC_ACTION_SET),
@@ -535,21 +609,26 @@ fn reapply_stacked_values(
     }
 }
 
+const GUC_HASHTAB_INIT_BUCKETS: u32 = 512;
+
 // MarkGUCPrefixReserved (guc.c:5285): purge existing placeholders under the
 // prefix (WARNING each), then reserve the prefix against future placeholders.
 pub fn MarkGUCPrefixReserved(class_name: &str) {
-    let removed =
+    let mut removed =
         store::with_store_mut(|reg| reg.remove_reserved_placeholders(class_name)).unwrap_or_default();
+    // guc.c:5298 walks guc_hashtab: dynahash bucket order (guc_name_hash
+    // over the 512-bucket table build_guc_variables sizes for 18.6; a bucket
+    // chain keeps insertion order). Exact until the table's first split.
+    removed.sort_by_key(|name| guc_name_hash(name) & (GUC_HASHTAB_INIT_BUCKETS - 1));
     for name in removed {
-        let e = ereport(WARNING)
+        let _ = ereport(WARNING)
             .errcode(types_error::ERRCODE_INVALID_NAME)
             .errmsg(format!("invalid configuration parameter name \"{name}\", removing it"))
             .errdetail(format!("\"{class_name}\" is now a reserved prefix."))
-            .into_error();
-        elog::emit_error_report_for(&e);
+            .finish(types_error::ErrorLocation::new(file!(), line!() as i32, "MarkGUCPrefixReserved"));
     }
     RESERVED_CLASS_PREFIX.with(|s| {
-        let mut prefixes = s.borrow_mut();
+        let prefixes = &mut s.borrow_mut().prefixes;
         if !prefixes.iter().any(|p| p == class_name) {
             prefixes.push(class_name.to_string());
         }

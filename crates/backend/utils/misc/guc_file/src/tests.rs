@@ -323,3 +323,21 @@ fn process_config_file_routes_through_guc_seam() {
     guc_file_seams::process_config_file::call(PGC_SIGHUP).unwrap();
     assert_eq!(INTERNAL_CALLS.with(Cell::get), before + 1);
 }
+
+#[test]
+fn trailing_separator_is_not_recursion() {
+    // guc-file.l:226 strcmp: "main.conf/" is a different name, so the open
+    // fails with ENOTDIR and include_if_exists skips it.
+    setup();
+    let dir = scratch_dir("trailsep");
+    let main = dir.join("main.conf");
+    std::fs::write(
+        &main,
+        format!("include_if_exists '{}/'\nwork_mem = 3MB\n", main.display()),
+    )
+    .unwrap();
+    let mut vars = Vec::new();
+    let ok = ParseConfigFile(main.to_str().unwrap(), true, None, 0, 0, LOG, &mut vars).unwrap();
+    assert!(ok);
+    assert_eq!(settings(&vars), vec![("work_mem".into(), "3MB".into())]);
+}

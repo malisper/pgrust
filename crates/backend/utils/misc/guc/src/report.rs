@@ -103,16 +103,25 @@ fn report_changed_haswork() {
 // ReportGUCOption's transmit + last_reported refresh (guc.c:2634), applied
 // after the store borrow drops (the byte sink may re-enter the store).
 fn transmit_and_remember(pending: &[(String, String)]) {
-    for (name, val) in pending {
-        let mut body = Vec::with_capacity(name.len() + val.len() + 2);
-        body.extend_from_slice(name.as_bytes());
-        body.push(0);
-        body.extend_from_slice(val.as_bytes());
-        body.push(0);
-        let _ = pqcomm_seams::pq_putmessage::call(PQMSG_PARAMETER_STATUS, &body);
-    }
     if pending.is_empty() {
         return;
+    }
+    // pq_sendstring (pqformat.c:200): both strings go out in client_encoding.
+    // C ereports an untranslatable character and then re-reports the value
+    // at every ReadyForQuery, wedging the session (18.6 guc.c:2645);
+    // the raw bytes stand here instead.
+    let mut cx = mcx::MemoryContext::new("ParameterStatus conversion");
+    for (name, val) in pending {
+        let mut body = Vec::with_capacity(name.len() + val.len() + 2);
+        for s in [name.as_bytes(), val.as_bytes()] {
+            match to_client_encoding(cx.mcx(), s) {
+                Some(converted) => body.extend_from_slice(&converted),
+                None => body.extend_from_slice(s),
+            }
+            body.push(0);
+        }
+        cx.reset();
+        let _ = pqcomm_seams::pq_putmessage::call(PQMSG_PARAMETER_STATUS, &body);
     }
     with_store_mut(|reg| {
         for (name, val) in pending {
@@ -121,6 +130,13 @@ fn transmit_and_remember(pending: &[(String, String)]) {
             }
         }
     });
+}
+
+fn to_client_encoding<'mcx>(mcx: mcx::Mcx<'mcx>, s: &[u8]) -> Option<mcx::PgVec<'mcx, u8>> {
+    if !mbutils_seams::pg_server_to_client::is_installed() {
+        return None;
+    }
+    mbutils_seams::pg_server_to_client::call(mcx, s).ok().flatten()
 }
 
 fn needs_report(last_reported: Option<&str>, val: &str) -> bool {
