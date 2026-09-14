@@ -21,16 +21,31 @@ pub mod matches;
 
 pub const MAX_CACHED_RES: usize = 32;
 
-struct CachedRe<'mcx> {
-    cre_pat: PgVec<'mcx, u8>,
+// regexp.c:204-231: each cached regexp owns a "RegexpMemoryContext" child of
+// the cache context, identified by its pattern; cre_pat lives in it and drops
+// before it (field order). The engine's own storage stays in plain Vecs.
+struct CachedRe {
+    cre_pat: PgVec<'static, u8>,
     cre_flags: i32,
     cre_collation: Oid,
     re: RegexCompiled,
+    cre_context: mcx::PinnedContext,
+}
+
+impl CachedRe {
+    fn new(parent: Mcx<'_>, pattern: &[u8], cflags: i32, collation: Oid, re: RegexCompiled) -> PgResult<Self> {
+        let cre_context = mcx::PinnedContext::new(parent.context().new_child("RegexpMemoryContext"));
+        // SAFETY: cre_pat is the only borrower and is declared before (drops
+        // before) cre_context.
+        let cre_pat = slice_in(unsafe { cre_context.handle() }, pattern)?;
+        cre_context.set_ident(Some(&String::from_utf8_lossy(pattern)));
+        Ok(CachedRe { cre_pat, cre_flags: cflags, cre_collation: collation, re, cre_context })
+    }
 }
 
 struct ReCache<'mcx> {
     mcx: Mcx<'mcx>,
-    entries: PgVec<'mcx, CachedRe<'mcx>>,
+    entries: PgVec<'mcx, CachedRe>,
 }
 
 mcx::bind!(ReCacheTy => ReCache<'mcx>);
@@ -106,20 +121,17 @@ pub fn RE_compile_and_cache(
     drop(wide_pattern);
 
     let inserted: PgResult<()> = with_cache(|cache| {
-        let pat_copy = slice_in(cache.mcx, pattern)?;
+        let entry = CachedRe::new(cache.mcx, pattern, cflags, collation, compiled.clone())?;
         cache
             .entries
             .try_reserve(1)
-            .map_err(|_| cache.mcx.oom(core::mem::size_of::<CachedRe<'_>>()))?;
+            .map_err(|_| cache.mcx.oom(core::mem::size_of::<CachedRe>()))?;
         if cache.entries.len() >= MAX_CACHED_RES {
-            // C: MemoryContextDelete(re_array[num_res].cre_context); here the
+            // C: MemoryContextDelete(re_array[num_res].cre_context); the
             // engine state frees when the last RegexCompiled clone drops.
             cache.entries.pop();
         }
-        cache.entries.insert(
-            0,
-            CachedRe { cre_pat: pat_copy, cre_flags: cflags, cre_collation: collation, re: compiled.clone() },
-        );
+        cache.entries.insert(0, entry);
         Ok(())
     });
     if let Err(e) = inserted {

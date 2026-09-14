@@ -871,6 +871,7 @@ dependencies = [
  "funcapi_srf",
  "mbutils",
  "mcx",
+ "mcxt_stats",
  "postgres_seams",
  "regex",
  "regex_core",

@@ -1108,3 +1108,42 @@ fn session_cache_reclaims_complete_context() {
         assert_eq!(mcx::global_footprint::bytes(), before);
     }
 }
+
+// regexp.c:204-231: every cached regexp owns a "RegexpMemoryContext" child of
+// RegexpCacheMemoryContext identified by its pattern, which
+// pg_backend_memory_contexts lists; the pre-fix port kept only the cache root.
+// Audit fp-regex-regc_nfa-p2#1.
+#[test]
+fn cached_regexps_own_an_identified_memory_context() {
+    utf8();
+    mcxt_stats::init_seams();
+    let cx = MemoryContext::new("test");
+    let m = cx.mcx();
+    let f = REG_ADVANCED | REG_NOSUB;
+
+    RE_compile_and_cache(m, b"b150_a(b)c", f, C).unwrap();
+    RE_compile_and_cache(m, b"^b150_x.*z$", f, C).unwrap();
+    let forest = mcxt_stats::backend_context_forest();
+    let cache = forest
+        .iter()
+        .find(|t| t.name == "RegexpCacheMemoryContext")
+        .unwrap_or_else(|| panic!("no cache root; roots: {:?}", forest.iter().map(|t| t.name).collect::<Vec<_>>()));
+    let mut idents: Vec<(&str, Option<String>)> =
+        cache.children.iter().map(|c| (c.name, c.ident.clone())).collect();
+    idents.sort();
+    assert_eq!(
+        idents,
+        vec![
+            ("RegexpMemoryContext", Some("^b150_x.*z$".to_string())),
+            ("RegexpMemoryContext", Some("b150_a(b)c".to_string())),
+        ]
+    );
+
+    for i in 0..MAX_CACHED_RES {
+        RE_compile_and_cache(m, format!("b150_evict_{i}").as_bytes(), f, C).unwrap();
+    }
+    let forest = mcxt_stats::backend_context_forest();
+    let cache = forest.iter().find(|t| t.name == "RegexpCacheMemoryContext").unwrap();
+    assert_eq!(cache.children.len(), MAX_CACHED_RES);
+    assert!(!cache.children.iter().any(|c| c.ident.as_deref() == Some("b150_a(b)c")), "evicted entry's context deleted");
+}
