@@ -204,7 +204,11 @@ impl Drop for FileSet {
     // aborts. Skip then; the startup pgsql_tmp reaper removes the leak.
     fn drop(&mut self) {
         if crate::vfd::fd_tls_alive() {
+            // dsm.c:813: the last-detach cleanup runs with interrupts held so
+            // a cancel cannot abandon the remaining files.
+            init_small::globals::HoldInterrupts();
             let _ = self.delete_all();
+            init_small::globals::ResumeInterrupts();
         }
     }
 }

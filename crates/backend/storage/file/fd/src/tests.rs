@@ -95,6 +95,8 @@ fn vfs_path_exists(path: &str) -> bool {
 // most once per 1MiB chunk.
 thread_local! {
     static INTERRUPT_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    // When set, the next unheld interrupt check raises a query cancel.
+    static INTERRUPT_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn interrupt_checks() -> u64 {
@@ -143,6 +145,16 @@ fn setup() {
         xact_seams::get_current_sub_transaction_id::set(|| 1);
         postgres_seams::check_for_interrupts::set(|| {
             INTERRUPT_CHECKS.with(|c| c.set(c.get() + 1));
+            if INTERRUPT_ARMED.with(std::cell::Cell::get)
+                && init_small::globals::InterruptHoldoffCount() == 0
+            {
+                INTERRUPT_ARMED.with(|c| c.set(false));
+                return Err(::elog::ereport(types_error::ERROR)
+                    .errcode(::types_error::ERRCODE_QUERY_CANCELED)
+                    .errmsg("canceling statement due to user request")
+                    .into_error()
+                    .into());
+            }
             Ok(())
         });
         aio_seams::pgaio_closing_fd::set(|_| {});
@@ -665,6 +677,45 @@ fn pipe_stream_child_starts_with_signals_unblocked() {
     let mut buf = [0u8; 64];
     assert_eq!(crate::desc::PipeStreamRead(idx, &mut buf).unwrap(), 0);
     assert_eq!(crate::desc::ClosePipeStream(idx).unwrap(), libc::SIGTERM);
+}
+
+// fd.c:2769 OpenPipeStream -> popen: libc runs `sh -c command` with argv[0]
+// "sh", which the command sees as $0.
+#[test]
+fn pipe_stream_child_sees_argv0_sh() {
+    setup();
+    let idx = crate::desc::OpenPipeStream("echo $0", "r").unwrap();
+    assert!(idx >= 0);
+    let mut buf = [0u8; 64];
+    let n = crate::desc::PipeStreamRead(idx, &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"sh\n");
+    assert_eq!(crate::desc::ClosePipeStream(idx).unwrap(), 0);
+}
+
+// pgmkdirp.c:134 leaves `path` cut at the component whose mkdir failed, and
+// tablespace.c:173 reports that prefix, not the full requested path.
+#[cfg(not(pgrust_sim))]
+#[test]
+fn mkdir_p_names_the_component_that_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    setup();
+    let dir = scratch_dir("mkdirp");
+    let ro = format!("{dir}/ro");
+    std::fs::create_dir(&ro).unwrap();
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let err = match crate::copydir::pg_mkdir_p(&format!("{ro}/x/y")) {
+        Err(e) => e,
+        Ok(()) => {
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Root ignores directory permissions; nothing to witness.
+            return;
+        }
+    };
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        err.message(),
+        format!("could not create directory \"{ro}/x\": Permission denied")
+    );
 }
 
 #[test]
@@ -1572,6 +1623,63 @@ fn fileset_segment_create_unlinks_stale_next_segment() {
     );
     bf.close().unwrap();
     crate::sync::AtEOXact_Files(true).unwrap();
+}
+
+// dsm.c:813-829: the last participant's SharedFileSetOnDetach runs inside
+// dsm_detach's HOLD_INTERRUPTS bracket, so a pending cancel cannot abandon
+// the remaining files; the Drop that replaces that callback holds the same.
+#[cfg(not(pgrust_sim))]
+#[test]
+fn fileset_drop_deletes_every_file_with_interrupts_held() {
+    let (_dir, _cwd) = fileset_scaffold("fsdrophold");
+    let fs = crate::fileset::FileSet::init().unwrap();
+    let ctx = mcx::MemoryContext::new("fsdrophold");
+    let mut bfs = Vec::new();
+    for name in ["a", "b", "c"] {
+        let bf = crate::buffile::BufFileCreateFileSet(ctx.mcx(), &fs, name).unwrap();
+        bfs.push(bf);
+    }
+    let paths: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|n| format!("{}.0", fs.name_path(n)))
+        .collect();
+    for bf in bfs {
+        bf.close().unwrap();
+    }
+    for p in &paths {
+        assert!(vfs_path_exists(p), "{p} was not created");
+    }
+    let dir = paths[0].rsplit_once('/').unwrap().0.to_string();
+    INTERRUPT_ARMED.with(|c| c.set(true));
+    drop(fs);
+    // The walk's interrupt checks ran held: the cancel is still pending.
+    assert!(INTERRUPT_ARMED.with(std::cell::Cell::get), "cancel consumed during drop");
+    INTERRUPT_ARMED.with(|c| c.set(false));
+    for p in &paths {
+        assert!(!vfs_path_exists(p), "{p} survived the FileSet drop");
+    }
+    assert!(!vfs_path_exists(&dir), "{dir} survived the FileSet drop");
+    assert_eq!(init_small::globals::InterruptHoldoffCount(), 0);
+    crate::sync::AtEOXact_Files(true).unwrap();
+}
+
+// fd.c:1700 PathNameDeleteTemporaryDir: stat, so a dangling symlink in place
+// of the directory is "missing" and returns silently — no walkdir, no
+// `could not open directory` LOG.
+#[cfg(not(pgrust_sim))]
+#[test]
+fn delete_temporary_dir_ignores_a_dangling_symlink() {
+    setup();
+    let dir = scratch_dir("deltmpdangle");
+    let link = format!("{dir}/gone.fileset");
+    std::os::unix::fs::symlink("nowhere-to-be-found", &link).unwrap();
+    let prev = elog::set_emit_log_hook(Some(capture_log_line));
+    take_log_lines();
+    crate::temp::PathNameDeleteTemporaryDir(&link).unwrap();
+    let lines = take_log_lines();
+    elog::set_emit_log_hook(prev);
+    assert!(lines.is_empty(), "expected no LOG, got {lines:?}");
+    assert!(std::fs::symlink_metadata(&link).is_ok(), "the symlink itself is left alone");
 }
 
 // buffile.c:346-349: `could not open temporary file "<name>.0" from BufFile

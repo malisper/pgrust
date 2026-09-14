@@ -205,7 +205,7 @@ pub fn PathNameCreateTemporaryDir(basedir: &str, directory: &str) -> PgResult<()
 pub fn PathNameDeleteTemporaryDir(dirname: &str) -> PgResult<()> {
     // Silently ignore a missing directory.
     let mut info = vfs::FileInfo::zeroed();
-    if vfs::lstat(&vfd::cpath(dirname), &mut info) != 0 && get_errno() == libc::ENOENT {
+    if vfs::stat(&vfd::cpath(dirname), &mut info) != 0 && get_errno() == libc::ENOENT {
         return Ok(());
     }
 

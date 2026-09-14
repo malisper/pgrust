@@ -398,7 +398,7 @@ pub fn directory_is_empty(path: &str) -> PgResult<bool> {
 // pg_dir_create_mode (DirBuilder-recursive semantics: existing dirs at any
 // level are fine, existing non-dir surfaces the mkdir errno).
 pub fn pg_mkdir_p(path: &str) -> PgResult<()> {
-    fn mkdir_p_inner(path: &str, mode: u32) -> Result<(), i32> {
+    fn mkdir_p_inner<'a>(path: &'a str, mode: u32) -> Result<(), (i32, &'a str)> {
         let cp = cpath(path);
         if vfs::mkdir(&cp, mode as libc::mode_t) == 0 {
             return Ok(());
@@ -413,7 +413,7 @@ pub fn pg_mkdir_p(path: &str) -> PgResult<()> {
                 if exists_as_dir(&cp) {
                     Ok(())
                 } else {
-                    Err(en)
+                    Err((en, path))
                 }
             }
             libc::ENOENT => {
@@ -421,7 +421,7 @@ pub fn pg_mkdir_p(path: &str) -> PgResult<()> {
                     .parent()
                     .and_then(std::path::Path::to_str)
                     .filter(|p| !p.is_empty() && *p != path);
-                let Some(parent) = parent else { return Err(en) };
+                let Some(parent) = parent else { return Err((en, path)) };
                 mkdir_p_inner(parent, mode)?;
                 if vfs::mkdir(&cp, mode as libc::mode_t) == 0 {
                     return Ok(());
@@ -430,18 +430,18 @@ pub fn pg_mkdir_p(path: &str) -> PgResult<()> {
                 if (en == libc::EEXIST || en == libc::EISDIR) && exists_as_dir(&cp) {
                     Ok(())
                 } else {
-                    Err(en)
+                    Err((en, path))
                 }
             }
-            _ => Err(en),
+            _ => Err((en, path)),
         }
     }
 
-    mkdir_p_inner(path, crate::vfd::pg_dir_create_mode()).map_err(|en| {
+    mkdir_p_inner(path, crate::vfd::pg_dir_create_mode()).map_err(|(en, failed)| {
         ereport(ERROR)
             .with_saved_errno(en)
             .errcode_for_file_access()
-            .errmsg(format!("could not create directory \"{path}\": %m"))
+            .errmsg(format!("could not create directory \"{failed}\": %m"))
             .finish(loc("pg_mkdir_p"))
             .unwrap_err()
     })

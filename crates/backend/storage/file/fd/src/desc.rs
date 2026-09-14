@@ -574,6 +574,11 @@ fn popen(command: &str, mode: &str) -> Result<PipeHandle, i32> {
 
     let reading = mode.starts_with('r');
     let mut cmd = Command::new("/bin/sh");
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.arg0("sh");
+    }
     cmd.arg("-c").arg(command);
     // A C backend's popen child starts with an empty signal mask and the
     // backend's dispositions after exec: handled signals back to default,
