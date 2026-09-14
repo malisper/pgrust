@@ -96,7 +96,13 @@ fn check_fips_mode() -> bool {
     }
     // SAFETY: a pure query on OpenSSL's default library context (NULL); no
     // pointer is retained and no OpenSSL state is mutated.
-    unsafe { openssl_sys::EVP_default_properties_is_fips_enabled(core::ptr::null_mut()) == 1 }
+    #[cfg(not(target_family = "wasm"))]
+    unsafe {
+        openssl_sys::EVP_default_properties_is_fips_enabled(core::ptr::null_mut()) == 1
+    }
+    // wasm32 links no OpenSSL (hashing.rs module note): never in FIPS mode.
+    #[cfg(target_family = "wasm")]
+    false
 }
 
 #[cfg(test)]

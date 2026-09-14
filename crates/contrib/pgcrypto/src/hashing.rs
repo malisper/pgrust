@@ -1,96 +1,139 @@
 //! digest() and hmac() over the linked OpenSSL EVP digests, as C openssl.c
 //! px_find_digest (EVP_get_digestbyname) and px-hmac.c px_find_hmac do.
 
-use std::ffi::CString;
-use openssl_sys as ssl;
-
-// OpenSSL 3.4+ evp.h maps EVP_MD_CTX_get_size (what C digest_result_size
-// calls) onto this, which consults the context and reports -1 for an XOF
-// with no output length set. openssl-sys only binds the EVP_MD-level form.
-extern "C" {
-    fn EVP_MD_CTX_get_size_ex(ctx: *const ssl::EVP_MD_CTX) -> core::ffi::c_int;
-}
-
 pub enum DigestError {
     NoHash,
     CipherInit,
 }
 
-/// openssl.c OSSLDigest: an EVP_MD_CTX initialised for one digest.
-pub struct OsslDigest {
-    md: *const ssl::EVP_MD,
-    ctx: *mut ssl::EVP_MD_CTX,
-}
+// The digest engine is the linked OpenSSL (openssl-src, vendored C), which
+// does not build for wasm32 (wasm/wasm-crate-ledger.md be_secure_openssl):
+// on wasm every lookup answers NoHash, so digest()/hmac() raise pgcrypto's
+// own `Cannot use "<name>": No such hash algorithm` instead of dragging
+// openssl-sys into the wasm dependency graph.
+#[cfg(not(target_family = "wasm"))]
+mod ossl {
+    use super::DigestError;
+    use std::ffi::CString;
+    use openssl_sys as ssl;
 
-impl OsslDigest {
-    /// openssl.c:168 px_find_digest.
-    pub fn find(name: &str) -> Result<OsslDigest, DigestError> {
-        let cname = CString::new(name).map_err(|_| DigestError::NoHash)?;
-        // SAFETY: cname is NUL-terminated for the lookup; the EVP_MD is a
-        // static table entry OpenSSL owns; ctx is freed in Drop.
-        unsafe {
-            let md = ssl::EVP_get_digestbyname(cname.as_ptr());
-            if md.is_null() {
-                return Err(DigestError::NoHash);
+    // OpenSSL 3.4+ evp.h maps EVP_MD_CTX_get_size (what C digest_result_size
+    // calls) onto this, which consults the context and reports -1 for an XOF
+    // with no output length set. openssl-sys only binds the EVP_MD-level form.
+    extern "C" {
+        fn EVP_MD_CTX_get_size_ex(ctx: *const ssl::EVP_MD_CTX) -> core::ffi::c_int;
+    }
+
+    /// openssl.c OSSLDigest: an EVP_MD_CTX initialised for one digest.
+    pub struct OsslDigest {
+        md: *const ssl::EVP_MD,
+        ctx: *mut ssl::EVP_MD_CTX,
+    }
+
+    impl OsslDigest {
+        /// openssl.c:168 px_find_digest.
+        pub fn find(name: &str) -> Result<OsslDigest, DigestError> {
+            let cname = CString::new(name).map_err(|_| DigestError::NoHash)?;
+            // SAFETY: cname is NUL-terminated for the lookup; the EVP_MD is a
+            // static table entry OpenSSL owns; ctx is freed in Drop.
+            unsafe {
+                let md = ssl::EVP_get_digestbyname(cname.as_ptr());
+                if md.is_null() {
+                    return Err(DigestError::NoHash);
+                }
+                let ctx = ssl::EVP_MD_CTX_new();
+                if ctx.is_null() {
+                    return Err(DigestError::CipherInit);
+                }
+                if ssl::EVP_DigestInit_ex(ctx, md, core::ptr::null_mut()) == 0 {
+                    ssl::EVP_MD_CTX_free(ctx);
+                    return Err(DigestError::CipherInit);
+                }
+                Ok(OsslDigest { md, ctx })
             }
-            let ctx = ssl::EVP_MD_CTX_new();
-            if ctx.is_null() {
-                return Err(DigestError::CipherInit);
+        }
+
+        /// openssl.c:101 digest_result_size: negative (an XOF under OpenSSL 3.4+)
+        /// is elog(ERROR).
+        pub fn result_size(&self) -> Result<usize, &'static str> {
+            // SAFETY: ctx is a live, initialised EVP_MD_CTX.
+            let n = unsafe { EVP_MD_CTX_get_size_ex(self.ctx) };
+            if n < 0 {
+                return Err("EVP_MD_CTX_size() failed");
             }
-            if ssl::EVP_DigestInit_ex(ctx, md, core::ptr::null_mut()) == 0 {
-                ssl::EVP_MD_CTX_free(ctx);
-                return Err(DigestError::CipherInit);
+            Ok(n as usize)
+        }
+
+        pub fn block_size(&self) -> Result<usize, &'static str> {
+            // SAFETY: md is a live EVP_MD.
+            let n = unsafe { ssl::EVP_MD_get_block_size(self.md) };
+            if n < 0 {
+                return Err("EVP_MD_CTX_block_size() failed");
             }
-            Ok(OsslDigest { md, ctx })
+            Ok(n as usize)
+        }
+
+        pub fn reset(&mut self) {
+            // SAFETY: ctx/md are live and owned by self.
+            unsafe { ssl::EVP_DigestInit_ex(self.ctx, self.md, core::ptr::null_mut()) };
+        }
+
+        pub fn update(&mut self, data: &[u8]) {
+            // SAFETY: ctx is live; data is a valid slice for its length.
+            unsafe { ssl::EVP_DigestUpdate(self.ctx, data.as_ptr().cast(), data.len()) };
+        }
+
+        pub fn finish(&mut self) -> Vec<u8> {
+            let mut out = vec![0u8; ssl::EVP_MAX_MD_SIZE as usize];
+            let mut n: u32 = 0;
+            // SAFETY: out holds EVP_MAX_MD_SIZE bytes, the documented maximum.
+            unsafe { ssl::EVP_DigestFinal_ex(self.ctx, out.as_mut_ptr(), &mut n) };
+            out.truncate(n as usize);
+            out
         }
     }
 
-    /// openssl.c:101 digest_result_size: negative (an XOF under OpenSSL 3.4+)
-    /// is elog(ERROR).
-    pub fn result_size(&self) -> Result<usize, &'static str> {
-        // SAFETY: ctx is a live, initialised EVP_MD_CTX.
-        let n = unsafe { EVP_MD_CTX_get_size_ex(self.ctx) };
-        if n < 0 {
-            return Err("EVP_MD_CTX_size() failed");
+    impl Drop for OsslDigest {
+        fn drop(&mut self) {
+            // SAFETY: ctx was allocated by EVP_MD_CTX_new and is freed once.
+            unsafe { ssl::EVP_MD_CTX_free(self.ctx) };
         }
-        Ok(n as usize)
     }
 
-    pub fn block_size(&self) -> Result<usize, &'static str> {
-        // SAFETY: md is a live EVP_MD.
-        let n = unsafe { ssl::EVP_MD_get_block_size(self.md) };
-        if n < 0 {
-            return Err("EVP_MD_CTX_block_size() failed");
+}
+
+#[cfg(target_family = "wasm")]
+mod ossl {
+    use super::DigestError;
+
+    /// wasm32: no OpenSSL — no digest can be found (see module note).
+    pub struct OsslDigest {
+        _never: core::convert::Infallible,
+    }
+
+    impl OsslDigest {
+        pub fn find(_name: &str) -> Result<OsslDigest, DigestError> {
+            Err(DigestError::NoHash)
         }
-        Ok(n as usize)
-    }
-
-    pub fn reset(&mut self) {
-        // SAFETY: ctx/md are live and owned by self.
-        unsafe { ssl::EVP_DigestInit_ex(self.ctx, self.md, core::ptr::null_mut()) };
-    }
-
-    pub fn update(&mut self, data: &[u8]) {
-        // SAFETY: ctx is live; data is a valid slice for its length.
-        unsafe { ssl::EVP_DigestUpdate(self.ctx, data.as_ptr().cast(), data.len()) };
-    }
-
-    pub fn finish(&mut self) -> Vec<u8> {
-        let mut out = vec![0u8; ssl::EVP_MAX_MD_SIZE as usize];
-        let mut n: u32 = 0;
-        // SAFETY: out holds EVP_MAX_MD_SIZE bytes, the documented maximum.
-        unsafe { ssl::EVP_DigestFinal_ex(self.ctx, out.as_mut_ptr(), &mut n) };
-        out.truncate(n as usize);
-        out
+        pub fn result_size(&self) -> Result<usize, &'static str> {
+            match self._never {}
+        }
+        pub fn block_size(&self) -> Result<usize, &'static str> {
+            match self._never {}
+        }
+        pub fn reset(&mut self) {
+            match self._never {}
+        }
+        pub fn update(&mut self, _data: &[u8]) {
+            match self._never {}
+        }
+        pub fn finish(&mut self) -> Vec<u8> {
+            match self._never {}
+        }
     }
 }
 
-impl Drop for OsslDigest {
-    fn drop(&mut self) {
-        // SAFETY: ctx was allocated by EVP_MD_CTX_new and is freed once.
-        unsafe { ssl::EVP_MD_CTX_free(self.ctx) };
-    }
-}
+pub use ossl::OsslDigest;
 
 pub enum HashError {
     /// pgcrypto.c:504 find_provider: `Cannot use "<name>": <px_strerror>`, 22023.
