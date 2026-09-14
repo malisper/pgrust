@@ -173,7 +173,7 @@ struct RewriteMappingFile {
 
 pub struct RewriteState<'mcx> {
     mcx: Mcx<'mcx>,
-    rs_bulkstate: bulkwrite::BulkWriteState,
+    rs_bulkstate: Option<bulkwrite::BulkWriteState>,
     rs_buffer: Option<bulkwrite::BulkWriteBuffer>,
     rs_blockno: BlockNumber,
     rs_oldest_xmin: TransactionId,
@@ -215,7 +215,7 @@ pub fn begin_heap_rewrite<'mcx>(
 ) -> PgResult<RewriteState<'mcx>> {
     let mut state = RewriteState {
         mcx,
-        rs_bulkstate: bulkwrite::smgr_bulk_start_rel(new_heap, ForkNumber::MAIN_FORKNUM)?,
+        rs_bulkstate: Some(bulkwrite::smgr_bulk_start_rel(new_heap, ForkNumber::MAIN_FORKNUM)?),
         rs_buffer: None,
         rs_blockno: bufmgr::RelationGetNumberOfBlocksInFork(new_heap, ForkNumber::MAIN_FORKNUM)?,
         rs_oldest_xmin: oldest_xmin,
@@ -289,16 +289,19 @@ pub fn end_heap_rewrite<'mcx>(
     }
 
     if let Some(buffer) = state.rs_buffer.take() {
-        bulkwrite::smgr_bulk_write(&mut state.rs_bulkstate, state.rs_blockno, buffer, true)?;
+        let blockno = state.rs_blockno;
+        bulkwrite::smgr_bulk_write(bulk_state(&mut state), blockno, buffer, true)?;
     }
 
-    // C runs smgr_bulk_finish first, then logical_end_heap_rewrite; the two
-    // have no ordering dependency (mapping durability is anchored to the
-    // XLOG_HEAP2_REWRITE inserts and the per-file fsyncs, not the heap
-    // sync), and bulk-finish consumes the state here.
-    logical_end_heap_rewrite(&mut state)?;
+    // rewriteheap.c:321-323: the bulk writer's final flush (and its FPIs)
+    // precedes the last XLOG_HEAP2_REWRITE mapping records.
+    bulkwrite::smgr_bulk_finish(state.rs_bulkstate.take().expect("bulk writer finished once"))?;
 
-    bulkwrite::smgr_bulk_finish(state.rs_bulkstate)
+    logical_end_heap_rewrite(&mut state)
+}
+
+fn bulk_state<'a>(state: &'a mut RewriteState<'_>) -> &'a mut bulkwrite::BulkWriteState {
+    state.rs_bulkstate.as_mut().expect("bulk writer still open")
 }
 
 // logical_heap_rewrite_flush_mappings (rewriteheap.c:807): write the buffered
@@ -709,13 +712,14 @@ fn raw_heap_insert<'mcx>(
         let page_free = page_mut_of(buffer).as_ref().heap_free_space();
         if len + state.rs_new_save_free_space > page_free {
             let buffer = state.rs_buffer.take().unwrap();
-            bulkwrite::smgr_bulk_write(&mut state.rs_bulkstate, state.rs_blockno, buffer, true)?;
+            let blockno = state.rs_blockno;
+            bulkwrite::smgr_bulk_write(bulk_state(state), blockno, buffer, true)?;
             state.rs_blockno += 1;
         }
     }
 
     if state.rs_buffer.is_none() {
-        let mut buffer = bulkwrite::smgr_bulk_get_buf(&state.rs_bulkstate);
+        let mut buffer = bulkwrite::smgr_bulk_get_buf(bulk_state(state));
         page_mut_of(&mut buffer).init(0);
         state.rs_buffer = Some(buffer);
     }

@@ -1336,7 +1336,8 @@ fn heap_xlog_visible(record: &mut XLogReaderState) -> PgResult<()> {
         bufmgr_seams::lock_buffer::call(vmbuffer, bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
 
         let reln = xlogutils::CreateFakeRelcacheEntry(rlocator);
-        let mut vmbuf = visibilitymap::VmBuffer::new();
+        let mut vmbuf =
+            visibilitymap::VmBuffer::adopt(vmbuffer).expect("BLK_NEEDS_REDO with no buffer");
         visibilitymap::visibilitymap_pin(&reln, blkno, &mut vmbuf)?;
         visibilitymap::visibilitymap_set(
             &reln,
@@ -1348,7 +1349,6 @@ fn heap_xlog_visible(record: &mut XLogReaderState) -> PgResult<()> {
             vmbits,
         )?;
         vmbuf.release();
-        bufmgr_seams::release_buffer::call(vmbuffer)?;
         xlogutils::FreeFakeRelcacheEntry(reln);
     } else if vmbuffer != InvalidBuffer {
         unlock_release(vmbuffer)?;

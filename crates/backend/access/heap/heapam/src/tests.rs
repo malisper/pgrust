@@ -24,6 +24,8 @@ struct Fake {
 }
 
 static FAKE: Mutex<Option<Fake>> = Mutex::new(None);
+// (block, nblocks_hint) of every read_buffer_batched call, in order.
+static BATCH_HINTS: Mutex<Vec<(BlockNumber, BlockNumber)>> = Mutex::new(Vec::new());
 // Seam-backed tests share the fake bufmgr; run them serially.
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -54,6 +56,10 @@ fn install_seams() {
             })
         });
         bufmgr_seams::read_buffer_strategy::set(|rel, block, _strategy| {
+            bufmgr_seams::read_buffer::call(rel, block)
+        });
+        bufmgr_seams::read_buffer_batched::set(|rel, block, nblocks_hint, _strategy| {
+            BATCH_HINTS.lock().unwrap().push((block, nblocks_hint));
             bufmgr_seams::read_buffer::call(rel, block)
         });
         bufmgr_seams::buffer_get_block_number::set(|buf| {
@@ -833,6 +839,43 @@ fn tidrange_limits_and_empty_range() {
     assert!(heap_getnext(&mut scan, ForwardScanDirection)
         .unwrap()
         .is_none());
+    heap_endscan(scan).unwrap();
+    quiesced();
+}
+
+// heapam.c:848: the read stream's callback stops at rs_numblocks, so a
+// TID-range scan never reads (or pulls into shared buffers) blocks past
+// its upper bound.
+#[test]
+fn tidrange_read_ahead_stops_at_numblocks() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        (0..5)
+            .map(|i| build_page(&[Item::Tuple(tuple_image(10, 0, i))], true))
+            .collect(),
+    );
+    let rel = test_relation(mcx, oid);
+
+    let mut scan = begin_seqscan(mcx, &rel, mvcc_snapshot(mcx));
+    scan.rs_base.rs_flags &= !SO_ALLOW_SYNC;
+    heap_set_tidrange(
+        &mut scan,
+        &ItemPointerData::new(1, 1),
+        &ItemPointerData::new(2, 1),
+    );
+    assert_eq!(scan.rs_numblocks, 2);
+    BATCH_HINTS.lock().unwrap().clear();
+    let blocks: Vec<u32> = collect_vals(&mut scan, ForwardScanDirection)
+        .into_iter()
+        .map(|(b, _, _)| b)
+        .collect();
+    assert_eq!(blocks, vec![1, 2]);
+    assert_eq!(core::mem::take(&mut *BATCH_HINTS.lock().unwrap()), vec![(1, 2)]);
     heap_endscan(scan).unwrap();
     quiesced();
 }

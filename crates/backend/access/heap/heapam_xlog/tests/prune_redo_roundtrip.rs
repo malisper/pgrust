@@ -73,6 +73,9 @@ struct Fake {
 }
 
 static FAKE: Mutex<Fake> = Mutex::new(Fake { bufs: Vec::new(), pins: Vec::new(), locks: Vec::new() });
+// VM-fork ReadBufferExtended calls (visibilitymap_pin's vm_readbuf); redo
+// reads go through ReadBufferWithoutRelcache instead.
+static VM_RELCACHE_READS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn with_fake<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
     f(&mut FAKE.lock().unwrap_or_else(|e| e.into_inner()))
@@ -111,6 +114,9 @@ fn install_fake_bufmgr() {
         })
     });
     bufmgr_seams::read_buffer_extended::set(|_rel, fork, block, _mode, _strategy| {
+        if fork == ForkNumber::VISIBILITYMAP_FORKNUM {
+            VM_RELCACHE_READS.fetch_add(1, Relaxed);
+        }
         with_fake(|f| {
             let buf = find_buf(f, fork, block);
             f.pins[(buf - 1) as usize] += 1;
@@ -1063,6 +1069,7 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
         f.locks.clear();
     });
     xlogutils::set_in_recovery(true);
+    VM_RELCACHE_READS.store(0, Relaxed);
 
     let reader_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("reader")));
     let mut reader = xlogreader::XLogReaderState::allocate(reader_ctx.mcx(), SEG).unwrap();
@@ -1089,6 +1096,9 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
     assert_eq!(heap2_seen[(XLOG_HEAP2_PRUNE_VACUUM_CLEANUP >> 4) as usize], 1, "VACUUM_CLEANUP");
     assert_eq!(heap2_seen[(XLOG_HEAP2_VISIBLE >> 4) as usize], 2, "VISIBLE x2");
     assert_eq!(heap2_seen[(XLOG_HEAP2_MULTI_INSERT >> 4) as usize], 0);
+    // heapam_xlog.c:362: heap_xlog_visible hands its already-pinned VM buffer
+    // to visibilitymap_pin; no second read (a pg_stat_io hit) of the VM page.
+    assert_eq!(VM_RELCACHE_READS.load(Relaxed), 0, "VISIBLE redo re-read its VM page");
 
     with_fake(|f| {
         assert!(f.pins.iter().all(|p| *p == 0), "replay leaked pins: {:?}", f.pins);

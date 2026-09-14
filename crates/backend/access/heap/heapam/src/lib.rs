@@ -857,7 +857,7 @@ fn heap_fetch_next_buffer(scan: &mut HeapScanDescData<'_>) -> PgResult<()> {
     // (rs_startblock), and bufmgr caps it by io_combine_limit and the md
     // segment boundary. Parallel chunk boundaries are not capped: an over-read
     // lands valid in the pool and becomes another worker's hit.
-    let nblocks_ahead = if next < scan.rs_nblocks {
+    let mut nblocks_ahead = if next < scan.rs_nblocks {
         if scan.rs_base.rs_parallel.is_some() || next >= scan.rs_startblock {
             scan.rs_nblocks - next
         } else {
@@ -866,6 +866,11 @@ fn heap_fetch_next_buffer(scan: &mut HeapScanDescData<'_>) -> PgResult<()> {
     } else {
         1
     };
+    // heapam.c:848 heap_scan_stream_read_next_serial stops at rs_numblocks
+    // (heap_setscanlimits / TID-range scans), which counts the staged block.
+    if scan.rs_numblocks != InvalidBlockNumber {
+        nblocks_ahead = nblocks_ahead.min(scan.rs_numblocks.max(1));
+    }
     let buf = if nblocks_ahead > 1 && bufmgr_seams::read_buffer_batched::is_installed() {
         bufmgr_seams::read_buffer_batched::call(
             &scan.rs_base.rs_rd,
