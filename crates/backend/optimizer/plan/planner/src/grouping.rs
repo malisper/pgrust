@@ -1430,6 +1430,10 @@ fn create_ordinary_grouping_paths<'mcx>(
         extra,
     )?;
 
+    if run.root.rel(grouped_rel).pathlist.is_empty() {
+        return Err(could_not_implement("GROUP BY"));
+    }
+
     // GetForeignUpperPaths (UPPERREL_GROUP_AGG): the FDW responsible for all
     // baserels may add a pushed-down grouping path.
     if let Some(kind) = run.root.rel(grouped_rel).fdwroutine {
@@ -1442,10 +1446,6 @@ fn create_ordinary_grouping_paths<'mcx>(
                 &crate::fdwplan::UpperPathExtra::GroupAgg { having_qual: extra.having_qual },
             )?;
         }
-    }
-
-    if run.root.rel(grouped_rel).pathlist.is_empty() {
-        return Err(could_not_implement("GROUP BY"));
     }
     Ok(partially_grouped_rel)
 }

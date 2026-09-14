@@ -46,9 +46,14 @@ pub fn get_relation_info<'mcx>(
     let relation = table::table_open(mcx, relation_object_id, NoLock)?;
     let relkind = relation.rd_rel.relkind;
     check_relation_has_table_am(relkind, relation.name())?;
-    // C's !RelationIsPermanent && RecoveryInProgress guard: no hot-standby
-    // sessions exist, so the recovery arm is compile-time false.
-
+    if !relation.is_permanent() && transam_xlog_seams::recovery_in_progress::call() {
+        return Err(Box::new(
+            types_error::PgError::error(
+                "cannot access temporary or unlogged relations during recovery".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
 
     let natts = relation.rd_att.natts;
     {

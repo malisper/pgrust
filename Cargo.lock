@@ -14144,6 +14144,7 @@ dependencies = [
  "tableam_vocab",
  "tablesample",
  "tidbitmap",
+ "transam_xlog_seams",
  "typcache",
  "types_core",
  "types_error",

@@ -1,0 +1,57 @@
+-- bugs/batch-63-backend-optimizer: planner divergences vs C 18.6.
+-- Expected captured from C: scripts/regress-diff.sh --capture fixtures/bugs-batch63-e2e.expected \
+--   --sql fixtures/bugs-batch63-e2e.sql "$PGINSTALL/postgres"
+\set VERBOSITY verbose
+-- fp-util-clauses-p2#2: eval_const_expressions folds a SubscriptingRef whose
+-- arguments are all Consts even when it carries an assignment, so a NULL
+-- subscript in an INSERT target list is a plan-time 22004.
+CREATE TABLE b63_t5 (a integer[]);
+EXPLAIN INSERT INTO b63_t5 (a[NULL]) VALUES (1);
+ERROR:  22004: array subscript in assignment must not be null
+EXPLAIN (VERBOSE, COSTS OFF) INSERT INTO b63_t5 (a[2]) VALUES (7);
+               QUERY PLAN               
+----------------------------------------
+ Insert on public.b63_t5
+   ->  Result
+         Output: '[2:2]={7}'::integer[]
+(3 rows)
+
+INSERT INTO b63_t5 (a[2]) VALUES (7);
+SELECT * FROM b63_t5;
+     a     
+-----------
+ [2:2]={7}
+(1 row)
+
+-- bug_b2363610: a GROUP BY with no local implementation (one hash-only and
+-- one sort-only key type) fails at planning time, before the FDW is asked
+-- for a pushed-down grouping path.
+CREATE EXTENSION postgres_fdw;
+DO $$ BEGIN
+  EXECUTE format('CREATE SERVER b63_srv FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host %L, port %L, dbname %L)',
+                 current_setting('unix_socket_directories'), current_setting('port'), current_database());
+  EXECUTE format('CREATE USER MAPPING FOR CURRENT_USER SERVER b63_srv OPTIONS (user %L)', current_user);
+END $$;
+CREATE TABLE b63_g(x xid, v tsvector);
+INSERT INTO b63_g VALUES ('1'::xid, 'a'::tsvector), ('1'::xid, 'a'::tsvector), ('2'::xid, 'b'::tsvector);
+CREATE FOREIGN TABLE b63_fg(x xid, v tsvector) SERVER b63_srv OPTIONS (table_name 'b63_g');
+EXPLAIN (COSTS OFF) SELECT x, v FROM b63_fg GROUP BY x, v;
+ERROR:  0A000: could not implement GROUP BY
+DETAIL:  Some of the datatypes only support hashing, while others only support sorting.
+SELECT x, v FROM b63_fg GROUP BY x, v;
+ERROR:  0A000: could not implement GROUP BY
+DETAIL:  Some of the datatypes only support hashing, while others only support sorting.
+EXPLAIN (COSTS OFF) SELECT x, count(*) FROM b63_fg GROUP BY x;
+             QUERY PLAN             
+------------------------------------
+ Foreign Scan
+   Relations: Aggregate on (b63_fg)
+(2 rows)
+
+SELECT x, count(*) FROM b63_fg GROUP BY x ORDER BY x::text;
+ x | count 
+---+-------
+ 1 |     2
+ 2 |     1
+(2 rows)
+

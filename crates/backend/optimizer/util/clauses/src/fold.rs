@@ -811,7 +811,7 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             let new = expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))?;
             let eff = new.unwrap_or(node);
             let sr = eff.as_subscripting_ref().unwrap();
-            if sr.refassgnexpr.is_none() && all_arguments_const(eff)? {
+            if all_arguments_const(eff)? {
                 return clauses_seams::evaluate_expr::call(
                     cx.mcx,
                     eff,

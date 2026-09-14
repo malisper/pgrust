@@ -52,6 +52,7 @@ inval = { path = "../../../utils/cache/inval" }
 cache_syscache = { path = "../../../utils/cache/cache_syscache" }
 arrayutils = { path = "../../../utils/adt/arrayutils" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 readfuncs = { path = "../../../nodes/readfuncs" }
 outfuncs = { path = "../../../nodes/outfuncs" }
 rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
