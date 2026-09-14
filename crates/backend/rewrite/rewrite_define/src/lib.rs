@@ -963,36 +963,20 @@ pub fn get_rewrite_oid<'mcx>(
     rulename: &str,
     missing_ok: bool,
 ) -> PgResult<Oid> {
-    let pg_rewrite = table::table_open(mcx, REWRITE_RELATION_ID, types_rel::AccessShareLock)?;
-    let rname = name_key(mcx, rulename)?;
-    let keys = [
-        eq_key(Anum_pg_rewrite_ev_class, F_OIDEQ, Datum::from_oid(relid)),
-        eq_key(
-            Anum_pg_rewrite_rulename,
-            F_NAMEEQ,
-            Datum::from_usize(rname.as_ptr() as usize),
-        ),
-    ];
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &pg_rewrite,
-        REWRITE_REL_RULENAME_INDEX_ID,
-        true,
-        None,
-        &keys,
-    )?;
     let mut ruleoid = types_core::InvalidOid;
-    if let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        let td = pg_rewrite.descr();
-        let mut isnull = false;
-        // SAFETY: pg_rewrite row under its own descriptor; oid declared.
-        ruleoid = unsafe {
-            types_tuple::heap_getattr(tup, Anum_pg_rewrite_oid as i32, td, &mut isnull)
-        }
-        .as_oid();
+    if let Some(tup) = cache_syscache::SearchSysCache2(
+        cache_syscache::RULERELNAME,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(relid)),
+        cache_syscache::SysCacheKey::Str(rulename),
+    )? {
+        let (d, _) = cache_syscache::SysCacheGetAttr(
+            cache_syscache::RULERELNAME,
+            &tup,
+            Anum_pg_rewrite_oid as i32,
+        )?;
+        ruleoid = d.as_oid();
+        cache_syscache::ReleaseSysCache(tup);
     }
-    genam::systable_endscan(mcx, scan)?;
-    pg_rewrite.close(types_rel::AccessShareLock)?;
     if ruleoid == types_core::InvalidOid && !missing_ok {
         let relname =
             lsyscache::get_rel_name(mcx, relid)?.map(|s| s.to_string()).unwrap_or_default();

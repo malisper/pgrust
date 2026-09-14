@@ -573,8 +573,8 @@ impl<P: DshashParams> DshashSeqScan<'_, P> {
         let mut next = if self.curpartition == -1 {
             debug_assert!(self.curbucket == 0);
             self.table.assert_no_partition_locks();
-            self.curpartition = 0;
             LWLockAcquire(self.table.lock(0), self.mode(), globals::MyProcNumber())?;
+            self.curpartition = 0;
             // SAFETY: lock held; snapshot is stable until term (resize blocked).
             let (buckets, size_log2) = unsafe { self.table.view() };
             self.buckets = buckets.as_ptr();

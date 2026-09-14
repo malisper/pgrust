@@ -16184,6 +16184,7 @@ name = "rewrite_define"
 version = "0.1.0"
 dependencies = [
  "aclchk",
+ "cache_syscache",
  "catalog",
  "catalog_dependency",
  "catalog_indexing",

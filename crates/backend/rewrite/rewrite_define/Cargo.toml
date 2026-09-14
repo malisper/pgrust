@@ -28,6 +28,7 @@ catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
 relcache = { path = "../../utils/cache/relcache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
 parse_expr = { path = "../../parser/parse_expr" }
 parser_analyze = { path = "../../parser/parser_analyze" }
 rewrite_manip = { path = "../rewrite_manip" }

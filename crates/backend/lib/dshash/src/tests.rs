@@ -446,3 +446,27 @@ fn dump_reports_partitions_and_bucket_chains() {
     assert!(text.ends_with("  partition 127\n    active buckets (key count = 0)\n      bucket 127 (key count = 0)\n"));
     e.dump().unwrap();
 }
+
+#[test]
+fn seqscan_first_acquire_failure_leaves_no_lock_to_release() {
+    let t = new_table();
+    let held: Vec<LWLockPadded> = (0..lwlock::MAX_SIMUL_LWLOCKS)
+        .map(|_| LWLockPadded::new_unlocked(0))
+        .collect();
+    for h in &held {
+        LWLockAcquire(&h.lock, LW_SHARED, globals::MyProcNumber()).unwrap();
+    }
+    let err = {
+        let mut scan = t.seq_scan(false);
+        match scan.next() {
+            Err(e) => e,
+            Ok(_) => panic!("first seq-scan acquire must fail"),
+        }
+    };
+    assert_eq!(err.message(), "too many LWLocks taken");
+    for h in &held {
+        LWLockRelease(&h.lock).unwrap();
+    }
+    let mut scan = t.seq_scan(false);
+    assert!(scan.next().unwrap().is_none());
+}

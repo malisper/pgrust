@@ -1,0 +1,98 @@
+-- bugs/batch-69-misc-backend: SQL-reachable rows, expected captured from C 18.6.
+\set VERBOSITY verbose
+CREATE FUNCTION b69_canon(text) RETURNS text AS '$libdir/regress', 'test_canonicalize_path' LANGUAGE C STRICT;
+CREATE FUNCTION b69_b2t(bytea) RETURNS text AS '$libdir/regress', 'test_bytea_to_text' LANGUAGE C STRICT;
+CREATE FUNCTION b69_t2b(text) RETURNS bytea AS '$libdir/regress', 'test_text_to_bytea' LANGUAGE C STRICT;
+CREATE FUNCTION b69_valid_enc(text) RETURNS bool AS '$libdir/regress', 'test_valid_server_encoding' LANGUAGE C STRICT;
+CREATE FUNCTION b69_bad_enc(bytea, name, name, boolean) RETURNS integer AS '$libdir/regress', 'test_enc_conversion' LANGUAGE C STRICT;
+-- fp-regress-regress#6: test_canonicalize_path works on the raw C string
+-- (bytes kept, embedded NUL terminates).
+SELECT encode(b69_t2b(b69_canon(b69_b2t(decode('ff2f2f78', 'hex')))), 'hex');
+ encode 
+--------
+ ff2f78
+(1 row)
+
+SELECT encode(b69_t2b(b69_canon(b69_b2t(decode('612f2f622f006464', 'hex')))), 'hex');
+ encode 
+--------
+ 612f62
+(1 row)
+
+SELECT b69_canon('/a//b/./c/../d/');
+ b69_canon 
+-----------
+ /a/b/d
+(1 row)
+
+-- fp-regress-regress#7: test_valid_server_encoding stops at an embedded NUL.
+SELECT b69_valid_enc(b69_b2t(decode('555446380078', 'hex')));
+ b69_valid_enc 
+---------------
+ t
+(1 row)
+
+SELECT b69_valid_enc(b69_b2t(decode('5554463878', 'hex')));
+ b69_valid_enc 
+---------------
+ f
+(1 row)
+
+SELECT b69_valid_enc('UTF8');
+ b69_valid_enc 
+---------------
+ t
+(1 row)
+
+-- fp-regress-regress#8: the result-type check precedes input validation.
+SELECT b69_bad_enc(decode('ff', 'hex'), 'UTF8', 'UTF8', false);
+ERROR:  XX000: return type must be a row type
+SELECT b69_bad_enc(decode('ff', 'hex'), 'UTF8', 'LATIN1', false);
+ERROR:  XX000: return type must be a row type
+SELECT b69_bad_enc(decode('ff', 'hex'), 'NOSUCH', 'UTF8', false);
+ERROR:  22023: invalid source encoding name "NOSUCH"
+SELECT b69_bad_enc(decode('ff', 'hex'), 'UTF8', 'NOSUCH', false);
+ERROR:  22023: invalid destination encoding name "NOSUCH"
+DROP FUNCTION b69_bad_enc(bytea, name, name, boolean);
+DROP FUNCTION b69_valid_enc(text);
+DROP FUNCTION b69_t2b(text);
+DROP FUNCTION b69_b2t(bytea);
+DROP FUNCTION b69_canon(text);
+-- fp-rewrite-b1#1: get_rewrite_oid goes through the RULERELNAME syscache
+-- (positive, negative, overlong-name, rename-collision and post-drop lookups).
+CREATE TABLE b69r(i int);
+CREATE RULE b69rule AS ON INSERT TO b69r DO INSTEAD NOTHING;
+SELECT pg_describe_object(classid, objid, objsubid) FROM pg_get_object_address('rule', ARRAY['public', 'b69r', 'b69rule'], ARRAY[]::text[]);
+     pg_describe_object     
+----------------------------
+ rule b69rule on table b69r
+(1 row)
+
+SELECT pg_describe_object(classid, objid, objsubid) FROM pg_get_object_address('rule', ARRAY['public', 'b69r', 'b69rule'], ARRAY[]::text[]);
+     pg_describe_object     
+----------------------------
+ rule b69rule on table b69r
+(1 row)
+
+SELECT pg_get_object_address('rule', ARRAY['public', 'b69r', 'nosuch'], ARRAY[]::text[]);
+ERROR:  42704: rule "nosuch" for relation "b69r" does not exist
+SELECT pg_get_object_address('rule', ARRAY['public', 'b69r', repeat('x', 70)], ARRAY[]::text[]);
+ERROR:  42704: rule "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" for relation "b69r" does not exist
+ALTER RULE b69rule ON b69r RENAME TO b69rule2;
+SELECT pg_describe_object(classid, objid, objsubid) FROM pg_get_object_address('rule', ARRAY['public', 'b69r', 'b69rule2'], ARRAY[]::text[]);
+     pg_describe_object      
+-----------------------------
+ rule b69rule2 on table b69r
+(1 row)
+
+SELECT pg_get_object_address('rule', ARRAY['public', 'b69r', 'b69rule'], ARRAY[]::text[]);
+ERROR:  42704: rule "b69rule" for relation "b69r" does not exist
+CREATE RULE b69rule3 AS ON UPDATE TO b69r DO INSTEAD NOTHING;
+ALTER RULE b69rule3 ON b69r RENAME TO b69rule2;
+ERROR:  42710: rule "b69rule2" for relation "b69r" already exists
+ALTER RULE nosuch ON b69r RENAME TO b69rule4;
+ERROR:  42704: rule "nosuch" for relation "b69r" does not exist
+DROP RULE b69rule2 ON b69r;
+SELECT pg_get_object_address('rule', ARRAY['public', 'b69r', 'b69rule2'], ARRAY[]::text[]);
+ERROR:  42704: rule "b69rule2" for relation "b69r" does not exist
+DROP TABLE b69r;

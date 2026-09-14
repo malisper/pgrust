@@ -47,6 +47,13 @@ unsafe fn arg_text_str(fcinfo: &Fcinfo, i: usize) -> PgResult<String> {
     Ok(String::from_utf8_lossy(unsafe { arg_text(fcinfo, i) }?).into_owned())
 }
 
+// text_to_cstring hands C a NUL-terminated copy: bytes past an embedded NUL
+// are invisible to the C string consumers below.
+unsafe fn arg_text_cstr<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
+    let b = unsafe { arg_text(fcinfo, i) }?;
+    Ok(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())])
+}
+
 /* ======================== interpt_pp(path, path) ========================= */
 
 // SAFETY: strict fn; catalog arg i is a non-null path varlena, live for the call.
@@ -319,8 +326,8 @@ fn fc_int44out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
 
 fn fc_test_canonicalize_path(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn, text arg.
-    let path = unsafe { arg_text_str(fcinfo, 0) }?;
-    out_text(fcinfo, pg_path::canonicalize_path(&path).as_bytes())
+    let path = unsafe { arg_text_cstr(fcinfo, 0) }?;
+    out_text(fcinfo, &pg_path::canonicalize_path_bytes(path))
 }
 
 /* ===================== make_tuple_indirect(record) ======================= */
@@ -957,6 +964,12 @@ fn fc_test_enc_conversion(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         return Err(invalid_encoding_name_error("destination", &dest_name));
     }
 
+    if funcapi::get_call_result_type(fcinfo.result_mcx(), flinfo, None)?.class
+        != funcapi::TypeFuncClass::Composite
+    {
+        return Err(err("return type must be a row type".to_string()));
+    }
+
     // SAFETY: mcx stays live for this call only; composite_result_2 re-derives
     // its own handle rather than reusing this one across the &mut borrow below.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
@@ -1145,7 +1158,8 @@ fn fc_test_wchars_to_text(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
 
 fn fc_test_valid_server_encoding(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn, text arg.
-    let name = unsafe { arg_text_str(fcinfo, 0) }?;
+    let name = unsafe { arg_text_cstr(fcinfo, 0) }?;
+    let name = String::from_utf8_lossy(name);
     Ok(Datum::from_bool(mbutils::pg_valid_server_encoding(&name) >= 0))
 }
 
@@ -1326,6 +1340,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn text_args_keep_raw_bytes_and_stop_at_nul() {
+        use ::datum::varlena::{set_varsize_4b, VarlenaRef, VARHDRSZ};
+        use ::mcx::MemoryContext;
+
+        fn text(payload: &[u8]) -> Vec<u8> {
+            let mut image = set_varsize_4b(VARHDRSZ + payload.len()).to_vec();
+            image.extend_from_slice(payload);
+            image
+        }
+        let ctx = MemoryContext::new("t");
+        let canon = |input: &[u8]| -> Vec<u8> {
+            let image = text(input);
+            let mut fci = fmgr::LocalFcinfo::<1>::new(0);
+            // SAFETY: ctx outlives the call and the payload read.
+            unsafe { fci.set_result_mcx(ctx.mcx()) };
+            fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
+            let d = fc_test_canonicalize_path(None, &mut fci).unwrap();
+            // SAFETY: a 4B-header varlena result left in the armed context.
+            unsafe { VarlenaRef::from_ptr(d.as_u64() as usize as *const u8) }.data().to_vec()
+        };
+        assert_eq!(canon(b"\xff//x"), b"\xff/x");
+        assert_eq!(canon(b"a//b/\0dropped"), b"a/b");
+        let valid = |input: &[u8]| -> bool {
+            let image = text(input);
+            let mut fci = fmgr::LocalFcinfo::<1>::new(0);
+            fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
+            fc_test_valid_server_encoding(None, &mut fci).unwrap().as_bool()
+        };
+        assert!(valid(b"UTF8\0x"));
+        assert!(!valid(b"UTF8x"));
+        assert!(valid(b"UTF8"));
+    }
 
     #[test]
     fn atof_prefixes() {
