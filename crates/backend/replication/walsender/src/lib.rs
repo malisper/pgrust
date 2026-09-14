@@ -1197,7 +1197,13 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
             None,
         )?;
 
-        logical_decode::DecodingContextFindStartpoint(&mut ctx)?;
+        // walsender.c:1320: logical_read_xlog_page, so a client that hangs
+        // up during the wait is noticed (WalSndWaitForWal's reply
+        // processing) and the ephemeral slot is dropped with the walsender.
+        logical_decode::DecodingContextFindStartpointWith(
+            &mut ctx,
+            &mut logical_stream::LogicalWalSndPageRead,
+        )?;
 
         if opts.snapshot_action == CrsSnapshotAction::ExportSnapshot {
             // Export the snapshot so it can be imported by SET TRANSACTION

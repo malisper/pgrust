@@ -144,6 +144,30 @@ fn lsn_hi(lsn: XLogRecPtr) -> u32 {
     (lsn >> 32) as u32
 }
 
+#[cfg(target_os = "macos")]
+fn clear_errno() {
+    // SAFETY: libc returns this thread's errno slot.
+    unsafe { *libc::__error() = 0 };
+}
+#[cfg(not(target_os = "macos"))]
+fn clear_errno() {
+    // SAFETY: libc returns this thread's errno slot.
+    unsafe { *libc::__errno_location() = 0 };
+}
+
+// SnapBuildSerialize's write (snapbuild.c:1653-1663): errno is cleared before
+// the single write(); a short write that leaves errno unset is ENOSPC.
+pub(crate) fn write_all_or_enospc(fd: i32, image: &[u8]) -> Result<(), i32> {
+    clear_errno();
+    // SAFETY: image is a live readable buffer of image.len() bytes.
+    let written = unsafe { libc::write(fd, image.as_ptr().cast(), image.len()) };
+    if written != image.len() as isize {
+        let save_errno = errno::current_errno();
+        return Err(if save_errno != 0 { save_errno } else { libc::ENOSPC });
+    }
+    Ok(())
+}
+
 fn lsn_lo(lsn: XLogRecPtr) -> u32 {
     lsn as u32
 }
@@ -927,13 +951,9 @@ impl SnapBuild {
                 .finish(loc("SnapBuildSerialize"));
         }
 
-        // SAFETY: image is a live readable buffer of image.len() bytes.
         waitevent_seams::pgstat_report_wait_start::call(ondisk::WAIT_EVENT_SNAPBUILD_WRITE);
-        let written = unsafe { libc::write(fd_, image.as_ptr().cast(), image.len()) };
-        if written != image.len() as isize {
-            let save_errno = errno::current_errno();
+        if let Err(save_errno) = write_all_or_enospc(fd_, &image) {
             fd::CloseTransientFile(fd_);
-            let save_errno = if save_errno != 0 { save_errno } else { libc::ENOSPC };
             return ereport(ERROR)
                 .with_saved_errno(save_errno)
                 .errcode_for_file_access()

@@ -1520,13 +1520,23 @@ fn DecodeTXNNeedSkip(
 // through LogicalDecodingProcessRecord (avoids a logical <-> logical_decode
 // dependency cycle).
 pub fn DecodingContextFindStartpoint(ctx: &mut LogicalDecodingContext) -> PgResult<()> {
+    DecodingContextFindStartpointWith(ctx, &mut LocalPageRead { wait_for_wal: true })
+}
+
+// The page reader is the context's (logical.c:723 ctx->reader): the SQL
+// slot functions read locally, the walsender's CreateReplicationSlot reads
+// through logical_read_xlog_page so its WAL wait keeps servicing the client
+// socket (walsender.c:1320).
+pub fn DecodingContextFindStartpointWith<R: xlogreader::XLogReaderRoutine>(
+    ctx: &mut LogicalDecodingContext,
+    routine: &mut R,
+) -> PgResult<()> {
     let slot = ctx.slot;
 
     ctx.reader.XLogBeginRead(unsafe { slot.data.get() }.restart_lsn);
-    let mut routine = LocalPageRead { wait_for_wal: true };
 
     loop {
-        let record = ctx.reader.XLogReadRecord(&mut routine)?;
+        let record = ctx.reader.XLogReadRecord(routine)?;
         if record.is_none() {
             return match ctx.reader.errormsg() {
                 Some(err) => elog(

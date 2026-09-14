@@ -894,6 +894,20 @@ pub fn logicalrep_pa_worker_stop(slot: usize, generation: u16) -> PgResult<()> {
     Ok(())
 }
 
+// SetupApplyOrSyncWorker (worker.c:4809): initialise the send/receive/reply
+// times to now so pg_stat_subscription shows them while connecting.
+pub fn my_worker_init_stats_times() {
+    if let Some(slot) = my_worker_slot() {
+        let now = timestamp_seams::get_current_timestamp::call();
+        with_ctx(|ctx| {
+            let w = &mut ctx.workers[slot];
+            w.last_send_time = now;
+            w.last_recv_time = now;
+            w.reply_time = now;
+        });
+    }
+}
+
 // UpdateWorkerStats (worker.c:3573): my slot's last received LSN and the
 // message's send/receipt times; a keepalive ('k') also stamps the reply
 // LSN/time. Read back by pg_stat_subscription.

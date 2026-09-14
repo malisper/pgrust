@@ -288,3 +288,20 @@ fn worker_stop_leaves_a_reused_slot_alone() {
     );
     with_ctx(|ctx| logicalrep_worker_cleanup_locked(&mut ctx.workers[0]));
 }
+
+// SetupApplyOrSyncWorker (worker.c:4809): last_send_time, last_recv_time and
+// reply_time start at the current timestamp, so pg_stat_subscription shows
+// them (not NULL) while the worker is still connecting.
+#[test]
+fn worker_setup_initialises_stats_times_to_now() {
+    let _g = ctx_test_guard();
+    attach_apply_worker_in_slot0();
+    let before = worker_snapshot(0).unwrap();
+    assert_eq!((before.last_send_time, before.last_recv_time, before.reply_time), (0, 0, 0));
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| timestamp_seams::get_current_timestamp::set(|| 777_000_000));
+    my_worker_init_stats_times();
+    let w = worker_snapshot(0).unwrap();
+    assert_eq!((w.last_send_time, w.last_recv_time, w.reply_time), (777_000_000, 777_000_000, 777_000_000));
+    ipc::shmem_exit(0).unwrap();
+}

@@ -594,3 +594,47 @@ fn restore_ignores_length_header_when_crc_is_valid() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[cfg(target_os = "macos")]
+fn set_errno(v: i32) {
+    // SAFETY: libc returns this thread's errno slot.
+    unsafe { *libc::__error() = v };
+}
+#[cfg(not(target_os = "macos"))]
+fn set_errno(v: i32) {
+    // SAFETY: libc returns this thread's errno slot.
+    unsafe { *libc::__errno_location() = v };
+}
+
+// SnapBuildSerialize clears errno before its write (snapbuild.c:1653): a
+// short write that leaves errno untouched reports ENOSPC, not whatever the
+// preceding unlink of a missing temp file left behind (ENOENT).
+#[test]
+fn short_snapshot_write_without_errno_is_reported_as_enospc() {
+    let mut fds = [0i32; 2];
+    // SAFETY: a fresh pipe; both ends closed below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let (rd, wr) = (fds[0], fds[1]);
+    // SAFETY: valid descriptors; non-blocking so a full pipe yields a short
+    // write (and the drain below stops) instead of blocking.
+    unsafe {
+        for fd in [rd, wr] {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
+        }
+    }
+    let image = vec![0xA5u8; 4 << 20];
+    // The stale errno C's `unlink(tmppath)` leaves when the temp file is new.
+    set_errno(libc::ENOENT);
+    assert_eq!(write_all_or_enospc(wr, &image), Err(libc::ENOSPC));
+    // A write that fits succeeds.
+    let mut drain = vec![0u8; 8 << 20];
+    // SAFETY: valid descriptor and a live buffer of drain.len() bytes.
+    while unsafe { libc::read(rd, drain.as_mut_ptr().cast(), drain.len()) } > 0 {}
+    assert_eq!(write_all_or_enospc(wr, &[1, 2, 3]), Ok(()));
+    // SAFETY: closing the pipe ends we opened.
+    unsafe {
+        libc::close(rd);
+        libc::close(wr);
+    }
+}

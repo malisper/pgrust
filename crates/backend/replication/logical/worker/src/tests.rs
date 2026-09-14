@@ -540,3 +540,122 @@ fn leader_reports_lost_connection_for_a_silently_exited_pa_worker() {
     assert_eq!(super::parallel::test_registry_len(), before - 1);
     super::parallel::ProcessParallelApplyMessages().unwrap();
 }
+
+// get_flush_position (worker.c:3505): the write (apply) position is the
+// latest locally committed remote end — the tail entry once an unflushed
+// commit is hit — while flush stops at the last flushed entry.
+#[test]
+fn flush_position_reports_tail_remote_end_as_write_while_commits_await_flush() {
+    super::LSN_MAPPING.with(|m| m.borrow_mut().clear());
+    super::store_flush_position(0x100, 0x10);
+    super::store_flush_position(0x200, 0x20);
+    super::store_flush_position(0x300, 0x30);
+
+    // Local flush at 0x20: two entries drained, write = tail's remote end.
+    assert_eq!(super::get_flush_position_at(0x20), (0x300, 0x200, true));
+    assert_eq!(super::LSN_MAPPING.with(|m| m.borrow().len()), 1);
+    // Nothing flushed yet: write still the tail, flush invalid.
+    super::store_flush_position(0x400, 0x40);
+    assert_eq!(super::get_flush_position_at(0x25), (0x400, InvalidXLogRecPtr, true));
+    // Everything flushed: both positions at the last entry, list empty.
+    assert_eq!(super::get_flush_position_at(0x40), (0x400, 0x400, false));
+    assert_eq!(super::LSN_MAPPING.with(|m| m.borrow().len()), 0);
+}
+
+// store_flush_position (worker.c:3548): parallel apply workers keep no
+// lsn_mapping (the leader maintains it), so nothing accumulates per commit.
+#[test]
+fn parallel_apply_worker_does_not_accumulate_lsn_mappings() {
+    if init_small::globals::MyProcNumber() == types_core::INVALID_PROC_NUMBER {
+        init_small::globals::SetMyProcNumber(7);
+    }
+    super::LSN_MAPPING.with(|m| m.borrow_mut().clear());
+    let w = super::parallel::test_pool_worker();
+    super::parallel::test_become_pa_worker(&w);
+    super::store_flush_position(0x100, 0x10);
+    super::store_flush_position(0x200, 0x20);
+    assert_eq!(super::LSN_MAPPING.with(|m| m.borrow().len()), 0);
+    super::parallel::test_leave_pa_worker();
+    super::store_flush_position(0x300, 0x30);
+    assert_eq!(super::LSN_MAPPING.with(|m| m.borrow().len()), 1);
+    super::LSN_MAPPING.with(|m| m.borrow_mut().clear());
+}
+
+// LogicalRepApplyLoop reads the 'w'/'k' headers with pq_getmsgint64 /
+// pq_getmsgbyte (worker.c:3672-3708) and apply_dispatch reads the action with
+// pq_getmsgbyte (worker.c:3385): short or empty data is 08P01, never a silent
+// skip.
+#[test]
+fn short_stream_headers_and_empty_payloads_are_protocol_violations() {
+    let mut w = Vec::new();
+    w.extend_from_slice(&0x10u64.to_be_bytes());
+    w.extend_from_slice(&0x20u64.to_be_bytes());
+    w.extend_from_slice(&7i64.to_be_bytes());
+    w.push(b'X');
+    let (s, e, t, payload) = super::parse_wal_data_message(&w).unwrap();
+    assert_eq!((s, e, t, payload), (0x10, 0x20, 7, &b"X"[..]));
+    let err = super::parse_wal_data_message(&w[..23]).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+    assert_eq!(err.message(), "insufficient data left in message");
+
+    let mut k = Vec::new();
+    k.extend_from_slice(&0x30u64.to_be_bytes());
+    k.extend_from_slice(&9i64.to_be_bytes());
+    k.push(1);
+    assert_eq!(super::parse_keepalive_message(&k).unwrap(), (0x30, 9, true));
+    let err = super::parse_keepalive_message(&k[..16]).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+    assert_eq!(err.message(), "no data left in message");
+
+    let cx = mcx::MemoryContext::new("t");
+    // SAFETY: `cx` outlives every use within this test.
+    let mcx: mcx::Mcx<'static> = unsafe { std::mem::transmute(cx.mcx()) };
+    let err = super::apply::apply_dispatch(mcx, None, &[]).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+    assert_eq!(err.message(), "no data left in message");
+}
+
+// A parallel apply worker leaving through proc_exit (SIGTERM's FATAL) still
+// parks its report in the error queue and pokes the leader from the
+// before_shmem_exit stage (applyparallelworker.c:918/937), so the leader
+// reports "exited due to error" with the worker's context rather than a
+// generic queue error.
+#[test]
+fn pa_worker_fatal_exit_parks_the_report_for_the_leader() {
+    if init_small::globals::MyProcNumber() == types_core::INVALID_PROC_NUMBER {
+        init_small::globals::SetMyProcNumber(7);
+    }
+    let w = super::parallel::test_pool_worker();
+    super::parallel::test_become_pa_worker(&w);
+    ipc::before_shmem_exit(super::parallel::pa_shutdown_on_exit, datum::Datum::from_i64(0))
+        .unwrap();
+
+    // A WARNING is not queued; the FATAL emitted before proc_exit is.
+    let mut warn = types_error::PgError::new(types_error::WARNING, "noise");
+    super::parallel::pa_park_error_report(&mut warn);
+    let mut fatal = types_error::PgError::new(
+        types_error::FATAL,
+        "terminating logical replication worker due to administrator command",
+    );
+    fatal.add_context_line("processing remote data for replication origin \"pg_16384\"");
+    super::parallel::pa_park_error_report(&mut fatal);
+    ipc::shmem_exit(1).unwrap();
+    super::parallel::test_leave_pa_worker();
+
+    let err = super::parallel::ProcessParallelApplyMessages().unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+    assert_eq!(err.message(), "logical replication parallel apply worker exited due to error");
+    assert_eq!(
+        err.context(),
+        Some("processing remote data for replication origin \"pg_16384\"\nlogical replication parallel apply worker")
+    );
+    super::parallel::pa_detach_all_error_mq();
+}
+
+// fetch_remote_table_info's column list (tablesync.c:1023): int2vector text
+// from the publisher's pg_get_publication_tables(...).attrs.
+#[test]
+fn publication_column_list_parses_as_int2vector() {
+    assert_eq!(super::tablesync::parse_int2vector("1 3 4"), vec![1, 3, 4]);
+    assert_eq!(super::tablesync::parse_int2vector(""), Vec::<i16>::new());
+}

@@ -517,6 +517,11 @@ fn short_message_data_is_protocol_violation() {
     let e = r.get_int64().unwrap_err();
     assert_eq!(e.message(), "insufficient data left in message");
     assert_eq!(e.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+    // pq_getmsgbyte (pqformat.c:404) has its own wording.
+    let mut r = Reader::new(&[]);
+    let e = r.get_byte().unwrap_err();
+    assert_eq!(e.message(), "no data left in message");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
 
     let body = b"public";
     let mut r = Reader::new(body);

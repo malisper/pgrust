@@ -929,7 +929,9 @@ fn deliver_sigusr1(slot_index: usize) {
 }
 
 pub fn SendProcSignal(pid: i32, reason: ProcSignalReason, procNumber: ProcNumber) -> i32 {
-    let header = proc_signal();
+    let Some(header) = PROC_SIGNAL.get() else {
+        return -1;
+    };
 
     if procNumber != INVALID_PROC_NUMBER {
         debug_assert!((procNumber as usize) < header.psh_slot.len());

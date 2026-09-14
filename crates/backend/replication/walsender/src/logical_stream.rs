@@ -197,7 +197,7 @@ fn XLogSendLogical(
 // The walsender's logical WAL page reader: logical_read_xlog_page
 // (walsender.c:1041) — wait for the WAL to be flushed (processing client
 // replies meanwhile), then read it locally.
-struct LogicalWalSndPageRead;
+pub(crate) struct LogicalWalSndPageRead;
 
 impl XLogSegmentRoutine for LogicalWalSndPageRead {
     fn segment_open(

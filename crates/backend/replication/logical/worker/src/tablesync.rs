@@ -360,6 +360,11 @@ pub(crate) fn quote_literal_cstr(raw: &str) -> String {
 // a NULL qual for any subscribed publication means the whole table is copied,
 // so the list collapses to empty. Published generated columns stay refused
 // implicitly (the attribute query excludes attgenerated != '').
+// int2vector text output ("1 3 4") -> attnums.
+pub(crate) fn parse_int2vector(s: &str) -> Vec<i16> {
+    s.split_whitespace().filter_map(|w| w.parse().ok()).collect()
+}
+
 fn fetch_remote_table_info(
     conn: &mut PgConn,
     nspname: &str,
@@ -423,6 +428,39 @@ fn fetch_remote_table_info(
         }
     }
 
+    // Column lists (tablesync.c:882): fetched before the column names so
+    // columns outside the list are skipped; a NULL attrs means all columns.
+    let mut included_cols: Option<Vec<i16>> = None;
+    if conn.server_version() >= 150000 {
+        let cmd = format!(
+            "SELECT DISTINCT  (CASE WHEN (array_length(gpt.attrs, 1) = c.relnatts)   THEN NULL ELSE \
+             gpt.attrs END)  FROM pg_publication p,  LATERAL pg_get_publication_tables(p.pubname) \
+             gpt,  pg_class c WHERE gpt.relid = {remoteid} AND c.oid = gpt.relid   AND p.pubname IN \
+             ( {publist} )"
+        );
+        let pubres = conn.exec(&cmd)?;
+        if pubres.status != ExecStatus::TuplesOk {
+            ereport(ERROR)
+                .errcode(ERRCODE_CONNECTION_FAILURE)
+                .errmsg(format!(
+                    "could not fetch column list info for table \"{nspname}.{relname}\" from publisher: {}",
+                    pubres.err
+                ))
+                .finish(loc("fetch_remote_table_info"))?;
+        }
+        if pubres.rows.len() > 1 {
+            ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "cannot use different column lists for table \"{nspname}.{relname}\" in different publications"
+                ))
+                .finish(loc("fetch_remote_table_info"))?;
+        }
+        if let Some(attrs) = pubres.rows.first().and_then(|r| r.first()).and_then(|c| c.as_ref()) {
+            included_cols = Some(parse_int2vector(&String::from_utf8_lossy(attrs)));
+        }
+    }
+
     // Columns (attgenerated = '' excludes generated; gencol publication is
     // therefore refused implicitly — C's gencol arm is phase-2 here).
     let cmd = format!(
@@ -446,6 +484,11 @@ fn fetch_remote_table_info(
     let mut atttyps = Vec::new();
     let mut attkeys = Vec::new();
     for row in &res.rows {
+        // tablesync.c:1023: not in the column list, skip it.
+        let attnum: i16 = text(row, 0).parse().unwrap_or(0);
+        if included_cols.as_ref().is_some_and(|cols| !cols.contains(&attnum)) {
+            continue;
+        }
         attnames.push(text(row, 1));
         atttyps.push(text(row, 2).parse().unwrap_or(InvalidOid));
         attkeys.push(text(row, 3) == "t");

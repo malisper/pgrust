@@ -263,10 +263,8 @@ pub(crate) fn apply_dispatch(
     conn: Option<&mut PgConn>,
     buf: &[u8],
 ) -> PgResult<()> {
-    if buf.is_empty() {
-        return Ok(());
-    }
-    let action = buf[0];
+    // pq_getmsgbyte (worker.c:3385): an empty payload is 08P01.
+    let action = Reader::new(buf).get_byte()?;
     // Set the current command being applied; this is re-entered when
     // applying spooled changes, so the current command is saved
     // (worker.c:3393). C restores it only on the normal exit
@@ -2079,6 +2077,10 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     // Prepare to catch AFTER triggers (create_edata_for_relation).
     trigger::AfterTriggerBeginQuery();
 
+    // worker.c:2621: updatedCols (and its per-column protocol check) is
+    // built before the search tuple is converted.
+    let updated = apply_updated_cols(mcx, &rel, &entry, &upd.newtup)?;
+
     let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
     let mut remoteslot = tableam_real::table_slot_create(mcx, &rel)?;
     let searchtup = if upd.has_oldtuple {
@@ -2133,7 +2135,6 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         let mut modfuncs = InFuncs::new(rel.rd_att.natts as usize);
         let mut newslot = tableam_real::table_slot_create(mcx, &rel)?;
         slot_modify_data(mcx, &mut newslot, &mut localslot, &entry, &rel, &upd.newtup, &mut modfuncs)?;
-        let updated = apply_updated_cols(mcx, &rel, &entry, &upd.newtup)?;
         do_update(mcx, &rel, &mut localslot, &mut newslot, Some(&updated))?;
     } else {
         // The tuple to be updated could not be found (worker.c:2740).

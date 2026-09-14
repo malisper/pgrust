@@ -548,15 +548,24 @@ fn set_synchronous_commit(synccommit: &str) -> PgResult<()> {
     )
 }
 
-// store_flush_position (worker.c): remember (local commit end, remote end).
+// store_flush_position (worker.c:3548): remember (local commit end, remote
+// end). Parallel apply workers skip it — the leader maintains the mapping.
 pub(crate) fn store_flush_position(remote_lsn: XLogRecPtr, local_lsn: XLogRecPtr) {
+    if parallel::am_parallel_apply_worker() {
+        return;
+    }
     LSN_MAPPING.with(|m| m.borrow_mut().push((local_lsn, remote_lsn)));
 }
 
-// get_flush_position (worker.c): remote positions whose local commits have
+// get_flush_position (worker.c:3505): remote positions whose local commits have
 // been flushed; also reports whether unflushed commits remain.
 fn get_flush_position() -> (XLogRecPtr, XLogRecPtr, bool) {
-    let local_flush = transam_xlog::GetFlushRecPtr(None);
+    get_flush_position_at(transam_xlog::GetFlushRecPtr(None))
+}
+
+// The write position is the latest locally committed remote end (the tail
+// entry once an unflushed commit is hit), not just the flushed one.
+fn get_flush_position_at(local_flush: XLogRecPtr) -> (XLogRecPtr, XLogRecPtr, bool) {
     let mut write = InvalidXLogRecPtr;
     let mut flush = InvalidXLogRecPtr;
     let have_pending = LSN_MAPPING.with(|m| {
@@ -564,11 +573,12 @@ fn get_flush_position() -> (XLogRecPtr, XLogRecPtr, bool) {
         let mut i = 0;
         while i < m.len() {
             let (local, remote) = m[i];
+            write = remote;
             if local <= local_flush {
-                write = remote;
                 flush = remote;
                 i += 1;
             } else {
+                write = m[m.len() - 1].1;
                 break;
             }
         }
@@ -576,6 +586,29 @@ fn get_flush_position() -> (XLogRecPtr, XLogRecPtr, bool) {
         !m.is_empty()
     });
     (write, flush, have_pending)
+}
+
+// LogicalRepApplyLoop's 'w' header (worker.c:3672-3686): pq_getmsgint64 x3
+// over the body after the type byte; short data is 08P01. Returns
+// (start_lsn, end_lsn, send_time, payload).
+pub(crate) fn parse_wal_data_message(
+    body: &[u8],
+) -> PgResult<(XLogRecPtr, XLogRecPtr, TimestampTz, &[u8])> {
+    let mut r = logicalproto::Reader::new(body);
+    let start_lsn = r.get_int64()?;
+    let end_lsn = r.get_int64()?;
+    let send_time = r.get_int64()? as i64;
+    Ok((start_lsn, end_lsn, send_time, &body[24..]))
+}
+
+// LogicalRepApplyLoop's 'k' body (worker.c:3700-3708): end_lsn, timestamp,
+// reply_requested; short data is 08P01.
+pub(crate) fn parse_keepalive_message(buf: &[u8]) -> PgResult<(XLogRecPtr, TimestampTz, bool)> {
+    let mut r = logicalproto::Reader::new(buf);
+    let end_lsn = r.get_int64()?;
+    let timestamp = r.get_int64()? as i64;
+    let reply_requested = r.get_byte()? != 0;
+    Ok((end_lsn, timestamp, reply_requested))
 }
 
 // send_feedback (worker.c:3838): 'r' standby-status update on the copy stream.
@@ -783,23 +816,21 @@ fn apply_loop_guts(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult
                 }
             }
             CopyData::Msg(buf) => {
+                // worker.c:3663: pending SIGHUP config changes apply before
+                // each message, not only after an idle wait.
+                if interrupt::ConfigReloadPending() {
+                    interrupt::SetConfigReloadPending(false);
+                    guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+                }
                 // Reset the publisher-silence clock (worker.c:3655).
                 last_recv_timestamp = get_ts();
                 ping_sent = false;
-                if buf.is_empty() {
-                    continue;
-                }
-                match buf[0] {
+                // pq_getmsgbyte (worker.c:3675) on an empty message.
+                let mut hdr = logicalproto::Reader::new(&buf);
+                match hdr.get_byte()? {
                     b'w' => {
-                        if buf.len() < 1 + 24 {
-                            return elog::elog(
-                                ERROR,
-                                "invalid WAL message received from primary".to_string(),
-                            );
-                        }
-                        let start_lsn = u64::from_be_bytes(buf[1..9].try_into().unwrap());
-                        let end_lsn = u64::from_be_bytes(buf[9..17].try_into().unwrap());
-                        let send_time = i64::from_be_bytes(buf[17..25].try_into().unwrap());
+                        let (start_lsn, end_lsn, send_time, payload) =
+                            parse_wal_data_message(&buf[1..])?;
                         if last_received < start_lsn {
                             last_received = start_lsn;
                         }
@@ -807,18 +838,14 @@ fn apply_loop_guts(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult
                             last_received = end_lsn;
                         }
                         launcher::my_worker_update_stats(last_received, send_time, false);
-                        apply::apply_dispatch(mcx, Some(conn), &buf[25..])?;
+                        apply::apply_dispatch(mcx, Some(conn), payload)?;
                         if APPLY_WORKER_EXIT.get() {
                             return Ok(());
                         }
                     }
                     b'k' => {
-                        if buf.len() < 1 + 17 {
-                            continue;
-                        }
-                        let end_lsn = u64::from_be_bytes(buf[1..9].try_into().unwrap());
-                        let timestamp = i64::from_be_bytes(buf[9..17].try_into().unwrap());
-                        let reply_requested = buf[17] != 0;
+                        let (end_lsn, timestamp, reply_requested) =
+                            parse_keepalive_message(&buf[1..])?;
                         if last_received < end_lsn {
                             last_received = end_lsn;
                         }
@@ -1024,6 +1051,8 @@ pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     // of the attach so it drains right after the launcher's onexit.
     ipc::before_shmem_exit(stream_apply::stream_fileset_delete_on_exit, datum::Datum::null())?;
     launcher::logicalrep_worker_attach(slot)?;
+    // worker.c:4809: stats start at a sane value, not NULL until a message.
+    launcher::my_worker_init_stats_times();
 
     // SetupApplyOrSyncWorker (worker.c:4784): SIGHUP reloads config; the
     // apply loop's idle arm consumes ConfigReloadPending. SIGTERM: C installs

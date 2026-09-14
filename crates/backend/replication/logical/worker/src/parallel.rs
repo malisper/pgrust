@@ -465,6 +465,17 @@ pub(crate) fn test_pool_worker() -> Winfo {
 }
 
 #[cfg(test)]
+pub(crate) fn test_become_pa_worker(winfo: &Winfo) {
+    let shared = Arc::clone(&winfo.borrow().shared);
+    MY_PARALLEL_SHARED.with(|s| *s.borrow_mut() = Some(shared));
+}
+
+#[cfg(test)]
+pub(crate) fn test_leave_pa_worker() {
+    MY_PARALLEL_SHARED.with(|s| *s.borrow_mut() = None);
+}
+
+#[cfg(test)]
 pub(crate) fn test_worker_exited(winfo: &Winfo) {
     winfo.borrow().shared.lock().error_mq_detached = true;
 }
@@ -970,6 +981,30 @@ fn pa_shutdown(leader_pid: i32) {
     );
 }
 
+// The before_shmem_exit registration of pa_shutdown (applyparallelworker.c:
+// 937): a FATAL exit (SIGTERM) leaves ParallelApplyWorkerMain through
+// proc_exit, never through the tail after pa_worker_body, so the mailbox is
+// marked detached and the leader poked from the exit stage. arg = leader pid.
+pub(crate) fn pa_shutdown_on_exit(_code: i32, arg: datum::Datum) -> PgResult<()> {
+    if let Some(shared) = MY_PARALLEL_SHARED.with(|s| s.borrow().clone()) {
+        shared.lock().error_mq_detached = true;
+    }
+    pa_shutdown(arg.as_i64() as i32);
+    Ok(())
+}
+
+// pq_redirect_to_shm_mq's error queue (applyparallelworker.c:918): a report
+// of ERROR or worse emitted in this worker (a FATAL is emitted, then exits)
+// is parked for the leader's ProcessParallelApplyMessages.
+pub(crate) fn pa_park_error_report(e: &mut PgError) {
+    if e.level() < ERROR {
+        return;
+    }
+    if let Some(shared) = MY_PARALLEL_SHARED.with(|s| s.borrow().clone()) {
+        shared.lock().error = Some(Box::new(e.clone()));
+    }
+}
+
 // ParallelApplyWorkerMain (applyparallelworker.c:856).
 pub fn ParallelApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     let worker_slot = main_arg as usize;
@@ -1028,8 +1063,11 @@ pub fn ParallelApplyWorkerMain(main_arg: u64) -> PgResult<()> {
         inner.logicalrep_worker_generation = w.generation;
         inner.logicalrep_worker_slot_no = worker_slot;
     }
+    ipc::before_shmem_exit(pa_shutdown_on_exit, datum::Datum::from_i64(w.leader_pid as i64))?;
+    let error_queue = elog::push_emit_context_callback(Box::new(pa_park_error_report));
 
     let result = pa_worker_body(&shared, &mut mqh, &w);
+    elog::pop_emit_context_callback(error_queue);
 
     // pa_shutdown + dsm_detach on every exit path: park a failure in the
     // error mailbox, detach the queue so the leader's sends see Detached,

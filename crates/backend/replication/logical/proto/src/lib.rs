@@ -254,8 +254,11 @@ impl<'a> Reader<'a> {
     fn remaining(&self) -> usize {
         self.buf.len().saturating_sub(self.pos)
     }
+    // pq_getmsgbyte (pqformat.c:399) has its own message.
     pub fn get_byte(&mut self) -> PgResult<u8> {
-        self.need(1)?;
+        if self.pos >= self.buf.len() {
+            return Err(protocol_violation("no data left in message"));
+        }
         let b = self.buf[self.pos];
         self.pos += 1;
         Ok(b)
