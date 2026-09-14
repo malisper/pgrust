@@ -434,6 +434,7 @@ pub fn MarkBufferDirtyHint(buffer: Buffer, buffer_std: bool) -> PgResult<()> {
 /// is const-initialized TLS here; what remains is registering the exit-time
 /// cleanup.
 pub fn InitBufferManagerAccess() {
+    privref::init();
     ipc_seams::on_shmem_exit::call(AtProcExit_Buffers, 0);
 }
 

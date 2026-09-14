@@ -2005,6 +2005,25 @@ fn b039_extend_beyond_max_block_number_reports_relpath() {
     );
 }
 
+// bufmgr.c:4049 InitBufferManagerAccess hash_create("PrivateRefCount"): the
+// overflow table (and its pg_backend_memory_contexts row) exists from backend
+// start, not from the first eviction out of the eight-entry array.
+#[test]
+fn b154_init_buffer_manager_access_creates_private_refcount_table() {
+    let _g = setup();
+    std::thread::spawn(|| {
+        become_backend();
+        assert!(!crate::privref::overflow_table_exists());
+        InitBufferManagerAccess();
+        assert!(
+            crate::privref::overflow_table_exists(),
+            "InitBufferManagerAccess must create the PrivateRefCount table (bufmgr.c:4049)"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
 // bufmgr.c:4057 InitBufferManagerAccess registers AtProcExit_Buffers with
 // on_shmem_exit, so a backend dying mid-LockBufferForCleanup clears its
 // BM_PIN_COUNT_WAITER flag (UnlockBuffers) on the way out.

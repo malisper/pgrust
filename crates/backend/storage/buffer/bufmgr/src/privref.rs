@@ -52,6 +52,20 @@ fn make_overflow_map() -> ManuallyDrop<PgHashMap<'static, Buffer, i32>> {
     ManuallyDrop::new(PgHashMap::with_hasher_in(Default::default(), cx.mcx()))
 }
 
+/// InitBufferManagerAccess (bufmgr.c:4049 hash_create "PrivateRefCount"):
+/// the overflow table and its context exist from backend start.
+pub(crate) fn init() {
+    with(|p| {
+        debug_assert!(p.overflowed == 0);
+        p.overflow = Some(make_overflow_map());
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn overflow_table_exists() -> bool {
+    with(|p| p.overflow.is_some())
+}
+
 fn reserve_slot(p: &mut PrivRef) {
     if p.reserved >= 0 {
         return;
