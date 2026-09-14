@@ -124,6 +124,12 @@ mod tests {
             c_basename_for_rust_path("crates/backend/utils/adt/int/src/lib.rs").as_deref(),
             Some("int.c")
         );
+        // Prefixed package names (adt_tsgistidx) resolve to their own C file,
+        // not the first file of the catalog row (tsginidx.c).
+        assert_eq!(
+            c_basename_for_rust_path("crates/backend/utils/adt/tsgistidx/src/lib.rs").as_deref(),
+            Some("tsgistidx.c")
+        );
         // Unknown crates still never leak a path.
         let mapped = c_basename_for_rust_path("crates/x/y/brand_new_crate/src/lib.rs").unwrap();
         assert_eq!(mapped, "brand_new_crate.c");
