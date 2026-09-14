@@ -1,6 +1,6 @@
 /* Emits Rust parity vectors by running the real vendored pg_lzcompress.c.
  * Regenerate: clang -O2 -I tests/data/cref -o gen tests/data/gen_vectors.c \
- *   ../../../../pgrust-reference/vendor/postgres-src/src/common/pg_lzcompress.c \
+ *   ../../postgres-18.6-reference/src/common/pg_lzcompress.c \
  *   && ./gen > tests/data/c_vectors.rs
  * NOTE: compressed streams depend on the platform's char signedness (the
  * pglz_hist_idx reads through `char`); this file records which signedness

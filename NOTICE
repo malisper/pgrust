@@ -1,9 +1,9 @@
 NOTICE
 ======
 
-pgrust-fast is a reimplementation of the PostgreSQL database system in
+pgrust is a reimplementation of the PostgreSQL database system in
 Rust. It is written as new Rust code, but it is closely based on the
-PostgreSQL source code (version 18.3): it follows PostgreSQL's
+PostgreSQL source code (version 18.6): it follows PostgreSQL's
 architecture, algorithms, data formats, catalog contents, constants,
 and user-visible behavior (including SQL semantics, error codes, and
 error message text, which are intentionally kept identical to

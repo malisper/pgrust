@@ -1,2 +1,2 @@
-/* Shim: resolves to the vendored header. */
-#include "../../../../../../../../pgrust-reference/vendor/postgres-src/src/include/common/hashfn.h"
+/* Shim: resolves to the in-tree PostgreSQL 18.6 reference header. */
+#include "../../../../../../postgres-18.6-reference/src/include/common/hashfn.h"

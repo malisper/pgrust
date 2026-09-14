@@ -1,8 +1,8 @@
 /* Emits Rust parity vectors by running the real vendored C, both paths.
  * Regenerate (ARM64 host with FEAT_CRC32):
  *   clang -O2 -I tests/data/cref -o gen tests/data/gen_vectors.c \
- *     ../../../../pgrust-reference/vendor/postgres-src/src/port/pg_crc32c_sb8.c \
- *     ../../../../pgrust-reference/vendor/postgres-src/src/port/pg_crc32c_armv8.c \
+ *     ../../postgres-18.6-reference/src/port/pg_crc32c_sb8.c \
+ *     ../../postgres-18.6-reference/src/port/pg_crc32c_armv8.c \
  *   && ./gen > tests/data/c_vectors.rs
  * Exits nonzero if the C sb8 and armv8 paths ever disagree. */
 #include <stdio.h>

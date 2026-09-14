@@ -1,8 +1,8 @@
 /* Emits Rust parity vectors by running the real vendored wchar.c.
  * Regenerate: clang -O2 -I tests/data/cref \
- *   -I ../pgrust-reference/vendor/postgres-src/src/include \
+ *   -I ../../postgres-18.6-reference/src/include \
  *   -o gen tests/data/cref/gen_vectors.c \
- *   ../pgrust-reference/vendor/postgres-src/src/common/wchar.c && ./gen > tests/data/c_vectors.rs */
+ *   ../../postgres-18.6-reference/src/common/wchar.c && ./gen > tests/data/c_vectors.rs */
 #include <stdio.h>
 #include <stdlib.h>
 #include "c.h"

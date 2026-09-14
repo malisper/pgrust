@@ -1,6 +1,6 @@
 /* Emits Rust parity vectors by running the real vendored hashfn.c.
  * Regenerate: clang -O2 -I tests/data/cref -o gen gen_vectors.c \
- *   ../pgrust-reference/vendor/postgres-src/src/common/hashfn.c && ./gen > c_vectors.rs */
+ *   ../../postgres-18.6-reference/src/common/hashfn.c && ./gen > c_vectors.rs */
 #include <stdio.h>
 #include <stdint.h>
 #include "postgres.h"

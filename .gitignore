@@ -1,10 +1,8 @@
 /target
 **/target
-CI-results/
 *.profraw
 **/target-*/
 covloop-history/
-scripts/__pycache__/
 proofs/coverage/__pycache__/
 
 # cargo-mutants working/output directory (transient audit artifacts)
@@ -33,8 +31,6 @@ mutants.out.old/
 # integration-9 local evidence (manifests + leg logs; summary lives in docs/fuzzing/findings-int9.md)
 /int9-evidence/
 
-# snouty local config
-.snouty.toml
 # accidental build-log commits
 /cpg-build.log
 cpg-ref-install/
@@ -49,9 +45,6 @@ fts-findings*.jsonl
 fts-only-findings*.jsonl
 fts-*findings-manifest.txt
 wire-diff-out/
-.claude/worktrees/
 .tpchconv/
 .tpch22/
-scripts/sqe/matrix/selftest-work/
-scripts/sqe/CI cluster/*/launch-scratch/
 __pycache__/
