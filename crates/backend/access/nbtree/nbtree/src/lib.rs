@@ -51,8 +51,8 @@ use utils::bt_killitems;
 pub use fcframe::OrderProcFrame;
 pub use search::{bt_peek_same_block_tids, BtScanInsert};
 pub use utils::{
-    bt_check_third_page, bt_keep_natts_fast, bt_mkscankey, bt_truncate, BTreeShmemInit,
-    BTreeShmemResetAfterCrash, BTreeShmemSize,
+    bt_allequalimage, bt_check_third_page, bt_keep_natts_fast, bt_mkscankey, bt_truncate,
+    BTreeShmemInit, BTreeShmemResetAfterCrash, BTreeShmemSize,
 };
 
 /// skey.h SK_ROW_HEADER contract: sk_argument holds the pointer word of the

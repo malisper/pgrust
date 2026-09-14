@@ -4,7 +4,7 @@
 
 use ::arrayfuncs::foundation as arrfn;
 use ::datum::Datum;
-use ::fmgr_core::{fmgr_info, function_call2_coll, oid_function_call2_coll};
+use ::fmgr_core::{fmgr_info, function_call2_coll_in};
 use ::mcx::{Mcx, PgVec};
 use ::types_core::INDEX_MAX_KEYS;
 use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
@@ -501,12 +501,15 @@ fn compare_scankey_args_scalar(
     if lefttype == opcintype && righttype == optype {
         // fmgr_info_copy clone stands in for C's persistent &op->sk_func.
         let mut func = op.sk_func.clone();
-        let r = function_call2_coll(
-            &mut func,
-            op.sk_collation,
-            leftarg.sk_argument,
-            rightarg.sk_argument,
-        )?;
+        let r = crate::fcframe::with_proc_scratch(|mcx| {
+            function_call2_coll_in(
+                &mut func,
+                op.sk_collation,
+                mcx,
+                leftarg.sk_argument,
+                rightarg.sk_argument,
+            )
+        })?;
         return Ok(Some(r.as_bool()));
     }
 
@@ -524,12 +527,16 @@ fn compare_scankey_args_scalar(
     if cmp_op != 0 {
         let cmp_proc = lsyscache::get_opcode(cmp_op)?;
         if cmp_proc != 0 {
-            let r = oid_function_call2_coll(
-                cmp_proc,
-                op.sk_collation,
-                leftarg.sk_argument,
-                rightarg.sk_argument,
-            )?;
+            let mut func = fmgr_info(cmp_proc)?;
+            let r = crate::fcframe::with_proc_scratch(|mcx| {
+                function_call2_coll_in(
+                    &mut func,
+                    op.sk_collation,
+                    mcx,
+                    leftarg.sk_argument,
+                    rightarg.sk_argument,
+                )
+            })?;
             return Ok(Some(r.as_bool()));
         }
     }
@@ -1406,7 +1413,10 @@ fn bt_find_extreme_element(
     debug_assert!(!elems.is_empty());
     let mut result = elems[0];
     for &e in &elems[1..] {
-        if function_call2_coll(&mut flinfo, skey.sk_collation, e, result)?.as_bool() {
+        let r = crate::fcframe::with_proc_scratch(|mcx| {
+            function_call2_coll_in(&mut flinfo, skey.sk_collation, mcx, e, result)
+        })?;
+        if r.as_bool() {
             result = e;
         }
     }

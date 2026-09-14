@@ -61,17 +61,15 @@ pub(crate) struct BTVacState<'a, 'cb, 'mcx> {
     pub maxbufsize: usize,
 }
 
-fn vacuum_delay_point() -> PgResult<()> {
-    crate::check_for_interrupts()?;
-    // Cost-based delay (autovacuum runs with VacuumCostActive) lives in
-    // commands_vacuum::vacuum_delay_point, reached via seam (dependency
-    // direction: commands_vacuum depends on nbtree). The uncosted path skips
-    // the seam call, so unit rigs without seams_init never need it; config
-    // reloads are picked up at the heap-phase delay points as before.
-    if init_small::globals::VacuumCostActive() {
-        vacuum_seams::vacuum_delay_point::call(false)?;
+pub(crate) fn vacuum_delay_point() -> PgResult<()> {
+    // commands_vacuum::vacuum_delay_point (reached via seam: commands_vacuum
+    // depends on nbtree) is called unconditionally as nbtree.c:1305/1671 do,
+    // so an autovacuum worker's pending config reload can arm cost delays
+    // mid-scan; unit rigs without seams_init keep the bare interrupt check.
+    if vacuum_seams::vacuum_delay_point::is_installed() {
+        return vacuum_seams::vacuum_delay_point::call(false);
     }
-    Ok(())
+    crate::check_for_interrupts()
 }
 
 pub(crate) fn tid_is_member(dead_items: &[ItemPointerData], tid: &ItemPointerData) -> bool {

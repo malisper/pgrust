@@ -158,7 +158,9 @@ thread_local! {
 // (a cmp proc whose catalog lookup runs a nested index scan) sees the cell
 // busy and takes a fresh short-lived context instead of resetting the
 // outer's live copies.
-fn with_proc_scratch<R>(f: impl for<'s> FnOnce(::mcx::Mcx<'s>) -> PgResult<R>) -> PgResult<R> {
+pub(crate) fn with_proc_scratch<R>(
+    f: impl for<'s> FnOnce(::mcx::Mcx<'s>) -> PgResult<R>,
+) -> PgResult<R> {
     PROC_SCRATCH.with(|cell| match cell.try_borrow_mut() {
         Ok(mut ctx) => {
             ctx.reset();

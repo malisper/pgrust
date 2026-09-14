@@ -2547,3 +2547,70 @@ fn vacuum_cycleid_registry_roundtrip_over_the_shared_table() {
     // Silent when no entry exists, as C.
     crate::utils::bt_end_vacuum(&rel).unwrap();
 }
+
+// fp-adt-datum#1: datum_image_eq compares the whole eight-byte Datum word,
+// not a usize truncation of it (wasm32: usize is four bytes).
+#[test]
+fn datum_image_eq_compares_the_whole_eight_byte_word() {
+    let (small, wide) = (Datum::from_i64(1), Datum::from_i64(4294967297));
+    // SAFETY: by-value datums; nothing is dereferenced.
+    unsafe {
+        assert!(!crate::utils::datum_image_eq(small, wide, true, 8));
+        assert!(crate::utils::datum_image_eq(wide, wide, true, 8));
+        assert!(crate::utils::datum_image_eq(small, wide, true, 4));
+    }
+}
+
+// fp-nbtree-nbtsplitloc#2: equal-delta split candidates come out in
+// pg_qsort's permutation (expected orders computed by C's pg_qsort over
+// src/port/qsort.c with _bt_splitcmp).
+#[test]
+fn split_candidates_sort_in_pg_qsort_tie_order() {
+    fn order(deltas: &[i16]) -> Vec<u16> {
+        let mut v: Vec<crate::splitloc::SplitPoint> = deltas
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| crate::splitloc::SplitPoint {
+                curdelta: d,
+                leftfree: 0,
+                rightfree: 0,
+                firstrightoff: i as u16,
+                newitemonleft: false,
+            })
+            .collect();
+        crate::splitloc::sort_splits(&mut v);
+        v.iter().map(|s| s.firstrightoff).collect()
+    }
+    assert_eq!(
+        order(&[6820, 5580, 4340, 3100, 1860, 620, 620, 1860, 3100, 4340, 5580, 6820]),
+        vec![6, 5, 7, 4, 8, 3, 9, 2, 1, 10, 11, 0]
+    );
+    assert_eq!(order(&[3, 1, 2, 1, 3, 2, 1]), vec![3, 1, 6, 5, 2, 0, 4]);
+    assert_eq!(
+        order(&[5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]),
+        vec![8, 9, 10, 11, 13, 12, 6, 7, 15, 4, 5, 14, 2, 17, 16, 3, 19, 1, 18, 0]
+    );
+}
+
+// fp-nbtree-nbtree#2 / fp-commands-vacuum#3: the per-page delay point
+// reaches vacuum_delay_point even while VacuumCostActive is false, so a
+// pending autovacuum config reload is processed mid-scan (nbtree.c:1305).
+static DELAY_POINT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn counting_delay_point(_is_analyze: bool) -> PgResult<()> {
+    DELAY_POINT_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+#[test]
+fn vacuum_delay_point_reaches_the_seam_without_cost_active() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| vacuum_seams::vacuum_delay_point::set(counting_delay_point));
+    assert!(!init_small::globals::VacuumCostActive());
+    let before = DELAY_POINT_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    crate::vacuum::vacuum_delay_point().unwrap();
+    assert_eq!(
+        DELAY_POINT_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+}

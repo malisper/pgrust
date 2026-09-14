@@ -1433,7 +1433,7 @@ unsafe fn bt_checkkeys_look_ahead(
 ///
 /// # Safety
 /// By-ref datums point at live in-page values of the attribute's type shape.
-unsafe fn datum_image_eq(a: Datum, b: Datum, attbyval: bool, attlen: i16) -> bool {
+pub(crate) unsafe fn datum_image_eq(a: Datum, b: Datum, attbyval: bool, attlen: i16) -> bool {
     if attbyval {
         // Compare at attlen width: a formed-then-deformed datum may differ
         // from the original in the upper bits (C 49315de).
@@ -1442,7 +1442,7 @@ unsafe fn datum_image_eq(a: Datum, b: Datum, attbyval: bool, attlen: i16) -> boo
             1 => x as u8 == y as u8,
             2 => x as u16 == y as u16,
             4 => x as u32 == y as u32,
-            _ => x == y,
+            _ => a.as_u64() == b.as_u64(),
         };
     }
     let pa = a.as_usize() as *const u8;
@@ -2376,9 +2376,15 @@ pub fn bt_allequalimage(rel: &Relation<'_>) -> PgResult<bool> {
             return Ok(false);
         }
         let mut finfo = fmgr_core::fmgr_info(equalimageproc)?;
-        let mut fcinfo = ::types_fmgr::LocalFcinfo::<1>::fresh(collation);
-        fcinfo.set_arg(0, Datum::from_oid(opcintype));
-        if !finfo.invoke(&mut fcinfo)?.as_bool() {
+        let r = crate::fcframe::with_proc_scratch(|mcx| {
+            fmgr_core::function_call1_coll_in(
+                &mut finfo,
+                collation,
+                mcx,
+                Datum::from_oid(opcintype),
+            )
+        })?;
+        if !r.as_bool() {
             return Ok(false);
         }
     }

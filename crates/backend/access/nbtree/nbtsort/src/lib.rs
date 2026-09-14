@@ -9,7 +9,7 @@
 mod pool;
 
 use ::mcx::Mcx;
-use ::types_core::{BlockNumber, ForkNumber, InvalidOid, OffsetNumber, BLCKSZ};
+use ::types_core::{BlockNumber, ForkNumber, OffsetNumber, BLCKSZ};
 use ::types_error::PgResult;
 use ::types_nbtree::{
     BTMaxItemSize, BTPageOpaqueData, BTP_LEAF, BTP_ROOT, BTREE_DEFAULT_FILLFACTOR,
@@ -29,7 +29,6 @@ use nbtree::{BtScanInsert, OrderProcFrame};
 
 const P_NONE: BlockNumber = 0;
 const BTREE_METAPAGE: BlockNumber = 0;
-const BTEQUALIMAGE_PROC: i16 = 4;
 
 pub struct IndexBuildResult {
     pub heap_tuples: f64,
@@ -199,7 +198,7 @@ fn leafbuild<'mcx>(
         wstate.inskey.allequalimage && !is_unique && bt_get_deduplicate_items(index);
 
     let mut levels: Vec<BTPageState<'mcx>> = Vec::new();
-    if let Some(mut sort2) = spool2 {
+    if let Some(sort2) = spool2.as_mut() {
         // _bt_load merge arm (nbtsort.c:1156): interleave the live and dead
         // spools in key-then-TID order; dedup never applies (unique build).
         let mut itup = sortstate.getindextuple(true)?;
@@ -275,6 +274,7 @@ fn leafbuild<'mcx>(
     uppershutdown(mcx, &mut wstate, levels)?;
     bulkwrite::smgr_bulk_finish(wstate.bulkstate)?;
     drop(sortstate);
+    drop(spool2);
     Ok(())
 }
 
@@ -652,27 +652,7 @@ fn bt_allequalimage(rel: &Relation<'_>, debugmessage: bool) -> PgResult<bool> {
 }
 
 fn bt_allequalimage_check(rel: &Relation<'_>) -> PgResult<bool> {
-    // INCLUDE indexes can never support deduplication (nbtutils.c:4264).
-    if rel.indnatts() != rel.indnkeyatts() {
-        return Ok(false);
-    }
-    for i in 0..rel.indnkeyatts() as usize {
-        let opfamily = rel.rd_opfamily[i];
-        let opcintype = rel.rd_opcintype[i];
-        let collation = rel.rd_indcollation[i];
-        let equalimageproc =
-            lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTEQUALIMAGE_PROC)?;
-        if equalimageproc == InvalidOid {
-            return Ok(false);
-        }
-        let mut finfo = fmgr_seams::fmgr_info::call(equalimageproc)?;
-        let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(collation);
-        fcinfo.set_arg(0, datum::Datum::from_oid(opcintype));
-        if !finfo.invoke(&mut fcinfo)?.as_bool() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    nbtree::bt_allequalimage(rel)
 }
 
 const _: () = assert!(BLCKSZ == 8192);

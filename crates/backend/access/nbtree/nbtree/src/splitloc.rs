@@ -27,12 +27,12 @@ enum FindSplitStrat {
 }
 
 #[derive(Clone, Copy)]
-struct SplitPoint {
-    curdelta: i16,
-    leftfree: i16,
-    rightfree: i16,
-    firstrightoff: OffsetNumber,
-    newitemonleft: bool,
+pub(crate) struct SplitPoint {
+    pub(crate) curdelta: i16,
+    pub(crate) leftfree: i16,
+    pub(crate) rightfree: i16,
+    pub(crate) firstrightoff: OffsetNumber,
+    pub(crate) newitemonleft: bool,
 }
 
 struct FindSplitData<'a, 'p, 'mcx> {
@@ -269,7 +269,13 @@ fn deltasortsplits(state: &mut FindSplitData<'_, '_, '_>, fillfactormult: f64, u
         };
         split.curdelta = if delta < 0 { -delta } else { delta };
     }
-    state.splits.sort_unstable_by_key(|s| s.curdelta);
+    sort_splits(&mut state.splits);
+}
+
+/// qsort(..., _bt_splitcmp): pg_qsort's equal-delta permutation decides
+/// which of several equally balanced split points wins.
+pub(crate) fn sort_splits(splits: &mut [SplitPoint]) {
+    ::pg_qsort::pg_qsort(splits, |a, b| a.curdelta as i32 - b.curdelta as i32);
 }
 
 /// _bt_afternewitemoff.
