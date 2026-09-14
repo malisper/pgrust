@@ -1,3 +1,7 @@
+// wasm32: positioned file I/O (FileExt, bankstats.rs) lives behind std's unstable
+// wasi_ext; the wasm build runs on the pinned nightly (wasm/wasm-build.sh),
+// native stable builds never see this (pgrcolumnar precedent).
+#![cfg_attr(target_family = "wasm", feature(wasi_ext))]
 //! sqe — the stencil query engine (production port of the PoC engine;
 //! docs/design/sqe/production-plan.md §P1-1, docs/design/sqe/port-study/).
 //!

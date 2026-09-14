@@ -11,7 +11,10 @@
 
 use pgrc2_format::bankstats as fb;
 use std::io::Read;
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::fs::FileExt;
+#[cfg(target_family = "wasm")]
+use std::os::wasi::fs::FileExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 

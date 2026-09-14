@@ -786,6 +786,9 @@ pub fn set_pglocale_pgservice(
     log_error: impl FnMut(ExecLogCode, String),
 ) {
     /* don't set LC_ALL in the backend */
+    // wasm32-wasip1 has no setlocale (libc exposes no LC_ALL there); the
+    // module only ever runs as the backend, which skips this arm anyway.
+    #[cfg(not(target_family = "wasm"))]
     if app != PG_TEXTDOMAIN_POSTGRES {
         // SAFETY: process-startup call on the main thread, before any
         // locale-dependent library state exists.
@@ -793,6 +796,8 @@ pub fn set_pglocale_pgservice(
             libc::setlocale(libc::LC_ALL, c"".as_ptr());
         }
     }
+    #[cfg(target_family = "wasm")]
+    let _ = app;
 
     let Ok(my_exec_path) = find_my_exec(argv0, log_error) else {
         return;

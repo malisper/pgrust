@@ -1,5 +1,12 @@
 use ifaddr::AddressFamily;
 use ip::{AddrInfoHint, PgAddrInfo};
+
+// RADIUS server resolution hints UDP; wasm32-wasip1's libc has no SOCK_DGRAM
+// (and no sockets to open), so carry the POSIX value there.
+#[cfg(not(target_family = "wasm"))]
+const SOCK_DGRAM: core::ffi::c_int = libc::SOCK_DGRAM;
+#[cfg(target_family = "wasm")]
+const SOCK_DGRAM: core::ffi::c_int = 2;
 use types_core::init::{
     uaBSD, uaCert, uaGSS, uaIdent, uaLDAP, uaMD5, uaOAuth, uaPAM, uaPassword, uaPeer, uaRADIUS,
     uaReject, uaSCRAM, uaSSPI, uaTrust,
@@ -975,7 +982,7 @@ pub(crate) fn parse_hba_auth_opt(
                 let hint = AddrInfoHint {
                     flags: 0,
                     family: ip::sys::AF_UNSPEC,
-                    socktype: libc::SOCK_DGRAM,
+                    socktype: SOCK_DGRAM,
                 };
                 let mut gai_result: Vec<PgAddrInfo> = Vec::new();
                 let ret = ip::pg_getaddrinfo_all(Some(server), None, &hint, &mut gai_result);

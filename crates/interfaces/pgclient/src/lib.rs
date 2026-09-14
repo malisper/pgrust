@@ -361,6 +361,7 @@ fn check_requirepeer(_sock: RawFd, _want: &str) -> Result<(), String> {
     Err("requirepeer is not supported on this platform".into())
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn unix_connect(path: &str) -> Result<(Stream, RawFd), String> {
     use std::os::fd::AsRawFd;
     match std::os::unix::net::UnixStream::connect(path) {

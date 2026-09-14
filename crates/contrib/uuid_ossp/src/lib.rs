@@ -123,6 +123,14 @@ fn v1_state() -> PgResult<V1State> {
     Ok(s)
 }
 
+// wasm32-wasip1: no getifaddrs — uuid_generate_v1 falls back to the random
+// multicast node id (RFC 4122 §4.5), as C does when no MAC is found.
+#[cfg(target_family = "wasm")]
+fn get_node_id() -> Option<[u8; 6]> {
+    None
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn get_node_id() -> Option<[u8; 6]> {
     let mut found = None;
     // SAFETY: getifaddrs owns the list until freeifaddrs.
@@ -174,7 +182,7 @@ unsafe fn link_addr(sa: *const libc::sockaddr) -> Option<[u8; 6]> {
     Some(node)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "linux", target_os = "android")))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "linux", target_os = "android", target_family = "wasm")))]
 unsafe fn link_addr(_sa: *const libc::sockaddr) -> Option<[u8; 6]> {
     None
 }

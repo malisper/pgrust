@@ -31,7 +31,7 @@
 //! the one server process, and no test in our suite uses set_local.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use pgsync::Mutex;
 
 use condition_variable::{
@@ -76,9 +76,10 @@ struct Entry {
 // local cache is non-empty — C destroys such a cache the next time a refresh
 // finds max_inuse == 0 (:447-452), so a thread holding cached entries must
 // still take the slow path after the last detach, to do that destruction.
-static GATE: AtomicUsize = AtomicUsize::new(0);
-const CACHE_HOLDER: usize = 1 << 32;
-const ATTACHED_MASK: usize = CACHE_HOLDER - 1;
+// u64 on every target: the high half needs bit 32 (wasm32 has a 4-byte usize).
+static GATE: AtomicU64 = AtomicU64::new(0);
+const CACHE_HOLDER: u64 = 1 << 32;
+const ATTACHED_MASK: u64 = CACHE_HOLDER - 1;
 
 // Source of entry generations (see Entry::generation).
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -174,7 +175,7 @@ pub fn detach(name: &str) -> bool {
     let before = reg.len();
     reg.retain(|e| e.name != name);
     let removed = before - reg.len();
-    GATE.fetch_sub(removed, Relaxed);
+    GATE.fetch_sub(removed as u64, Relaxed);
     removed != 0
 }
 

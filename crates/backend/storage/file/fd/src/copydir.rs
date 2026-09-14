@@ -230,6 +230,17 @@ fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {
     Ok(())
 }
 
+// clone_file (copydir.c), the `#else` arm (neither HAVE_COPYFILE nor
+// HAVE_COPY_FILE_RANGE — e.g. wasm32-wasip1): ereport(ERROR).
+#[cfg(all(not(pgrust_sim), not(any(target_os = "macos", target_os = "linux"))))]
+fn clone_file(_fromfile: &str, _tofile: &str) -> PgResult<()> {
+    Err(ereport(ERROR)
+        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg("file cloning not supported on this platform")
+        .finish(loc("clone_file"))
+        .unwrap_err())
+}
+
 // clone_file (copydir.c), HAVE_COPY_FILE_RANGE arm.
 #[cfg(all(not(pgrust_sim), target_os = "linux"))]
 fn clone_file(fromfile: &str, tofile: &str) -> PgResult<()> {

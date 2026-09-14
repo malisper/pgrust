@@ -240,7 +240,9 @@ impl StrCell {
     #[inline]
     pub fn image_ptr(&self) -> *const u8 {
         debug_assert!(!self.is_inline());
-        usize::from_ne_bytes(self.tail) as *const u8
+        // tail is always 8 bytes (line 141 packs the pointer as u64), so read it
+        // back as u64 on every pointer width (wasm32 has a 4-byte usize).
+        u64::from_ne_bytes(self.tail) as usize as *const u8
     }
 
     /// The string bytes.
