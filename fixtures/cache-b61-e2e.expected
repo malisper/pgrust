@@ -1,0 +1,56 @@
+-- bugs/batch-61-backend-utils-cache: cache fixes, expected captured from C 18.6.
+\set VERBOSITY verbose
+-- fp-cache-typcache#2: typcache.c:1325 decr_dcc_refcount deletes a reloaded
+-- domain's "Domain constraints" context once nothing references it, so a
+-- session holds one such context per domain, not one per reload.
+CREATE DOMAIN b61_dom AS integer CONSTRAINT b61_ck CHECK (VALUE > 0);
+SELECT 1::b61_dom;
+ b61_dom 
+---------
+       1
+(1 row)
+
+SELECT count(*) AS dcc_contexts FROM pg_backend_memory_contexts WHERE name = 'Domain constraints';
+ dcc_contexts 
+--------------
+            1
+(1 row)
+
+DO $$ BEGIN
+  FOR i IN 1..20 LOOP
+    EXECUTE 'ALTER DOMAIN b61_dom DROP CONSTRAINT b61_ck';
+    EXECUTE 'ALTER DOMAIN b61_dom ADD CONSTRAINT b61_ck CHECK (VALUE > ' || i || ')';
+    PERFORM (i + 100)::b61_dom;
+  END LOOP;
+END $$;
+SELECT count(*) AS dcc_contexts FROM pg_backend_memory_contexts WHERE name = 'Domain constraints';
+ dcc_contexts 
+--------------
+            1
+(1 row)
+
+SELECT 21::b61_dom;
+ b61_dom 
+---------
+      21
+(1 row)
+
+SELECT 20::b61_dom;
+ERROR:  23514: value for domain b61_dom violates check constraint "b61_ck"
+SCHEMA NAME:  public
+DATATYPE NAME:  b61_dom
+CONSTRAINT NAME:  b61_ck
+ALTER DOMAIN b61_dom DROP CONSTRAINT b61_ck;
+SELECT 20::b61_dom;
+ b61_dom 
+---------
+      20
+(1 row)
+
+SELECT count(*) AS dcc_contexts FROM pg_backend_memory_contexts WHERE name = 'Domain constraints';
+ dcc_contexts 
+--------------
+            0
+(1 row)
+
+DROP DOMAIN b61_dom;

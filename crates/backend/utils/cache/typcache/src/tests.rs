@@ -760,6 +760,23 @@ fn domain_constraints_order_and_update() {
     assert_eq!(r.constraints().len(), 3);
 }
 
+// typcache.c:1325 decr_dcc_refcount: a reloaded constraint set is deleted
+// once the typcache entry and every DomainConstraintRef let go of it.
+#[test]
+fn domain_constraint_cache_is_freed_when_unreferenced() {
+    install();
+    let mut r = crate::domain::DomainConstraintRef::init(DOMAIN_OID).unwrap();
+    let pin = crate::domain::DomainConstraintRef::init(DOMAIN_OID).unwrap();
+    let old = r.dcc_weak().unwrap();
+    invalidate::TypeCacheConstrCallback(Datum::from_oid(InvalidOid), 19, 0);
+    assert!(r.update().unwrap());
+    assert!(old.upgrade().is_some());
+    assert_ne!(r.dcc_addr(), Rc::as_ptr(&old.upgrade().unwrap()) as usize);
+    drop(pin);
+    assert!(old.upgrade().is_none());
+    assert_eq!(r.constraints().len(), 3);
+}
+
 #[test]
 fn deferred_lane_flags_are_noops_for_other_typtypes() {
     install();

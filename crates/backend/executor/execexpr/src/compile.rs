@@ -4889,6 +4889,10 @@ fn init_coerce_to_domain<'mcx>(
             }
         }
     }
+    // execExpr.c:3553 InitDomainConstraintRef(..., CurrentMemoryContext): the
+    // ref pins the constraint set the steps point into until this context
+    // resets (typcache.c:1339 dccref_deletion_callback).
+    mcx.context().register_reset_callback(move || drop(cref));
     Ok(())
 }
 

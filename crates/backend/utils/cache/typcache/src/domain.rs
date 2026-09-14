@@ -23,16 +23,18 @@ pub struct DomainConstraintState {
     pub check_expr: Option<Node<'static>>,
 }
 
+// typcache.c:1325 decr_dcc_refcount: the Rc is C's dccRefCount (one for the
+// typcache entry, one per DomainConstraintRef) and dropping the last one
+// deletes the "Domain constraints" context.
 pub struct DomainConstraintCache {
     pub constraints: &'static [DomainConstraintState],
+    _ctx: Box<MemoryContext>,
 }
 
-// C parents the dcc context under CacheMemoryContext and frees it when
-// dccRefCount drops to zero; here it is leaked (constraint-set changes are
-// DDL-rare and consumers borrow &'static into it — C's ref-list leak comment
-// is the precedent).
-fn leak_dcc_mcx() -> Mcx<'static> {
-    ::mcx::session_root("Domain constraints").mcx()
+fn dcc_mcx(ctx: &MemoryContext) -> Mcx<'static> {
+    // SAFETY: every 'static borrow handed out lives in the boxed context the
+    // DomainConstraintCache owns and is only reachable through its Rc.
+    unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) }
 }
 
 fn str_in(mcx: Mcx<'static>, s: &str) -> PgResult<&'static str> {
@@ -57,7 +59,7 @@ pub(crate) fn type_lookup_failed(type_oid: Oid) -> Box<PgError> {
 pub(crate) fn load_domaintype_info(entry: &TypeCacheEntry) -> PgResult<()> {
     let mut type_oid = entry.type_id;
     let mut not_null = false;
-    let mut dcc_mcx: Option<Mcx<'static>> = None;
+    let mut dcc_ctx: Option<Box<MemoryContext>> = None;
     let mut constraints: Vec<DomainConstraintState> = Vec::new();
 
     loop {
@@ -77,7 +79,9 @@ pub(crate) fn load_domaintype_info(entry: &TypeCacheEntry) -> PgResult<()> {
         let scan_mcx = MemoryContext::new("load_domaintype_info");
         let rows = typcache_seams::scan_domain_check_constraints::call(scan_mcx.mcx(), type_oid)?;
         if !rows.is_empty() {
-            let mcx = *dcc_mcx.get_or_insert_with(leak_dcc_mcx);
+            let mcx = dcc_mcx(
+                dcc_ctx.get_or_insert_with(|| Box::new(MemoryContext::new("Domain constraints"))),
+            );
             let mut level: Vec<DomainConstraintState> = Vec::with_capacity(rows.len());
             for row in rows.iter() {
                 let name_str = core::str::from_utf8(row.conname.name_str())
@@ -111,19 +115,20 @@ pub(crate) fn load_domaintype_info(entry: &TypeCacheEntry) -> PgResult<()> {
     }
 
     if constraints.is_empty() {
-        entry.domain_data.set(None);
+        entry.domain_data.replace(None);
     } else {
-        let mcx = dcc_mcx.unwrap_or_else(leak_dcc_mcx);
+        let ctx = dcc_ctx.unwrap_or_else(|| Box::new(MemoryContext::new("Domain constraints")));
+        let mcx = dcc_mcx(&ctx);
         let mut v: PgVec<'static, DomainConstraintState> =
             mcx::vec_with_capacity_in(mcx, constraints.len())?;
         for c in constraints {
             v.push(c);
         }
-        let dcc: &'static DomainConstraintCache = mcx::leak_in(mcx::alloc_in(
-            mcx,
-            DomainConstraintCache { constraints: v.leak() },
-        )?);
-        entry.domain_data.set(Some(dcc));
+        let dcc = Rc::new(DomainConstraintCache {
+            constraints: v.leak(),
+            _ctx: ctx,
+        });
+        entry.domain_data.replace(Some(dcc));
     }
     entry.set_flags(TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS);
     Ok(())
@@ -142,13 +147,13 @@ fn expression_planner(mcx: Mcx<'static>, expr: Node<'static>) -> PgResult<Node<'
 /// engine caches its own programs keyed by dcc identity).
 pub struct DomainConstraintRef {
     entry: Rc<TypeCacheEntry>,
-    dcc: Option<&'static DomainConstraintCache>,
+    dcc: Option<Rc<DomainConstraintCache>>,
 }
 
 impl DomainConstraintRef {
     pub fn init(type_id: Oid) -> PgResult<DomainConstraintRef> {
         let entry = lookup_type_cache(type_id, TYPECACHE_DOMAIN_CONSTR_INFO)?;
-        let dcc = entry.domain_data.get();
+        let dcc = entry.domain_data.borrow().clone();
         Ok(DomainConstraintRef { entry, dcc })
     }
 
@@ -161,9 +166,9 @@ impl DomainConstraintRef {
             load_domaintype_info(&self.entry)?;
             self.entry.set_ready(crate::compute_ready(&self.entry));
         }
-        let current = self.entry.domain_data.get();
-        let changed = !match (self.dcc, current) {
-            (Some(a), Some(b)) => core::ptr::eq(a, b),
+        let current = self.entry.domain_data.borrow().clone();
+        let changed = !match (&self.dcc, &current) {
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
             (None, None) => true,
             _ => false,
         };
@@ -171,8 +176,8 @@ impl DomainConstraintRef {
         Ok(changed)
     }
 
-    pub fn constraints(&self) -> &'static [DomainConstraintState] {
-        match self.dcc {
+    pub fn constraints(&self) -> &[DomainConstraintState] {
+        match &self.dcc {
             Some(dcc) => dcc.constraints,
             None => &[],
         }
@@ -180,7 +185,12 @@ impl DomainConstraintRef {
 
     /// Identity of the current dcc, for consumer-side compiled-program memos.
     pub fn dcc_addr(&self) -> usize {
-        self.dcc.map_or(0, |d| d as *const _ as usize)
+        self.dcc.as_ref().map_or(0, |d| Rc::as_ptr(d) as usize)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dcc_weak(&self) -> Option<std::rc::Weak<DomainConstraintCache>> {
+        self.dcc.as_ref().map(Rc::downgrade)
     }
 
     pub fn typlen(&self) -> i16 {
@@ -190,5 +200,6 @@ impl DomainConstraintRef {
 
 pub fn DomainHasConstraints(type_id: Oid) -> PgResult<bool> {
     let entry = lookup_type_cache(type_id, TYPECACHE_DOMAIN_CONSTR_INFO)?;
-    Ok(entry.domain_data.get().is_some())
+    let has = entry.domain_data.borrow().is_some();
+    Ok(has)
 }
