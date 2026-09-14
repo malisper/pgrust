@@ -52,6 +52,7 @@ genam = { path = "../../access/index/genam" }
 heaptuple = { path = "../../access/common/heaptuple" }
 autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
 miscinit = { path = "../../utils/init/miscinit" }
 interrupt = { path = "../../postmaster/interrupt" }
 guc_file_seams = { path = "../../utils/misc/guc_file_seams" }

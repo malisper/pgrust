@@ -923,6 +923,13 @@ enum PoolJoin {
     Fallback,
 }
 
+// Cumulative pool counters (a claim precedes its detach): read detached
+// first so a fresh detached is never compared against a stale claimed.
+fn all_detached(entry: &parallel::standing::StandingEngagement) -> bool {
+    let detached = entry.detached();
+    detached >= entry.claimed()
+}
+
 /// The leader's join loop: drain formed-tuple batches into the caller's
 /// spools between completion/interrupt/fallback-verdict polls (the M4.1
 /// pool_leader_join shape with the batch drain as the leader's duty).
@@ -1042,7 +1049,7 @@ fn pool_leader_join(
             return Ok(PoolJoin::Fallback);
         }
         if started == 0
-            && entry.detached() >= claimed
+            && all_detached(entry)
             && std::time::Duration::from_nanos(t0.elapsed_ns()) > pool_claim_deadline()
         {
             pool_drain_rg(rt, rg);
@@ -1051,7 +1058,7 @@ fn pool_leader_join(
             debug_assert_eq!(consumed, 0, "fallback with consumed tuples");
             return Ok(PoolJoin::Fallback);
         }
-        if claimed > 0 && started > 0 && entry.detached() >= claimed {
+        if claimed > 0 && started > 0 && all_detached(entry) {
             if let Some(_o) = waiter.try_wait() {
                 continue;
             }

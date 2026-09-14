@@ -610,7 +610,6 @@ rawsync	crates/backend/catalog/pg_constraint/src/lib.rs	1
 rawsync	crates/backend/commands/analyze/src/lib.rs	2
 rawsync	crates/backend/commands/commands_async/src/queue.rs	1
 rawsync	crates/backend/commands/seclabel/src/lib.rs	1
-rawsync	crates/backend/commands/vacuum/src/lib.rs	1
 rawsync	crates/backend/access/nbtree/nbtsort/src/pool.rs	1
 rawsync	crates/backend/commands/vacuumparallel/src/lib.rs	1
 rawsync	crates/backend/executor/execexpr/src/jit.rs	3

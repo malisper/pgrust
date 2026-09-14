@@ -461,6 +461,12 @@ pub(crate) fn conninfo_parse<'mcx>(
             }
         }
         let val = String::from_utf8(val).expect("conninfo input is UTF-8");
+        // conninfo_storeval (fe-connect.c:7346): requiressl -> sslmode.
+        let (pname, val) = if pname == "requiressl" {
+            ("sslmode", if val.starts_with('1') { "require" } else { "prefer" }.to_string())
+        } else {
+            (pname, val)
+        };
 
         let Some(idx) = KNOWN_OPTIONS.iter().position(|k| *k == pname) else {
             return Err(format!("invalid connection option \"{pname}\"\n"));
@@ -632,5 +638,22 @@ mod tests {
         assert_eq!(get(&opts, "dbname").as_deref(), Some("db"));
         let e = parse(mcx, "bogus=x").unwrap_err();
         assert_eq!(e, "invalid connection option \"bogus\"\n");
+    }
+
+    // conninfo_storeval: the legacy requiressl keyword becomes sslmode in the
+    // keyword=value lane too (1 -> require, anything else -> prefer).
+    #[test]
+    fn keyword_value_requiressl_rewrites_to_sslmode() {
+        let cx = mcx::MemoryContext::new("conninfo-test");
+        let mcx = cx.mcx();
+        let opts = parse(mcx, "host=h requiressl=1").unwrap();
+        assert_eq!(get(&opts, "sslmode").as_deref(), Some("require"));
+        assert!(get(&opts, "requiressl").is_none());
+        let opts = parse(mcx, "requiressl=0").unwrap();
+        assert_eq!(get(&opts, "sslmode").as_deref(), Some("prefer"));
+        let opts = parse(mcx, "requiressl='1x'").unwrap();
+        assert_eq!(get(&opts, "sslmode").as_deref(), Some("require"));
+        let opts = parse(mcx, "requiressl=yes sslmode=disable").unwrap();
+        assert_eq!(get(&opts, "sslmode").as_deref(), Some("disable"));
     }
 }

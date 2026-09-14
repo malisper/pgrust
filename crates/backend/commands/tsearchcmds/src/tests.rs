@@ -1,4 +1,4 @@
-use crate::deflist::{deserialize_deflist, serialize_deflist, DefItem, DefValue};
+use crate::deflist::{c_strtod_accepts, deserialize_deflist, serialize_deflist, DefItem, DefValue};
 
 fn ser(items: &[DefItem<'_>]) -> String {
     let ctx = mcx::MemoryContext::new("tsearchcmds-test");
@@ -148,4 +148,23 @@ fn defgetqualifiedname_non_name_is_42601() {
     let e = crate::defGetQualifiedName(mcx, &parser).unwrap_err();
     assert_eq!(e.message(), "argument of parser must be a name");
     assert_eq!(e.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+}
+
+// buildDefItem (tsearchcmds.c:1851): strtod must consume the value with
+// errno 0 for it to stay a Float; ERANGE (1e999, 1e-999) makes it a String,
+// which serialize_deflist then quotes.
+#[test]
+fn deserialize_strtod_range_errors_become_strings() {
+    let ctx = mcx::MemoryContext::new("tsearchcmds-test");
+    let mcx = ctx.mcx();
+    let items = deserialize_deflist(mcx, b"x = 1e999, y = 1e-999, z = 1.5e3, h = 0x1p3, n = 1e").unwrap();
+    assert!(matches!(items[0].value, Some(DefValue::Str("1e999"))));
+    assert!(matches!(items[1].value, Some(DefValue::Str("1e-999"))));
+    assert!(matches!(items[2].value, Some(DefValue::Float("1.5e3"))));
+    assert!(matches!(items[3].value, Some(DefValue::Float("0x1p3"))));
+    assert!(matches!(items[4].value, Some(DefValue::Str("1e"))));
+    assert_eq!(ser(&items[..2]), "x = '1e999', y = '1e-999'");
+    assert!(c_strtod_accepts("inf") && c_strtod_accepts("-Infinity") && c_strtod_accepts("nan"));
+    assert!(c_strtod_accepts("0") && c_strtod_accepts("0.0e5") && c_strtod_accepts(".5"));
+    assert!(!c_strtod_accepts("0x") && !c_strtod_accepts("0x1p") && !c_strtod_accepts("1e400"));
 }

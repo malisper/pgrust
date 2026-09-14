@@ -510,6 +510,7 @@ fn alter_domain_add_constraint_impl<'mcx>(
 ) -> PgResult<ObjectAddress> {
     let typename = typename_from_list(mcx, names)?;
     let (domainoid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, &typename)?;
+    let typrel = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
     let row = fetch_type_row(mcx, domainoid)?;
     checkDomainOwner(row.typtype, domainoid)?;
 
@@ -544,6 +545,7 @@ fn alter_domain_add_constraint_impl<'mcx>(
             // C: returns the InvalidObjectAddress initializer when the domain
             // is already NOT NULL.
             if row.typnotnull {
+                typrel.close(RowExclusiveLock)?;
                 return Ok(ObjectAddress::set(InvalidOid, InvalidOid));
             }
             domainAddNotNullConstraint(mcx, domainoid, row.typnamespace, constr, &row.typname)?;
@@ -559,6 +561,7 @@ fn alter_domain_add_constraint_impl<'mcx>(
         }
         other => panic!("AlterDomainAddConstraint: parser let through {other:?}"),
     }
+    typrel.close(RowExclusiveLock)?;
     Ok(ObjectAddress::set(TYPE_RELATION_ID, domainoid))
 }
 

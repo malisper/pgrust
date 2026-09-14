@@ -19,6 +19,19 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
 }
 
+// libpqrcv_processTuples (libpqwalreceiver.c:1129): the result must carry
+// exactly the caller's nRetTypes columns.
+fn expect_fields(res: &QueryResult, nret: usize) -> PgResult<()> {
+    if res.status == ExecStatus::TuplesOk && res.nfields != nret {
+        return Err(Box::new(
+            PgError::error("invalid query response")
+                .with_sqlstate(types_error::ERRCODE_PROTOCOL_VIOLATION)
+                .with_detail(format!("Expected {nret} fields, got {} fields.", res.nfields)),
+        ));
+    }
+    Ok(())
+}
+
 fn row_text(r: &[Option<Vec<u8>>], i: usize) -> String {
     r.get(i)
         .and_then(|c| c.as_ref())
@@ -83,6 +96,7 @@ pub(crate) fn check_publications(conn: &mut PgConn, publications: &[&str]) -> Pg
         "receive list of publications from the publisher",
         ERRCODE_INTERNAL_ERROR,
     )?;
+    expect_fields(&res, 1)?;
 
     let found: Vec<String> = res.rows.iter().map(|r| row_text(r, 0)).collect();
     let missing: Vec<&&str> =
@@ -158,6 +172,7 @@ pub(crate) fn check_publications_origin(
         "receive list of replicated tables from the publisher",
         ERRCODE_CONNECTION_FAILURE,
     )?;
+    expect_fields(&res, 1)?;
     // list_append_unique over the DISTINCT rows.
     let mut publist: Vec<String> = Vec::new();
     for r in &res.rows {
@@ -256,6 +271,7 @@ pub(crate) fn fetch_table_list(
         "receive list of replicated tables from the publisher",
         ERRCODE_CONNECTION_FAILURE,
     )?;
+    expect_fields(&res, if check_columnlist { 3 } else { 2 })?;
     let mut tablelist = Vec::with_capacity(res.rows.len());
     for r in &res.rows {
         let (nspname, relname) = (row_text(r, 0), row_text(r, 1));
@@ -555,6 +571,26 @@ pub(crate) fn walrcv_alter_slot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // libpqrcv_processTuples: a publisher answering with the wrong column
+    // count is 08P01 "invalid query response", not a silently misread row.
+    #[test]
+    fn wrong_field_count_is_08p01() {
+        let mut res = QueryResult {
+            status: ExecStatus::TuplesOk,
+            nfields: 2,
+            rows: vec![vec![Some(b"p".to_vec()), Some(b"x".to_vec())]],
+            cmd_tag: String::new(),
+            diag: None,
+            err: String::new(),
+        };
+        let err = expect_fields(&res, 1).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+        assert_eq!(err.message(), "invalid query response");
+        assert_eq!(err.detail(), Some("Expected 1 fields, got 2 fields."));
+        res.nfields = 1;
+        expect_fields(&res, 1).unwrap();
+    }
 
     // fetch_table_list (subscriptioncmds.c:2295): DISTINCT (nsp, rel, attrs)
     // yields a second row only when column lists differ. Unfixed pgrust

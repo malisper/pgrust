@@ -1097,6 +1097,8 @@ pub fn AlterRoleSet<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterRoleSetStmt<'_>) -> PgResu
                 ERRCODE_INSUFFICIENT_PRIVILEGE,
             ));
         }
+
+        ReleaseSysCache(tuple);
     }
 
     if let Some(database) = stmt.database {
