@@ -163,6 +163,19 @@ pub fn get_relation_info<'mcx>(
             info.rel = Some(rel);
             info.ncolumns = ncolumns;
             info.nkeycolumns = nkeycolumns;
+            // plancat.c:304 index_can_return runs RELATION_CHECKS
+            // (indexam.c:75-84): an index being rebuilt refuses access.
+            if types_rel::reindex::ReindexIsProcessingIndex(ind.indexrelid) {
+                let err = Box::new(
+                    types_error::PgError::error(format!(
+                        "cannot access index \"{}\" while it is being reindexed",
+                        index_rel.name()
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                );
+                indexam::index_close(index_rel, NoLock)?;
+                return Err(err);
+            }
             // canreturn spans all columns (plancat.c index_can_return loop);
             // opfamily/opcintype are key-column-only.
             for i in 0..ncolumns as usize {

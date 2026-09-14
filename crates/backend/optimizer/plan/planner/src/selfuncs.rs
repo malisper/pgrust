@@ -155,6 +155,27 @@ pub(crate) fn op_test(
     Ok(types_fmgr::function_call2_coll_in(opproc, collation, mcx, a0, a1)?.as_bool())
 }
 
+// Raw-fcinfo test (selfuncs.c var_eq_const:391, mcv_selectivity:787,
+// histogram_selectivity:885, ineq_histogram_selectivity:1376): a NULL result
+// counts as no-match, never an error.
+pub(crate) fn op_test_raw(
+    mcx: mcx::Mcx<'_>,
+    opproc: &mut FmgrInfo,
+    collation: Oid,
+    slot_value: Datum,
+    constval: Datum,
+    varonleft: bool,
+) -> PgResult<bool> {
+    let (a0, a1) = if varonleft { (slot_value, constval) } else { (constval, slot_value) };
+    let mut fcinfo = types_fmgr::LocalFcinfo::<2>::fresh(collation);
+    // SAFETY: `mcx` outlives this single call.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    fcinfo.set_arg(0, a0);
+    fcinfo.set_arg(1, a1);
+    let result = opproc.invoke(&mut fcinfo)?;
+    Ok(!fcinfo.isnull && result.as_bool())
+}
+
 const DEFAULT_UNK_SEL: f64 = 0.005;
 const DEFAULT_NOT_UNK_SEL: f64 = 1.0 - DEFAULT_UNK_SEL;
 
@@ -412,7 +433,7 @@ pub(crate) fn mcv_selectivity<'mcx>(
             // exactly C's nvalues-bounded loop (C reads a pinned tuple copy
             // and can never see the tear).
             for (&v, &n) in sslot.values()?.iter().zip(sslot.numbers()?.iter()) {
-                if op_test(run.mcx, opproc, collation, v, constval, varonleft)? {
+                if op_test_raw(run.mcx, opproc, collation, v, constval, varonleft)? {
                     mcv_selec += n as f64;
                 }
                 sumcommon += n as f64;
@@ -739,7 +760,7 @@ pub(crate) fn histogram_selectivity<'mcx>(
     }
     let mut nmatch = 0usize;
     for &v in &values[n_skip..hist_size - n_skip] {
-        if op_test(mcx, opproc, collation, v, constval, varonleft)? {
+        if op_test_raw(mcx, opproc, collation, v, constval, varonleft)? {
             nmatch += 1;
         }
     }
@@ -892,7 +913,7 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
     } else if nvalues > 1 {
         let mut nmatch = 0;
         for &v in sslot.values()?.iter() {
-            if op_test(run.mcx, opproc, collation, v, constval, true)? {
+            if op_test_raw(run.mcx, opproc, collation, v, constval, true)? {
                 nmatch += 1;
             }
         }
@@ -2027,7 +2048,7 @@ pub(crate) fn var_eq_const<'mcx>(
                 // slots have equal lengths: exactly C's nvalues loop.
                 let mut matched = None;
                 for (&v, &n) in sslot.values()?.iter().zip(sslot.numbers()?.iter()) {
-                    if op_test(run.mcx, &mut eqproc, collation, v, constval, varonleft)? {
+                    if op_test_raw(run.mcx, &mut eqproc, collation, v, constval, varonleft)? {
                         matched = Some(n);
                         break;
                     }
@@ -3327,15 +3348,7 @@ fn eqjoinsel_inner(
                 if hasmatch2[j] {
                     continue;
                 }
-                if types_fmgr::function_call2_coll_in(
-                    &mut eqproc,
-                    collation,
-                    smcx,
-                    values1[i],
-                    values2[j],
-                )?
-                .as_bool()
-                {
+                if op_test_raw(smcx, &mut eqproc, collation, values1[i], values2[j], true)? {
                     hasmatch1[i] = true;
                     hasmatch2[j] = true;
                     // C accumulates the float4 product (f32 multiply).
@@ -3509,15 +3522,7 @@ fn eqjoinsel_semi(
                 if hasmatch2[j] {
                     continue;
                 }
-                if types_fmgr::function_call2_coll_in(
-                    &mut eqproc,
-                    collation,
-                    smcx,
-                    values1[i],
-                    values2[j],
-                )?
-                .as_bool()
-                {
+                if op_test_raw(smcx, &mut eqproc, collation, values1[i], values2[j], true)? {
                     hasmatch1[i] = true;
                     hasmatch2[j] = true;
                     nmatches += 1;

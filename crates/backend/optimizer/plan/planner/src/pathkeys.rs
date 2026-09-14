@@ -298,15 +298,17 @@ fn make_pathkey_from_sortinfo<'mcx>(
     let equality_op = lsyscache::amop::get_opfamily_member_for_cmptype(
         opfamily, opcintype, opcintype, COMPARE_EQ,
     )?;
-    assert!(
-        equality_op != 0,
-        "missing operator {COMPARE_EQ}({opcintype},{opcintype}) in opfamily {opfamily}"
-    );
+    if equality_op == 0 {
+        return Err(Box::new(types_error::PgError::error(format!(
+            "missing operator {COMPARE_EQ}({opcintype},{opcintype}) in opfamily {opfamily}"
+        ))));
+    }
     let opfamilies = lsyscache::amop::get_mergejoin_opfamilies(run.mcx, equality_op)?;
-    assert!(
-        !opfamilies.is_empty(),
-        "could not find opfamilies for equality operator {equality_op}"
-    );
+    if opfamilies.is_empty() {
+        return Err(Box::new(types_error::PgError::error(format!(
+            "could not find opfamilies for equality operator {equality_op}"
+        ))));
+    }
     let Some(eclass) = crate::equivclass::get_eclass_for_sort_expr(
         run,
         expr,

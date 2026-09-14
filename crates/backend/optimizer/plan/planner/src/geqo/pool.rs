@@ -15,14 +15,7 @@ const DBL_MAX: Cost = f64::MAX;
 
 // Each tour gets string_length + 1 genes (C's +1 slack).
 pub(super) fn alloc_pool(pool_size: i32, string_length: i32) -> PgResult<Pool> {
-    // geqo_pool.c alloc_pool: palloc(pool_size * sizeof(Chromosome)) then
-    // one palloc per tour, each admitted under MaxAllocSize (geqo_pool_size
-    // is USERSET up to i32::MAX).
-    let n = pool_size.max(0) as usize;
-    let genes = (string_length + 1) as usize;
-    let bytes = n.saturating_mul(core::mem::size_of::<Chromosome>());
-    ::mcx::check_alloc_size(bytes)?;
-    ::mcx::check_alloc_size(n.saturating_mul(genes).saturating_mul(core::mem::size_of::<super::Gene>()))?;
+    let (n, genes, bytes) = pool_requests(pool_size, string_length)?;
     let mut data = Vec::new();
     data.try_reserve_exact(n).map_err(|_| ::mcx::oom_named("GEQO pool", bytes))?;
     for _ in 0..n {
@@ -32,6 +25,23 @@ pub(super) fn alloc_pool(pool_size: i32, string_length: i32) -> PgResult<Pool> {
         data.push(Chromosome { string, worth: 0.0 });
     }
     Ok(Pool { data, size: pool_size, string_length })
+}
+
+// geqo_pool.c alloc_pool: palloc(pool_size * sizeof(Chromosome)) then one
+// palloc per tour, each admitted under MaxAllocSize on its own (geqo_pool_size
+// is USERSET up to i32::MAX); the sum of the tours is never checked.
+fn pool_requests(pool_size: i32, string_length: i32) -> PgResult<(usize, usize, usize)> {
+    let n = pool_size.max(0) as usize;
+    let genes = (string_length + 1) as usize;
+    let bytes = n.saturating_mul(core::mem::size_of::<Chromosome>());
+    ::mcx::check_alloc_size(bytes)?;
+    ::mcx::check_alloc_size(genes.saturating_mul(core::mem::size_of::<super::Gene>()))?;
+    Ok((n, genes, bytes))
+}
+
+#[cfg(test)]
+pub(super) fn pool_requests_ok(pool_size: i32, string_length: i32) -> bool {
+    pool_requests(pool_size, string_length).is_ok()
 }
 
 pub(super) fn alloc_chromo(string_length: i32) -> Chromosome {

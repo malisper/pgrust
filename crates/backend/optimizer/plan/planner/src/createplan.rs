@@ -575,6 +575,26 @@ fn create_gating_plan<'mcx>(
     Ok(gplan.seal())
 }
 
+// order_qual_clauses' insertion sort (createplan.c:5481-5497): the
+// `cost >= cost` test is what C does with a NaN cost (COST 1e39 times
+// cpu_operator_cost=0), and it fixes the resulting order too.
+fn order_qual_items<T: Copy>(items: &mut [T], key: impl Fn(&T) -> (u32, f64)) {
+    for i in 1..items.len() {
+        let newitem = items[i];
+        let (nsec, ncost) = key(&newitem);
+        let mut j = i;
+        while j > 0 {
+            let (osec, ocost) = key(&items[j - 1]);
+            if nsec > osec || (nsec == osec && ncost >= ocost) {
+                break;
+            }
+            items[j] = items[j - 1];
+            j -= 1;
+        }
+        items[j] = newitem;
+    }
+}
+
 // order_qual_clauses (createplan.c): stable sort (C insertion sort) by
 // security_level then eval cost; a cheap (<10x cpu_operator_cost) leakproof
 // qual is demoted to level 0 so it can run ahead of pricier low-level quals.
@@ -600,9 +620,7 @@ fn order_qual_clauses<'mcx>(
             };
         items.push((rid, cost.per_tuple, security_level));
     }
-    if items.len() > 1 {
-        items.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.partial_cmp(&b.1).unwrap()));
-    }
+    order_qual_items(&mut items, |x| (x.2, x.1));
     let mut out = mcx::PgVec::new_in(run.mcx);
     out.extend(items.iter().map(|x| x.0));
     Ok(out)
@@ -2370,9 +2388,7 @@ fn create_group_result_plan<'mcx>(
         let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), node)?;
         items.push((id, cost.per_tuple));
     }
-    if items.len() > 1 {
-        items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    }
+    order_qual_items(&mut items, |x| (0u32, x.1));
     let mut qual_list = NodeList::nil();
     for &(id, _) in items.iter() {
         qual_list.lappend(run.mcx, *run.root.expr_node(id))?;
@@ -3094,9 +3110,7 @@ fn order_bare_qual_clauses<'mcx>(
         let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), clause)?;
         items.push((clause, cost.per_tuple));
     }
-    if items.len() > 1 {
-        items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    }
+    order_qual_items(&mut items, |x| (0u32, x.1));
     let mut out = NodeList::nil();
     for (clause, _) in items.iter() {
         out.lappend(mcx, *clause)?;

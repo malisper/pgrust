@@ -140,3 +140,12 @@ fn geqo_gucs_are_backed_and_live() {
     assert_eq!(super::geqo_seed(), 0.75);
     super::set_geqo_seed(0.0);
 }
+
+#[test]
+fn pool_admission_checks_each_tour_not_their_sum() {
+    // 10M tours of 30 relations: 124B each (all below MaxAllocSize) though
+    // 1.24GB in total; C's alloc_pool admits this pool.
+    assert!(super::pool::pool_requests_ok(10_000_000, 30));
+    // pool_size * sizeof(Chromosome) itself over MaxAllocSize is refused.
+    assert!(!super::pool::pool_requests_ok(i32::MAX, 30));
+}
