@@ -78,6 +78,7 @@ waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 pgtz = { path = "../../../timezone/pgtz" }
 localtime = { path = "../../../timezone/localtime" }
 strftime = { path = "../../../timezone/strftime" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 libc = "0.2"
 
 [dev-dependencies]

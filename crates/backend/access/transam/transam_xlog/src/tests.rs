@@ -239,6 +239,18 @@ fn insert_flush_smoke() {
 
     // XLOGShmemInit + the StartupXLOG clean-shutdown tail.
     XLOGShmemInit();
+    // xlog.c:4985-4991: "XLOG Ctl" and "Control File" are ShmemIndex rows
+    // (pg_shmem_allocations); a second ShmemInitStruct finds them
+    // (audit fp-transam-xlog-p2#7).
+    let (_, found) = shmem::ShmemInitStruct("XLOG Ctl", XLOGShmemSize()).unwrap();
+    assert!(found, "XLOG Ctl is missing from the ShmemIndex");
+    let (_, found) =
+        shmem::ShmemInitStruct("Control File", controldata_utils::SIZEOF_CONTROL_FILE_DATA)
+            .unwrap();
+    assert!(found, "Control File is missing from the ShmemIndex");
+    // C 18.6 XLOGShmemSize (xlog.c:4907-4935): 4208200 at wal_buffers = 512.
+    let n = xlog_buffers() as usize;
+    assert_eq!(XLOGShmemSize(), 456 + 128 * 9 + 8 * n + 8192 + 8192 * n);
     let ctl = XLogCtl();
     // xlog.c:4860 show_in_hot_standby reads the shared recovery state, not
     // the reported backing bool (which stays at its boot value here).
@@ -1276,4 +1288,25 @@ fn wal_read_from_buffers_serves_hot_pages_like_c() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+// xlog.c:7211 / 7228 (wait_event_names.txt IPC class: CheckpointDelayComplete
+// = 9, CheckpointDelayStart = 10): the checkpoint-delay sleeps report their
+// wait event so pg_stat_activity names the wait. Audit fp-transam-xlog-p3#1.
+#[test]
+fn delay_chkpt_wait_events_are_c_exact() {
+    use crate::startup::*;
+    assert_eq!(delay_chkpt_wait_event(DELAY_CHKPT_START), 0x0800_0000 + 10);
+    assert_eq!(delay_chkpt_wait_event(DELAY_CHKPT_COMPLETE), 0x0800_0000 + 9);
+    assert_eq!(WAIT_EVENT_CHECKPOINT_DELAY_START, 0x0800_000A);
+    assert_eq!(WAIT_EVENT_CHECKPOINT_DELAY_COMPLETE, 0x0800_0009);
+}
+
+// XLogFileCopy's xlogtemp.<pid> name goes through init_small's process-id
+// seam like XLogFileInitInternal's (std::process::id aborts on wasm32-wasip1).
+// Detail bug_b2485c35.
+#[test]
+fn write_rs_never_calls_std_process_id_outside_tests() {
+    let body = include_str!("write.rs").split("#[cfg(test)]").next().unwrap();
+    assert!(!body.contains("std::process::id()"), "write.rs: use init_small::globals::process_id()");
 }

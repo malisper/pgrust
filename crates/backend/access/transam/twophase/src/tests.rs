@@ -614,3 +614,23 @@ fn gid_for_subid_saturates_like_sscanf() {
     assert!(IsTwoPhaseTransactionGidForSubid(1, "pg_gid_1_4294967295").unwrap());
     assert!(IsTwoPhaseTransactionGidForSubid(1, "pg_gid_1_4294967296").is_err());
 }
+
+// twophase.c:1359-1362 / 1747-1750: a CloseTransientFile failure reports
+// errcode_for_file_access() "could not close file \"%s\": %m" with the close
+// errno spliced in; the pre-fix port left a literal "%m". Detail bug_8b0f8979.
+#[test]
+fn close_failure_message_carries_the_os_error() {
+    let err = crate::files::close_two_phase_file(1 << 20, "pg_twophase/000000AC", "ReadTwoPhaseFile")
+        .unwrap_err();
+    // elog.c errcode_for_file_access: EBADF is the default (internal error) arm.
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    assert_eq!(
+        err.message(),
+        format!("could not close file \"pg_twophase/000000AC\": {}", errno_str(libc::EBADF))
+    );
+}
+
+fn errno_str(en: i32) -> String {
+    // SAFETY: strerror returns a static NUL-terminated string for a known errno.
+    unsafe { std::ffi::CStr::from_ptr(libc::strerror(en)) }.to_string_lossy().into_owned()
+}

@@ -109,7 +109,7 @@ pub fn recovery_target() -> RecoveryTargetType {
     }
 }
 
-fn set_recovery_target(t: RecoveryTargetType) {
+pub(crate) fn set_recovery_target(t: RecoveryTargetType) {
     RECOVERY_TARGET.with(|c| c.set(t as i32));
 }
 
@@ -494,12 +494,6 @@ pub(crate) fn recoveryStopsAfter(reader: &xlogreader::XLogReaderState<'_>) -> Pg
         }
     }
 
-    if target == RecoveryTargetType::Immediate && crate::reached_consistency() {
-        let _ = elog(LOG, "recovery stopping after reaching consistency".to_string());
-        clear_stop(true);
-        return Ok(true);
-    }
-
     Ok(false)
 }
 
@@ -581,7 +575,7 @@ pub(crate) fn recoveryApplyDelay(reader: &xlogreader::XLogReaderState<'_>) -> Pg
 
     let now = timestamp_seams::get_current_timestamp::call();
     let delay_until = xtime + (delay as i64) * 1000;
-    if (delay_until - now) / 1000 <= 0 {
+    if adt_timestamp::TimestampDifferenceMilliseconds(now, delay_until) <= 0 {
         return Ok(false);
     }
 
@@ -593,7 +587,10 @@ pub(crate) fn recoveryApplyDelay(reader: &xlogreader::XLogReaderState<'_>) -> Pg
         }
         let delay = guc_tables::vars::recovery_min_apply_delay.read() as i64;
         let delay_until = xtime + delay * 1000;
-        let msecs = (delay_until - timestamp_seams::get_current_timestamp::call()) / 1000;
+        let msecs = adt_timestamp::TimestampDifferenceMilliseconds(
+            timestamp_seams::get_current_timestamp::call(),
+            delay_until,
+        );
         if msecs <= 0 {
             break;
         }

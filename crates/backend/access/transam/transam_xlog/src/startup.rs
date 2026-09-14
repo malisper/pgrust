@@ -1157,11 +1157,14 @@ fn wait_for_delay_chkpt(delay_type: i32) -> PgResult<()> {
     if vxids.is_empty() {
         return Ok(());
     }
+    let wait_event = delay_chkpt_wait_event(delay_type);
     loop {
         if sync_seams::absorb_sync_requests::is_installed() {
             sync_seams::absorb_sync_requests::call()?;
         }
+        crate::write::report_wait_start(wait_event);
         std::thread::sleep(std::time::Duration::from_millis(10));
+        crate::write::report_wait_end();
         if !procarray_seams::have_virtual_xids_delaying_chkpt::call(&vxids, delay_type) {
             break;
         }
@@ -1171,6 +1174,21 @@ fn wait_for_delay_chkpt(delay_type: i32) -> PgResult<()> {
 
 pub const DELAY_CHKPT_START: i32 = 1 << 0;
 pub const DELAY_CHKPT_COMPLETE: i32 = 1 << 1;
+
+// wait_event_types.h (generated from wait_event_names.txt, IPC class).
+const PG_WAIT_IPC: u32 = 0x0800_0000;
+pub(crate) const WAIT_EVENT_CHECKPOINT_DELAY_COMPLETE: u32 = PG_WAIT_IPC + 9;
+pub(crate) const WAIT_EVENT_CHECKPOINT_DELAY_START: u32 = PG_WAIT_IPC + 10;
+
+// xlog.c:7211 / 7228: the 10 ms sleeps report CheckpointDelayStart while
+// waiting on DELAY_CHKPT_START holders and CheckpointDelayComplete otherwise.
+pub(crate) fn delay_chkpt_wait_event(delay_type: i32) -> u32 {
+    if delay_type == DELAY_CHKPT_START {
+        WAIT_EVENT_CHECKPOINT_DELAY_START
+    } else {
+        WAIT_EVENT_CHECKPOINT_DELAY_COMPLETE
+    }
+}
 
 // LogCheckpointStart's flag words (xlog.c:6687): the recovery TAP suite
 // greps these exact strings (041 matches "restartpoint starting: immediate

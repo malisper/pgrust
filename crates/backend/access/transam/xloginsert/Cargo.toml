@@ -26,6 +26,7 @@ origin_seams = { path = "../../../replication/origin_seams" }
 transam_xlog = { path = "../transam_xlog" }
 xloginsert_seams = { path = "../xloginsert_seams" }
 xlogreader_seams = { path = "../xlogreader_seams" }
+mcx = { path = "../../../../_support/mcx" }
 
 [dev-dependencies]
 fd = { path = "../../../storage/file/fd" }
@@ -36,6 +37,6 @@ waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 xact_seams = { path = "../xact_seams" }
 xlogreader = { path = "../xlogreader" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
-mcx = { path = "../../../../_support/mcx" }
+mcxt_stats = { path = "../../../utils/mmgr/mcxt_stats" }
 xlogutils = { path = "../xlogutils" }
 libc = "0.2"

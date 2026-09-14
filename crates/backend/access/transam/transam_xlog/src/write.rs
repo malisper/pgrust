@@ -123,14 +123,14 @@ const WAIT_EVENT_WAL_WRITE: u32 = PG_WAIT_IO | 80;
 // the syscall runs. The seam is uninstalled in unit tests (no backend
 // status storage), where the report is a no-op.
 #[inline]
-fn report_wait_start(wait_event_info: u32) {
+pub(crate) fn report_wait_start(wait_event_info: u32) {
     if waitevent_seams::pgstat_report_wait_start::is_installed() {
         waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
     }
 }
 
 #[inline]
-fn report_wait_end() {
+pub(crate) fn report_wait_end() {
     if waitevent_seams::pgstat_report_wait_end::is_installed() {
         waitevent_seams::pgstat_report_wait_end::call();
     }
@@ -481,7 +481,7 @@ pub(crate) fn XLogFileCopy(
             .finish(loc("XLogFileCopy"));
     }
 
-    let tmppath = format!("{XLOGDIR}/xlogtemp.{}", std::process::id());
+    let tmppath = format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::process_id());
     let _ = std::fs::remove_file(&tmppath);
 
     // No get_sync_bit(): fsync only once at end of fill.

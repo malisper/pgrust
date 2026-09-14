@@ -1194,6 +1194,108 @@ fn recovery_apply_delay_logs_debug2_like_c() {
     assert_eq!(hit.level, types_error::DEBUG2);
 }
 
+// Commit record at `loc` with xact_time = `xact_time`, read into a reader.
+fn commit_record_reader<'a>(
+    dir: &std::path::Path,
+    cx: &'a mcx::MemoryContext,
+    xact_time: i64,
+) -> XLogReaderState<'a> {
+    let loc: XLogRecPtr = SEG as u64 + SizeOfXLogLongPHD as u64;
+    let commit =
+        record_bytes(loc, xact::RM_XACT_ID, xact::XLOG_XACT_COMMIT, &xact_time.to_ne_bytes());
+    write_segment_with_record(dir, loc, &commit);
+    RECOVERY_TARGET_TLI.store(1, Relaxed);
+    let mut reader = XLogReaderState::allocate(cx.mcx(), SEG).unwrap();
+    reader.system_identifier = SYS_ID;
+    reader.XLogReaderSetDecodeBuffer(guc_tables::vars::wal_decode_buffer_size.read() as usize);
+    reader.XLogBeginRead(loc);
+    let mut src = PageSource::new();
+    src.replay_tli = 1;
+    assert_eq!(reader.XLogReadRecord(&mut src).unwrap(), Some(loc));
+    src.close_read_file();
+    reader
+}
+
+// xlogrecovery.c:3056-3058 / 3073-3075: the remaining delay goes through
+// TimestampDifferenceMilliseconds, which rounds a positive fraction UP, so a
+// commit 500 us short of its apply deadline still waits one millisecond; the
+// pre-fix port truncated it to 0 and replayed the record at once.
+// Audit fp-transam-xlogrecovery-p2#4 / Detail bug_7b44423a.
+#[test]
+fn recovery_apply_delay_rounds_a_sub_millisecond_remainder_up_like_c() {
+    let _g = datadir_lock();
+    let dir = boot_fixture("apply_delay_roundup");
+    install_startup_process_seams();
+    WALRCV_UP.store(false, Relaxed);
+    STANDBY_MODE.store(false, Relaxed);
+    IN_ARCHIVE_RECOVERY.store(false, Relaxed);
+    let cx = mcx::MemoryContext::new("apply delay round-up witness");
+    // now (seam) = 0; delay_until = -500 + 1 ms = 500 us from now.
+    let reader = commit_record_reader(&dir, &cx, -500);
+
+    guc_tables::vars::recovery_min_apply_delay.write(1);
+    REACHED_CONSISTENCY.store(true, Relaxed);
+    ARCHIVE_RECOVERY_REQUESTED.store(true, Relaxed);
+    *INTERRUPT_HOOK.lock().unwrap() = Some(apply_delay_interrupt);
+    APPLY_DELAY_WAKES.store(0, Relaxed);
+    latch::OwnLatch(targets::recovery_wakeup_latch()).unwrap();
+    REPORTS.lock().unwrap().clear();
+    let prev_min = elog::config::log_min_messages();
+    elog::config::set_log_min_messages(types_error::DEBUG2);
+    let prev = elog::set_emit_log_hook(Some(capture_report));
+
+    let delayed = targets::recoveryApplyDelay(&reader);
+
+    elog::set_emit_log_hook(prev);
+    elog::config::set_log_min_messages(prev_min);
+    latch::DisownLatch(targets::recovery_wakeup_latch());
+    *INTERRUPT_HOOK.lock().unwrap() = None;
+    guc_tables::vars::recovery_min_apply_delay.write(0);
+    REACHED_CONSISTENCY.store(false, Relaxed);
+    ARCHIVE_RECOVERY_REQUESTED.store(false, Relaxed);
+    let reports = REPORTS.lock().unwrap().clone();
+    drop(reader);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(delayed.unwrap(), "a 500 us remainder is a 1 ms wait, not an immediate replay");
+    let expected = "recovery apply delay 1 milliseconds";
+    assert!(
+        reports.iter().any(|e| e.message() == expected),
+        "no {expected:?} report; got {:?}",
+        reports.iter().map(|e| e.message().to_string()).collect::<Vec<_>>()
+    );
+}
+
+// xlogrecovery.c:2757-2830: recoveryStopsAfter has no RECOVERY_TARGET_IMMEDIATE
+// arm — reaching consistency stops BEFORE the next record (recoveryStopsBefore,
+// :2620-2631), and when no next record exists PerformWalRecovery reports
+// "recovery ended before configured recovery target was reached". The pre-fix
+// port stopped after the record that reached consistency. Detail bug_de559d36.
+#[test]
+fn immediate_target_stops_before_the_next_record_never_after_like_c() {
+    let _g = datadir_lock();
+    let dir = boot_fixture("immediate_stops_before");
+    install_startup_process_seams();
+    let cx = mcx::MemoryContext::new("immediate stop witness");
+    let reader = commit_record_reader(&dir, &cx, 0);
+
+    targets::set_recovery_target(targets::RecoveryTargetType::Immediate);
+    REACHED_CONSISTENCY.store(true, Relaxed);
+    ARCHIVE_RECOVERY_REQUESTED.store(true, Relaxed);
+    let after = targets::recoveryStopsAfter(&reader);
+    let before = targets::recoveryStopsBefore(&reader);
+    let reason = targets::getRecoveryStopReason();
+    targets::set_recovery_target(targets::RecoveryTargetType::Unset);
+    REACHED_CONSISTENCY.store(false, Relaxed);
+    ARCHIVE_RECOVERY_REQUESTED.store(false, Relaxed);
+    drop(reader);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!after.unwrap(), "recoveryStopsAfter never fires for recovery_target = immediate");
+    assert!(before.unwrap(), "recoveryStopsBefore stops once consistency is reached");
+    assert_eq!(reason, "reached consistency");
+}
+
 // check_recovery_target_time (xlogrecovery.c:4980-5006): ParseDateTime /
 // DecodeDateTime must yield DTK_DATE — 'infinity', '-infinity' and 'epoch'
 // (DTK_LATE / DTK_EARLY / DTK_EPOCH) are rejected like now/today/tomorrow/

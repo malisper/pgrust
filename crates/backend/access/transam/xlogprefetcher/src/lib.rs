@@ -230,6 +230,13 @@ pub fn XLogPrefetchShmemInit() {
         assert!(!core::mem::needs_drop::<XLogPrefetchStats>());
     }
     let _ = SHARED_STATS.set(XLogPrefetchStats::zeroed_now());
+    // xlogprefetcher.c:319-322: the ShmemInitStruct("XLogPrefetchStats") row
+    // pg_shmem_allocations lists; the stats live in SHARED_STATS. Substrate
+    // test binaries without a shmem seam only lack the row.
+    if shmem_seams::shmem_init_struct::is_installed() {
+        shmem_seams::shmem_init_struct::call("XLogPrefetchStats", XLogPrefetchShmemSize())
+            .unwrap_or_else(|e| panic!("XLogPrefetchShmemInit: {}", e.message()));
+    }
 }
 
 pub fn XLogPrefetchShmemResetAfterCrash() {

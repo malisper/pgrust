@@ -152,10 +152,15 @@ pub fn ControlFileLock() -> &'static LWLock {
     lwlock::main_lock(CONTROL_FILE_LOCK)
 }
 
+// C 18.6 sizeof(XLogCtlData) / sizeof(WALInsertLockPadded) (xlog.c:436-528,
+// PG_CACHE_LINE_SIZE) on LP64: XLOGShmemSize is the ShmemIndex row's size.
+pub const SIZEOF_XLOG_CTL_DATA: usize = 456;
+pub const SIZEOF_WAL_INSERT_LOCK_PADDED: usize = 128;
+
 pub fn XLOGShmemSize() -> usize {
     let xlog_buffers = crate::ctl::xlog_buffers();
-    std::mem::size_of::<XLogCtlData>()
-        + std::mem::size_of::<WALInsertLockPadded>() * (NUM_XLOGINSERT_LOCKS + 1)
+    SIZEOF_XLOG_CTL_DATA
+        + SIZEOF_WAL_INSERT_LOCK_PADDED * (NUM_XLOGINSERT_LOCKS + 1)
         + std::mem::size_of::<AtomicU64>() * xlog_buffers as usize
         + XLOG_BLCKSZ
         + XLOG_BLCKSZ * xlog_buffers as usize
@@ -245,6 +250,18 @@ pub fn XLOGShmemInit() {
     }));
 
     XLOG_CTL.set(ctl).unwrap_or_else(|_| panic!("XLOGShmemInit raced"));
+    // xlog.c:4985-4991: the ShmemInitStruct rows pg_shmem_allocations lists;
+    // the state itself lives above (cluster lifetime, like C shmem). Substrate
+    // test binaries without a shmem seam only lack the rows.
+    if shmem_seams::shmem_init_struct::is_installed() {
+        for (name, size) in [
+            ("XLOG Ctl", XLOGShmemSize()),
+            ("Control File", controldata_utils::SIZEOF_CONTROL_FILE_DATA),
+        ] {
+            shmem_seams::shmem_init_struct::call(name, size)
+                .unwrap_or_else(|e| panic!("XLOGShmemInit: {}", e.message()));
+        }
+    }
 }
 
 fn reset_lwlock_in_place(lock: &LWLock) {

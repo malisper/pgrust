@@ -80,14 +80,9 @@ pub(crate) fn read_twophase_file(
     }
 
     let result = read_twophase_body(fd, &path);
-    let close_rc = fd::desc::CloseTransientFile(fd);
+    let closed = close_two_phase_file(fd, &path, "ReadTwoPhaseFile");
     let buf = result?;
-    if close_rc != 0 {
-        ereport(ERROR)
-            .errcode_for_file_access()
-            .errmsg(format!("could not close file \"{path}\": %m"))
-            .finish(here("ReadTwoPhaseFile"))?;
-    }
+    closed?;
 
     let st_size = buf.len();
     let hdr = TwoPhaseFileHeader::from_bytes(&buf).expect("size lower bound checked");
@@ -230,13 +225,21 @@ pub(crate) fn recreate_two_phase_file(xid: TransactionId, content: &[u8]) -> PgR
         report_wait_end();
         Ok(())
     })();
-    let close_rc = fd::desc::CloseTransientFile(fd);
+    let closed = close_two_phase_file(fd, &path, "RecreateTwoPhaseFile");
     result?;
-    if close_rc != 0 {
+    closed
+}
+
+// twophase.c:1359-1362 / 1747-1750: CloseTransientFile failure is
+// errcode_for_file_access() "could not close file \"%s\": %m".
+pub(crate) fn close_two_phase_file(fd: i32, path: &str, func: &'static str) -> PgResult<()> {
+    if fd::desc::CloseTransientFile(fd) != 0 {
+        let en = get_errno();
         ereport(ERROR)
+            .with_saved_errno(en)
             .errcode_for_file_access()
             .errmsg(format!("could not close file \"{path}\": %m"))
-            .finish(here("RecreateTwoPhaseFile"))?;
+            .finish(here(func))?;
     }
     Ok(())
 }

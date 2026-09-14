@@ -36,11 +36,7 @@ fn page_helpers() {
 fn assemble_unsafe_patterns() {
     init_once();
 
-    let mut scratch = Scratch {
-        hdr: Box::new([0u8; HEADER_SCRATCH_SIZE]),
-        rdatas: Vec::with_capacity(XLR_NORMAL_RDATAS),
-        compressed: Vec::new(),
-    };
+    let mut scratch = Scratch::new();
     let (lower, upper) = (64u16, 8000u16);
     let page = standard_page(0x3F, lower, upper);
     let main = [0x99u8; 40];
@@ -107,11 +103,7 @@ fn assemble_unsafe_patterns() {
 #[test]
 fn misordered_block_ids_error_in_release() {
     init_once();
-    let mut scratch = Scratch {
-        hdr: Box::new([0u8; HEADER_SCRATCH_SIZE]),
-        rdatas: Vec::with_capacity(XLR_NORMAL_RDATAS),
-        compressed: Vec::new(),
-    };
+    let mut scratch = Scratch::new();
     let page = standard_page(0x00, 64, 8000);
     let rloc = RelFileLocator::new(1663, 5, 24576);
     let mk = |id: u8| RegBlock {
@@ -156,11 +148,7 @@ fn include_origin_uninstalled_child() {
     shmem::init_seams();
     guc_tables::init_seams();
     transam_xlog::init_seams();
-    let mut scratch = Scratch {
-        hdr: Box::new([0u8; HEADER_SCRATCH_SIZE]),
-        rdatas: Vec::with_capacity(XLR_NORMAL_RDATAS),
-        compressed: Vec::new(),
-    };
+    let mut scratch = Scratch::new();
     let main = [0x77u8; 10];
     let asm = assemble(
         &mut scratch,
@@ -490,11 +478,7 @@ fn assemble_insert_decode_roundtrip() {
 }
 
 fn scratch() -> Scratch {
-    Scratch {
-        hdr: Box::new([0u8; HEADER_SCRATCH_SIZE]),
-        rdatas: Vec::with_capacity(XLR_NORMAL_RDATAS),
-        compressed: Vec::new(),
-    }
+    Scratch::new()
 }
 
 // XLogRegisterBufData (xloginsert.c:427-434): more than UINT16_MAX bytes of
@@ -592,4 +576,21 @@ fn oversized_record_error_matches_c() {
         .expect("byte count");
     assert!(n > 3 * (512 << 20) && n < XLogRecordMaxSize * 2, "total {n}");
     scratch.rdatas.clear();
+}
+
+// xloginsert.c:1364-1369 InitXLogInsert: the working areas live in the
+// AllocSetContextCreate(TopMemoryContext, "WAL record construction") context,
+// which pg_backend_memory_contexts lists (C: one row per backend); the pre-fix
+// port allocated them on the plain heap and the row was absent.
+// Audit fp-transam-xloginsert#1.
+#[test]
+fn init_xlog_insert_registers_the_wal_record_construction_context() {
+    mcxt_stats::init_seams();
+    InitXLogInsert().unwrap();
+    let forest = mcxt_stats::backend_context_forest();
+    assert!(
+        forest.iter().any(|t| t.name == "WAL record construction"),
+        "no 'WAL record construction' root; roots: {:?}",
+        forest.iter().map(|t| t.name).collect::<Vec<_>>()
+    );
 }

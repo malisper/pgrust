@@ -1,7 +1,7 @@
 use super::*;
 use mcx::MemoryContext;
 use std::cell::Cell;
-use std::sync::{Mutex, Once};
+use std::sync::{Mutex, Once, OnceLock};
 use transam_xlog::{SizeOfXLogLongPHD, SizeOfXLogRecord, MAXALIGN, XLP_LONG_HEADER};
 use types_core::{TimeLineID, XLogSegNo};
 use xlogreader::XLogSegmentRoutine;
@@ -24,8 +24,17 @@ thread_local! {
     static FD_INIT: Cell<bool> = const { Cell::new(false) };
 }
 
+fn shmem_rows() -> &'static Mutex<Vec<(String, usize)>> {
+    static R: OnceLock<Mutex<Vec<(String, usize)>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 fn rig() {
     RIG.call_once(|| {
+        shmem_seams::shmem_init_struct::set(|name, size| {
+            shmem_rows().lock().unwrap().push((name.to_string(), size));
+            Ok((std::ptr::null_mut(), false))
+        });
         XLogPrefetchShmemInit();
         guc_tables::vars::maintenance_io_concurrency
             .install_if_absent(guc_tables::GucVarAccessors { get: || 10, set: |_| {} });
@@ -409,4 +418,18 @@ fn shmem_reset_zeroes_counters_and_gauges() {
     assert_eq!(s.io_depth.load(Relaxed), 0);
     assert_eq!(s.wal_distance.load(Relaxed), 0);
     assert!(XLogPrefetchShmemSize() >= 7 * 8 + 3 * 4);
+}
+
+// xlogprefetcher.c:319-322 XLogPrefetchShmemInit: ShmemInitStruct
+// ("XLogPrefetchStats", sizeof(XLogPrefetchStats)) registers the ShmemIndex
+// row pg_shmem_allocations lists (C 18.6: size 72); the pre-fix port only
+// filled a OnceLock. Audit fp-transam-xlogprefetcher#1.
+#[test]
+fn shmem_init_registers_xlog_prefetch_stats_in_shmem_index() {
+    rig();
+    let rows = shmem_rows().lock().unwrap();
+    assert!(
+        rows.iter().any(|(n, s)| n == "XLogPrefetchStats" && *s == 72),
+        "XLogPrefetchStats row missing or wrong size: {rows:?}"
+    );
 }

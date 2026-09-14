@@ -31,6 +31,7 @@ init_small = { path = "../../../utils/init/init_small" }
 adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
 funcapi = { path = "../../../utils/fmgr/funcapi" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 
 [dev-dependencies]
 rmgr = { path = "../rmgr" }

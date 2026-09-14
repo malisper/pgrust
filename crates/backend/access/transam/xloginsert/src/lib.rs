@@ -133,6 +133,8 @@ pub struct RegBlock<'a> {
 }
 
 struct Scratch {
+    // xloginsert.c:1367 xloginsert_cxt: the named context pg_backend_memory_contexts lists.
+    _cxt: mcx::MemoryContext,
     hdr: Box<[u8; HEADER_SCRATCH_SIZE]>,
     // Fragment list handed to XLogInsertRecord. Lifetimes are erased so the
     // capacity is retained across records; entries only ever point at data
@@ -145,15 +147,22 @@ thread_local! {
     static SCRATCH: RefCell<Option<Scratch>> = const { RefCell::new(None) };
 }
 
+impl Scratch {
+    fn new() -> Self {
+        Scratch {
+            _cxt: mcx::MemoryContext::new("WAL record construction"),
+            hdr: Box::new([0u8; HEADER_SCRATCH_SIZE]),
+            rdatas: Vec::with_capacity(XLR_NORMAL_RDATAS),
+            compressed: Vec::new(),
+        }
+    }
+}
+
 pub fn InitXLogInsert() -> PgResult<()> {
     SCRATCH.with(|s| {
         let mut s = s.borrow_mut();
         if s.is_none() {
-            *s = Some(Scratch {
-                hdr: Box::new([0u8; HEADER_SCRATCH_SIZE]),
-                rdatas: Vec::with_capacity(XLR_NORMAL_RDATAS),
-                compressed: Vec::new(),
-            });
+            *s = Some(Scratch::new());
         }
     });
     Ok(())

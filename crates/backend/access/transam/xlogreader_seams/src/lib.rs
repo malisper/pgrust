@@ -178,7 +178,9 @@ pub struct XLogReaderState {
 impl XLogReaderState {
     pub fn has_block_ref(&self, block_id: u8) -> bool {
         match &self.record {
-            Some(r) => (block_id as i8) <= r.max_block_id && r.blocks[block_id as usize].in_use,
+            Some(r) => {
+                i32::from(block_id) <= i32::from(r.max_block_id) && r.blocks[block_id as usize].in_use
+            }
             None => false,
         }
     }
@@ -296,5 +298,22 @@ mod block_tag_tests {
         let empty = XLogReaderState::default();
         let err = empty.block_tag(0).expect_err("no record");
         assert_eq!(err.message(), "could not locate backup block with ID 0 in WAL record");
+    }
+
+    // XLogRecHasBlockRef (xlogreader.h:426-429): `block_id <= max_block_id` in
+    // int arithmetic, so ids 128..=255 are simply absent; the pre-fix `as i8`
+    // cast made them negative (always <= max_block_id) and indexed past the
+    // 33-entry blocks array. Detail bug_1203e574.
+    #[test]
+    fn has_block_ref_treats_high_block_ids_as_absent() {
+        let mut rec = DecodedXLogRecord::default();
+        rec.max_block_id = 0;
+        rec.blocks[0] = DecodedBkpBlock { in_use: true, ..DecodedBkpBlock::EMPTY };
+        let record = XLogReaderState { record: Some(rec), ..Default::default() };
+        assert!(record.has_block_ref(0));
+        assert!(!record.has_block_ref(1));
+        assert!(!record.has_block_ref(128));
+        assert!(!record.has_block_ref(255));
+        assert!(!XLogReaderState::default().has_block_ref(0));
     }
 }
