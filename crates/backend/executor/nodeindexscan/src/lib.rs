@@ -1299,11 +1299,10 @@ fn detoast_datum<'m>(mcx: Mcx<'m>, v: ::datum::Datum) -> PgResult<::datum::Datum
 /// scankeys at the arrays' first elements. false = a null or empty array, so
 /// no match is possible. The detoasted array image lives in the runtime
 /// econtext's per-tuple context like C (reset at the next rescan, which
-/// re-evaluates every key); the element vectors live in the query context
-/// and are rebuilt per rescan (C divergence: per-rescan arena growth instead
-/// of per-tuple reset, bounded by rescan count).
+/// re-evaluates every key); the element vectors keep one query-context
+/// allocation that every rescan refills.
 pub fn exec_index_eval_array_keys<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
     array_keys: &mut [IndexArrayKeyInfo<'mcx>],
@@ -1328,7 +1327,8 @@ pub fn exec_index_eval_array_keys<'mcx>(
         if nd.isnull {
             return Ok(false);
         }
-        let flat = detoast_datum(estate.ecxt(ecxt).per_tuple_mcx(), nd.value)?;
+        let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+        let flat = detoast_datum(per_tuple, nd.value)?;
         let p = flat.as_usize() as *const u8;
         // SAFETY: detoast_datum yields a 4B-uncompressed varlena; the image
         // is readable through its header-declared size.
@@ -1336,8 +1336,13 @@ pub fn exec_index_eval_array_keys<'mcx>(
             unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
         let elemtype = arrayfuncs::arr_elemtype(image);
         let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
-        let (elem_values, elem_nulls) =
-            arrayfuncs::deconstruct_array(mcx, image, elmlen as i32, elmbyval, elmalign as u8, true)?;
+        // nodeIndexscan.c:670: the deconstructed elements live in the runtime
+        // per-tuple context (reset on every rescan); the node's vectors keep
+        // their allocation across rescans since the bump query context
+        // cannot free the previous ones.
+        let (elem_values, elem_nulls) = arrayfuncs::deconstruct_array(
+            per_tuple, image, elmlen as i32, elmbyval, elmalign as u8, true,
+        )?;
         if elem_values.is_empty() {
             return Ok(false);
         }
@@ -1348,8 +1353,10 @@ pub fn exec_index_eval_array_keys<'mcx>(
         } else {
             key.sk_flags &= !SK_ISNULL;
         }
-        ak.elem_values = elem_values;
-        ak.elem_nulls = elem_nulls;
+        ak.elem_values.clear();
+        ak.elem_values.extend_from_slice(&elem_values);
+        ak.elem_nulls.clear();
+        ak.elem_nulls.extend_from_slice(&elem_nulls);
         ak.next_elem = 1;
     }
     Ok(true)

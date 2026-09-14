@@ -86,7 +86,8 @@ where
                             break;
                         };
                         // C MultiExecParallelHash `if (!isnull)`: strict-key
-                        // NULL skips the tuple — not inserted, not counted.
+                        // NULL skips the insert but still counts (nodeHash.c:300).
+                        table.partial_tuples += 1.0;
                         let Some(hashvalue) = hash_state.eval_build_hash(estate, slot_id)? else {
                             continue;
                         };
@@ -99,7 +100,6 @@ where
                         // before the next fetch.
                         let image = unsafe { core::slice::from_raw_parts(ptr, len) };
                         phj::exec_parallel_hash_table_insert(&mut table, image, hashvalue)?;
-                        table.partial_tuples += 1.0;
                     }
                 }
                 phj::multi_exec_parallel_hash_finish(&mut table, ran_inner)?;

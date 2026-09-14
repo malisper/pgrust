@@ -1104,3 +1104,31 @@ mod rem_w2_011_recheck {
         });
     }
 }
+
+// nodeIndexonlyscan.c:609: under EXEC_FLAG_EXPLAIN_ONLY ExecInitIndexOnlyScan
+// returns before index_open (index-advisor plans may name nonexistent
+// indexes; an EXPLAIN of a cached generic plan takes no index lock). The
+// index OID here exists nowhere, so any open or lock attempt fails.
+#[test]
+fn explain_only_init_opens_no_index() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let heap_oid = fresh_oid();
+        register_indexed_table(heap_oid, fresh_oid(), &[1], &[]);
+        let rel = heap_relation(mcx, heap_oid);
+        let mut estate = EStateData::new_in(mcx);
+        let mut node = mk_index_only_scan(mcx, 42);
+        node.indexid = 4_000_000_000;
+        let mut state = exec_init_index_only_scan_explain_only(mcx, &node, &mut estate, rel)
+            .expect("plain EXPLAIN must not open, lock or key a (nonexistent) index");
+        assert!(state.ioss_RelationDesc.is_none());
+        assert!(state.ioss_ScanDesc.is_none());
+        assert!(state.ioss_ScanKeys.is_empty());
+        assert!(state.ioss_Runtime.is_none());
+        assert_eq!(state.ioss_IndexOid, 4_000_000_000);
+        assert!(state.ss.ss_currentRelation.is_some());
+        exec_end_index_only_scan(&mut state).unwrap();
+        estate.exec_reset_tuple_table(false);
+        quiesced();
+    });
+}

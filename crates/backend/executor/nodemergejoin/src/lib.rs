@@ -9,7 +9,7 @@ use std::rc::Rc;
 use ::datum::Datum;
 use ::execexpr::{
     exec_build_projection_info_subplans, exec_init_expr_subplans,
-    exec_init_qual_subplans, exec_project, exec_qual, EvalSlots, ExprState,
+    exec_init_qual_subplans, exec_project_prearmed, exec_qual, EvalSlots, ExprState,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId, RetainedTupleCtx};
 use ::mcx::PgBox;
@@ -472,15 +472,20 @@ fn eval_qual_with<'mcx>(
     inner_id: ExecSlotId,
 ) -> PgResult<bool> {
     let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
+    let mut state = match which {
+        Qual::Join => node.joinqual.as_deref_mut(),
+        Qual::Other => node.otherqual.as_deref_mut(),
+    };
+    // nodeMergejoin.c:831: quals evaluate in ecxt_per_tuple_memory, reset
+    // per call. SAFETY: the per-tuple context object outlives the plan.
+    if let Some(q) = state.as_deref_mut() {
+        unsafe { q.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx()) };
+    }
     let table = &mut estate.es_tupleTable[..];
     let [inner, outer] = table
         .get_disjoint_mut([inner_id.0 as usize, outer_id.0 as usize])
         .expect("distinct in-range merge slot ids");
     let mut slots = EvalSlots { scan: None, inner: Some(inner), outer: Some(outer) };
-    let state = match which {
-        Qual::Join => node.joinqual.as_deref_mut(),
-        Qual::Other => node.otherqual.as_deref_mut(),
-    };
     exec_qual(state, &mut slots)
 }
 
@@ -548,12 +553,15 @@ fn project_result_with<'mcx>(
     let mcx = estate.es_query_cxt;
     let outer_id = node.mj_OuterTupleSlot.expect("outer slot set");
     let result_id = node.ps_ResultTupleSlot;
+    // C ExecProject: the projection allocates in ecxt_per_tuple_memory.
+    // SAFETY: the per-tuple context object outlives the plan.
+    unsafe { node.proj.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx()) };
     let table = &mut estate.es_tupleTable[..];
     let [inner, outer, result] = table
         .get_disjoint_mut([inner_id.0 as usize, outer_id.0 as usize, result_id.0 as usize])
         .expect("distinct in-range merge slot ids");
     let mut slots = EvalSlots { scan: None, inner: Some(inner), outer: Some(outer) };
-    exec_project(&mut node.proj, &mut slots, result, mcx)?;
+    exec_project_prearmed(&mut node.proj, &mut slots, result, mcx)?;
     Ok(result_id)
 }
 

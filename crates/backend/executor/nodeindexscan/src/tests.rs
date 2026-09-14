@@ -1008,3 +1008,60 @@ fn cmp_orderbyvals_double_null_key_ties_without_consulting_later_keys() {
     let d = [Datum::from_i32(1), Datum::from_i32(5)];
     assert_eq!(cmp_orderbyvals(&c, &[false, false], &d, &[false, false], &sort_support), 1);
 }
+
+// nodeIndexscan.c:670: ExecIndexEvalArrayKeys deconstructs the array in the
+// runtime per-tuple context (reset on every rescan). The bump query context
+// cannot free a previous element vector, so the node's vectors keep their
+// allocation across rescans instead of growing the arena per rescan.
+#[test]
+fn array_keys_reuse_their_element_vectors_across_rescans() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        const INT4ARRAYOID: Oid = 1007;
+        let mut estate = EStateData::new_in(mcx);
+        let ecxt = estate.exec_assign_expr_context();
+        // One-dimensional int4[3] image: 4B varlena header, ndim, dataoffset,
+        // elemtype, dim, lbound, elements (i32 storage keeps it aligned).
+        let mut image: PgVec<'_, i32> = PgVec::new_in(mcx);
+        image.extend_from_slice(&[36 << 2, 1, 0, INT4OID as i32, 3, 1, 10, 20, 30]);
+        let c = Node::mk_const(
+            mcx,
+            INT4ARRAYOID,
+            -1,
+            0,
+            -1,
+            Datum::from_usize(image.as_ptr() as usize),
+            false,
+            false,
+        )
+        .unwrap();
+        let array_expr = ::execexpr::exec_init_expr_subplans(mcx, Some(c), ParamBind::NONE, None)
+            .unwrap()
+            .expect("const array expr compiles");
+        let mut array_keys = [IndexArrayKeyInfo {
+            scan_key: 0,
+            array_expr,
+            next_elem: 0,
+            elem_values: PgVec::new_in(mcx),
+            elem_nulls: PgVec::new_in(mcx),
+        }];
+        let mut scan_keys = [ScanKeyData::empty()];
+        assert!(exec_index_eval_array_keys(mcx, &mut estate, ecxt, &mut array_keys, &mut scan_keys)
+            .unwrap());
+        let ak = &array_keys[0];
+        let p = ak.elem_values.as_ptr();
+        let pn = ak.elem_nulls.as_ptr();
+        assert_eq!(ak.elem_values.iter().map(|d| d.as_i32()).collect::<Vec<_>>(), vec![10, 20, 30]);
+        assert_eq!(ak.elem_nulls.as_slice(), &[false, false, false]);
+        assert_eq!(scan_keys[0].sk_argument.as_i32(), 10);
+        assert_eq!(ak.next_elem, 1);
+        estate.reset_expr_context(ecxt);
+        assert!(exec_index_eval_array_keys(mcx, &mut estate, ecxt, &mut array_keys, &mut scan_keys)
+            .unwrap());
+        let ak = &array_keys[0];
+        assert_eq!(ak.elem_values.as_ptr(), p, "rescan reuses the element vector");
+        assert_eq!(ak.elem_nulls.as_ptr(), pn, "rescan reuses the null vector");
+        assert_eq!(ak.elem_values.iter().map(|d| d.as_i32()).collect::<Vec<_>>(), vec![10, 20, 30]);
+        assert_eq!(scan_keys[0].sk_argument.as_i32(), 10);
+    });
+}

@@ -45,6 +45,9 @@ pub struct TidScanState<'mcx> {
     tss_isCurrentOf: bool,
     tss_TidPtr: i64,
     tss_TidList: Option<PgVec<'mcx, ItemPointerData>>,
+    // The cleared previous list: C pfrees it on rescan (nodeTidscan.c:460),
+    // the bump query context cannot, so the allocation is reused instead.
+    tss_TidSpare: Option<PgVec<'mcx, ItemPointerData>>,
     tss_tidexprs: PgVec<'mcx, TidExpr<'mcx>>,
 }
 
@@ -205,7 +208,8 @@ impl<'mcx> TidScanState<'mcx> {
         let mcx = estate.es_query_cxt;
         self.ensure_scandesc(estate)?;
 
-        let mut tid_list: PgVec<'mcx, ItemPointerData> = PgVec::new_in(mcx);
+        let mut tid_list: PgVec<'mcx, ItemPointerData> =
+            self.tss_TidSpare.take().unwrap_or_else(|| PgVec::new_in(mcx));
         tid_list.reserve(self.tss_tidexprs.len());
         let ecxt = self.ss.ps_ExprContext;
         let table_oid = self.ss.ss_currentRelation.as_ref().expect("relation").rd_id;
@@ -427,6 +431,7 @@ pub fn exec_init_tid_scan<'mcx>(
         tss_isCurrentOf,
         tss_TidPtr: -1,
         tss_TidList: None,
+        tss_TidSpare: None,
         tss_tidexprs,
     })
 }
@@ -446,7 +451,10 @@ pub fn exec_rescan_tid_scan<'mcx>(
     node: &mut TidScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    node.tss_TidList = None;
+    if let Some(mut list) = node.tss_TidList.take() {
+        list.clear();
+        node.tss_TidSpare = Some(list);
+    }
     node.tss_TidPtr = -1;
 
     let mcx = estate.es_query_cxt;
@@ -462,5 +470,5 @@ unsafe impl ::mcx::ForgetSafe for TidExprKind<'_> {}
 const _: () = assert!(!core::mem::needs_drop::<TidExprKind<'static>>());
 mcx::forget_safe_struct!(
     TidExpr<'_> { kind; exprstate },
-    TidScanState<'_> { tss_isCurrentOf, tss_TidPtr; ss, tss_TidList, tss_tidexprs },
+    TidScanState<'_> { tss_isCurrentOf, tss_TidPtr; ss, tss_TidList, tss_TidSpare, tss_tidexprs },
 );

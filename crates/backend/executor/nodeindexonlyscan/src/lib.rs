@@ -21,7 +21,9 @@ use ::types_nodes::plannodes::IndexOnlyScan;
 use ::types_rel::{NoLock, Relation};
 use ::types_scan::scankey::ScanKeyData;
 use ::types_scan::sdir::ScanDirection;
-use ::types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::types_slot::{
+    SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_MARK,
+};
 use ::types_tuple::itemptr::ItemPointerGetBlockNumber;
 use ::types_tuple::TupleDescData;
 use ::visibilitymap::VmBuffer;
@@ -471,6 +473,13 @@ pub fn exec_init_index_only_scan<'mcx>(
     eflags: i32,
 ) -> PgResult<IndexOnlyScanState<'mcx>> {
     let rel = estate.exec_open_scan_relation(node.scan.scanrelid, eflags)?;
+    // nodeIndexonlyscan.c:609: plain EXPLAIN stops here — the index is neither
+    // opened nor locked and no scan keys are built (an EXPLAIN of a cached
+    // generic plan takes no index lock; AcquireExecutorLocks covers tables
+    // only).
+    if eflags & EXEC_FLAG_EXPLAIN_ONLY != 0 {
+        return exec_init_index_only_scan_explain_only(mcx, node, estate, rel);
+    }
     // C nodeIndexonlyscan.c:608: rellockmode unconditionally — a reused generic
     // plan gets no planner locks and AcquireExecutorLocks covers tables only.
     let index_rel = indexam::index_open(
@@ -483,6 +492,69 @@ pub fn exec_init_index_only_scan<'mcx>(
     // mergejoin-mark cursor. Byte-identity-safe (the lane just refuses).
     state.batch_allowed = eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0;
     Ok(state)
+}
+
+/// ExecInitIndexOnlyScan under EXEC_FLAG_EXPLAIN_ONLY (nodeIndexonlyscan.c:
+/// 560-609): slots, projection and the qual/recheckqual compile (their
+/// SubPlans are found now, as C), then return before index_open — no index
+/// relation, lock, scan keys or runtime keys. The plan never runs;
+/// exec_end_index_only_scan closes nothing.
+pub fn exec_init_index_only_scan_explain_only<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &IndexOnlyScan<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    rel: Relation<'mcx>,
+) -> PgResult<IndexOnlyScanState<'mcx>> {
+    let ps_ExprContext = estate.exec_assign_expr_context();
+    let tup_desc = execscan::exec_type_from_tl(mcx, &node.indextlist)?;
+    let ss_ScanTupleSlot =
+        estate.exec_init_extra_tuple_slot(Some(tup_desc.clone()), TupleSlotKind::Virtual);
+    let table_kind = table_slot_callbacks(&rel);
+    let ioss_TableSlot = estate.exec_init_extra_tuple_slot(Some(rel.rd_att.clone()), table_kind);
+    let mut ss = ScanState {
+        qual: None,
+        ps_ProjInfo: None,
+        ps_ExprContext,
+        scanrelid: node.scan.scanrelid,
+        ss_currentRelation: Some(rel),
+        ss_currentScanDesc: None,
+        ss_ScanTupleSlot,
+        instr_idx: None,
+    };
+    ss.ps_ProjInfo = execscan::exec_conditional_assign_projection_info(
+        mcx,
+        estate,
+        &node.scan.plan.targetlist,
+        INDEX_VAR as u32,
+        &tup_desc,
+    )?;
+    let params = estate.param_bind();
+    let (qual, recheckqual) =
+        ::executils::with_subplan_compile_env(estate, |env| -> ::types_error::PgResult<_> {
+            let qual = ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)?;
+            let recheckqual =
+                ::execexpr::exec_init_qual_subplans(mcx, &node.recheckqual, params, env)?;
+            Ok((qual, recheckqual))
+        })?;
+    ss.qual = qual;
+    Ok(IndexOnlyScanState {
+        ss,
+        recheckqual,
+        ioss_ScanDesc: None,
+        ioss_IndexOid: node.indexid,
+        ioss_RelationDesc: None,
+        ioss_ScanKeys: PgVec::new_in(mcx),
+        ioss_OrderByKeys: PgVec::new_in(mcx),
+        ioss_Runtime: None,
+        ioss_TableSlot,
+        ioss_OrderDir: order_dir(node.indexorderdir),
+        ioss_NameCStringAttNums: PgVec::new_in(mcx).into_boxed_slice(),
+        ioss_VMBuffer: VmBuffer::new(),
+        ioss_PlanNodeId: node.scan.plan.plan_node_id,
+        ioss_ParallelAware: node.scan.plan.parallel_aware,
+        batch_allowed: false,
+        plan_rows: node.scan.plan.plan_rows,
+    })
 }
 
 /// C divergence: init over caller-opened relations, splitting

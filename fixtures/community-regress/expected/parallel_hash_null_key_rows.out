@@ -1,0 +1,40 @@
+-- nodeHash.c:300: MultiExecParallelHash counts every build-side input row in
+-- partialTuples, including rows whose strict hash key is NULL (they are
+-- skipped by the insert only), so EXPLAIN ANALYZE's Parallel Hash actual
+-- rows equal its child scan's rows.
+CREATE TABLE phnull_a(k int);
+CREATE TABLE phnull_b(k int);
+INSERT INTO phnull_a SELECT CASE WHEN g % 3 = 0 THEN NULL ELSE g END FROM generate_series(1, 30000) g;
+INSERT INTO phnull_b SELECT CASE WHEN g % 2 = 0 THEN NULL ELSE g END FROM generate_series(1, 30000) g;
+ANALYZE phnull_a;
+ANALYZE phnull_b;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET max_parallel_workers_per_gather = 2;
+SET enable_mergejoin = off;
+SET enable_nestloop = off;
+SET enable_parallel_hash = on;
+CREATE FUNCTION phnull_explain() RETURNS json LANGUAGE plpgsql AS $$
+DECLARE r json;
+BEGIN
+  EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, COSTS OFF) '
+          'SELECT count(*) FROM phnull_a JOIN phnull_b USING (k)' INTO r;
+  RETURN r;
+END $$;
+-- worker counts vary with the machine, so compare the Hash node's total
+-- rows (rows x loops) with its own child's total.
+SELECT h->>'Node Type' AS node,
+       h->>'Parallel Aware' AS parallel,
+       (h->>'Actual Rows')::numeric * (h->>'Actual Loops')::numeric
+         = (h->'Plans'->0->>'Actual Rows')::numeric * (h->'Plans'->0->>'Actual Loops')::numeric
+         AS hash_total_matches_scan
+FROM jsonb_path_query(phnull_explain()::jsonb, 'strict $.** ? (@."Node Type" == "Hash")') AS h;
+ node | parallel | hash_total_matches_scan 
+------+----------+-------------------------
+ Hash | true     | t
+(1 row)
+
+DROP FUNCTION phnull_explain;
+DROP TABLE phnull_a;
+DROP TABLE phnull_b;

@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use ::execexpr::{
-    exec_build_projection_info_subplans, exec_init_qual_subplans, exec_project, exec_qual,
+    exec_build_projection_info_subplans, exec_init_qual_subplans, exec_project_prearmed, exec_qual,
     EvalSlots, ExprState,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
@@ -450,15 +450,18 @@ fn eval_join_qual<'mcx>(
     // C ExecQual(NULL) returns true before any slot access (constraint: the
     // hashjoin eval_probe_qual fast path; its absence here cost memoize_lat
     // ~36M instr/q in with_qual_slots calls on None quals).
-    if qual.is_none() {
+    let Some(q) = qual else {
         return Ok(true);
-    }
+    };
     // Subplan and pending-initplan param quals ride the suspension driver
     // (lazy PARAM_EXEC fetch, C ExecEvalParamExec).
-    if qual.as_ref().is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty()) {
-        return ::executils::exec_qual_with_subplans(qual, estate, ecxt);
+    if q.has_subplan() || !q.param_exec_deps().is_empty() {
+        return ::executils::exec_qual_with_subplans(Some(q), estate, ecxt);
     }
-    with_qual_slots(estate, ecxt, |slots| exec_qual(qual, slots))
+    // nodeNestloop.c:251: quals evaluate in ecxt_per_tuple_memory, reset
+    // every cycle. SAFETY: the per-tuple context object outlives the plan.
+    unsafe { q.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+    with_qual_slots(estate, ecxt, |slots| exec_qual(Some(q), slots))
 }
 
 fn with_qual_slots<'mcx, R>(
@@ -493,6 +496,9 @@ fn project_join_tuple<'mcx>(
         return ::executils::exec_project_with_subplans(proj, estate, ecxt, result);
     }
     let mcx = estate.es_query_cxt;
+    // C ExecProject: the projection allocates in ecxt_per_tuple_memory.
+    // SAFETY: the per-tuple context object outlives the plan.
+    unsafe { proj.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
     let (inner_id, outer_id) = {
         let e = estate.ecxt(ecxt);
         (
@@ -505,7 +511,7 @@ fn project_join_tuple<'mcx>(
         .get_disjoint_mut([inner_id.0 as usize, outer_id.0 as usize, result.0 as usize])
         .expect("distinct in-range nestloop slot ids");
     let mut slots = EvalSlots { scan: None, inner: Some(inner), outer: Some(outer) };
-    exec_project(proj, &mut slots, result, mcx)
+    exec_project_prearmed(proj, &mut slots, result, mcx)
 }
 
 // Exempt: all released in exec_end_nest_loop (proj via release_frames).

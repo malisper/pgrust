@@ -94,6 +94,9 @@ fn install_seams() {
             with_fake(|f| f.pins[(buf - 1) as usize] += 1);
         });
         bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
+        bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|rel, _fork| {
+            Ok(with_fake(|f| f.tables[&rel.rd_id].len() as ::types_core::BlockNumber))
+        });
 
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
         predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| Ok(false));
@@ -314,6 +317,7 @@ fn rig<'mcx>(mcx: Mcx<'mcx>, ntids: usize) -> (Oid, EStateData<'mcx>, TidScanSta
         tss_isCurrentOf: false,
         tss_TidPtr: -1,
         tss_TidList: Some(tids),
+        tss_TidSpare: None,
         tss_tidexprs: PgVec::new_in(mcx),
     };
     (heap_oid, estate, state)
@@ -356,6 +360,31 @@ fn tid_walk_completes_without_a_pending_interrupt() {
         assert_eq!(heap_reads(heap_oid), 8);
         assert_eq!(CFI_CALLS.load(Ordering::SeqCst), 0);
         assert_eq!(state.tss_TidPtr, 8);
+        estate.exec_reset_tuple_table(false);
+        quiesced();
+    });
+}
+
+// nodeTidscan.c:460: ExecReScanTidScan pfrees the previous TID list. The
+// bump query context cannot free it, so the cleared list is reused by the
+// next TidListEval instead of leaving one allocation behind per rescan.
+#[test]
+fn rescan_reuses_the_tid_list_allocation() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let (_heap_oid, mut estate, mut state) = rig(mcx, 8);
+        let p = state.tss_TidList.as_ref().unwrap().as_ptr();
+        exec_rescan_tid_scan(&mut state, &mut estate).unwrap();
+        assert!(state.tss_TidList.is_none());
+        assert_eq!(state.tss_TidPtr, -1);
+        let spare = state.tss_TidSpare.as_ref().expect("cleared list kept for reuse");
+        assert!(spare.is_empty());
+        assert_eq!(spare.as_ptr(), p);
+        state.tid_list_eval(&mut estate).unwrap();
+        assert!(state.tss_TidSpare.is_none());
+        let list = state.tss_TidList.as_ref().unwrap();
+        assert!(list.is_empty(), "no tid exprs: the list evaluates empty");
+        assert_eq!(list.as_ptr(), p, "TidListEval reuses the previous allocation");
         estate.exec_reset_tuple_table(false);
         quiesced();
     });

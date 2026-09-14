@@ -105,8 +105,17 @@ pub fn exec_init_bitmap_index_scan_rel<'mcx>(
             },
         )?)
     };
+    // nodeBitmapIndexscan.c:323: the scan begins at init (this is where an AM
+    // without ampredlocks takes its relation predicate lock), and the keys go
+    // straight to the AM when none of them is a runtime or array key.
+    let snapshot = estate.es_snapshot.clone().expect("bitmap index scan requires es_snapshot");
+    let mut scandesc =
+        index_beginscan_bitmap(mcx, &index_rel, snapshot, biss_ScanKeys.len() as i32)?;
+    if biss_Runtime.is_none() {
+        index_rescan(&mut scandesc, Some(&biss_ScanKeys), None)?;
+    }
     Ok(BitmapIndexScanState {
-        biss_ScanDesc: None,
+        biss_ScanDesc: Some(::mcx::alloc_in(mcx, scandesc)?),
         biss_RelationDesc: Some(index_rel),
         biss_ScanKeys,
         biss_Runtime,
