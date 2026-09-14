@@ -101,6 +101,15 @@ fn data_path(rel: &str) -> String {
     format!("{dir}/{rel}")
 }
 
+// xlogrecovery.c:3745-3752: TimestampDifferenceExceeds decides whether to
+// wait at all and the clamped TimestampDifferenceMilliseconds sizes the wait.
+fn wal_retry_wait_ms(last_fail_time: TimestampTz, now: TimestampTz, retry_ms: i32) -> Option<i64> {
+    if adt_timestamp::TimestampDifferenceExceeds(last_fail_time, now, retry_ms) {
+        return None;
+    }
+    Some(retry_ms as i64 - adt_timestamp::TimestampDifferenceMilliseconds(last_fail_time, now))
+}
+
 fn lsn_fmt(lsn: XLogRecPtr) -> String {
     format!("{:X}/{:X}", lsn >> 32, lsn as u32)
 }
@@ -609,11 +618,10 @@ impl PageSource {
                             self.set_cur_source(XLogSource::Archive);
                         } else {
                             let now = timestamp_seams::get_current_timestamp::call();
-                            let retry_ms =
-                                guc_tables::vars::wal_retrieve_retry_interval.read() as i64;
-                            let elapsed_ms = (now - self.last_fail_time) / 1000;
-                            if elapsed_ms < retry_ms {
-                                let wait_time = retry_ms - elapsed_ms;
+                            let retry_ms = guc_tables::vars::wal_retrieve_retry_interval.read();
+                            if let Some(wait_time) =
+                                wal_retry_wait_ms(self.last_fail_time, now, retry_ms)
+                            {
                                 let _ = elog(
                                     LOG,
                                     format!(

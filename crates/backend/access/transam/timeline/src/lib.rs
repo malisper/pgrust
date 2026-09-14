@@ -274,8 +274,10 @@ pub fn findNewestTimeLine(
     Ok(newestTLI)
 }
 
+// timeline.c:472 names the temp file by getpid(): backends are threads of one
+// process here, so the per-backend MyProcPid keeps concurrent creators apart.
 fn xlog_temp_path() -> String {
-    format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::process_id())
+    format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::MyProcPid())
 }
 
 fn create_temp_history_file(tmppath: &str, func: &'static str) -> PgResult<i32> {
@@ -537,8 +539,13 @@ pub fn tliSwitchPoint(
     unreachable!()
 }
 
+// xlogrecovery.c's ArchiveRecoveryRequested is static to the process that ran
+// InitWalRecovery; a walsender or summarizer reads history files from pg_wal.
 fn archive_recovery_requested() -> bool {
-    xlogrecovery_seams::archive_recovery_requested::is_installed()
+    matches!(
+        miscinit::GetMyBackendType(),
+        types_core::BackendType::Startup | types_core::BackendType::StandaloneBackend
+    ) && xlogrecovery_seams::archive_recovery_requested::is_installed()
         && xlogrecovery_seams::archive_recovery_requested::call()
 }
 

@@ -77,13 +77,16 @@ struct FileListState {
     // (file_list_inherit): a retained worker thread truncates back to it
     // where C's worker would be a fresh fork (file_list_reset_to_inherited).
     inherited: usize,
+    // Libraries whose _PG_init already ran on this thread: its process-once
+    // effects (custom GUCs, hooks) outlive a file_list_reset_to_inherited.
+    initialized: Vec<&'static str>,
 }
 
 thread_local! {
     // file_list (dfmgr.c): per-backend record of loaded files (malloc'd in C,
     // outliving every context), so _PG_init runs once per session.
     static FILE_LIST: RefCell<FileListState> =
-        const { RefCell::new(FileListState { list: Vec::new(), inherited: 0 }) };
+        const { RefCell::new(FileListState { list: Vec::new(), inherited: 0, initialized: Vec::new() }) };
 }
 
 pub fn register_builtin_library(entry: BuiltinLibraryEntry) {
@@ -308,8 +311,12 @@ fn internal_load_library(libname: &str) -> PgResult<BuiltinLibraryEntry> {
     // Linked into file_list only after _PG_init succeeds, as in C.
     let already = FILE_LIST.with(|s| s.borrow().list.iter().any(|f| f.entry.name == entry.name));
     if !already {
-        if let Some(init) = entry.pg_init {
-            init()?;
+        let initialized = FILE_LIST.with(|s| s.borrow().initialized.contains(&entry.name));
+        if !initialized {
+            if let Some(init) = entry.pg_init {
+                init()?;
+            }
+            FILE_LIST.with(|s| s.borrow_mut().initialized.push(entry.name));
         }
         FILE_LIST.with(|s| {
             s.borrow_mut().list.push(LoadedFile { filename: libname.to_owned(), entry })
@@ -354,7 +361,9 @@ pub fn file_list_snapshot() -> FileList {
 
 pub fn file_list_inherit(list: &FileList) {
     FILE_LIST.with(|s| {
-        *s.borrow_mut() = FileListState { list: list.0.clone(), inherited: list.0.len() }
+        let mut st = s.borrow_mut();
+        let initialized = std::mem::take(&mut st.initialized);
+        *st = FileListState { list: list.0.clone(), inherited: list.0.len(), initialized };
     });
     let inits = BACKEND_INITS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for f in &list.0 {
@@ -759,6 +768,13 @@ mod tests {
             )]))
             .unwrap();
             assert_eq!(loaded_module_names(), vec!["tpre", "tlib"]);
+            assert_eq!(INITS_SES.load(Ordering::SeqCst), ses + 1);
+            // The next leader's state brings tses back: it is "loaded" again
+            // but its _PG_init (custom GUC definitions) does not rerun.
+            file_list_reset_to_inherited();
+            restore_library_state(&state).unwrap();
+            assert_eq!(loaded_module_names(), vec!["tpre", "tses", "tlib"]);
+            assert!(is_loaded("tses"));
             assert_eq!(INITS_SES.load(Ordering::SeqCst), ses + 1);
         })
         .join()

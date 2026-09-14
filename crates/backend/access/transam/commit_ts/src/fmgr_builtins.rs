@@ -2,6 +2,7 @@ use datum::Datum;
 use types_core::TransactionIdIsNormal;
 use types_error::{PgError, PgResult};
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use types_tuple::TupleDescData;
 
 use crate::{GetLatestCommitTsData, TransactionIdGetCommitTsData};
 
@@ -42,8 +43,14 @@ fn composite_result(
     values: &[Datum],
     isnull: &[bool],
 ) -> PgResult<Datum> {
+    // commit_ts.c:477/511 get_call_result_type(fcinfo, ...): a RETURNS record
+    // alias resolves through ReturnSetInfo.expectedDesc.
+    let expected_desc = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    // SAFETY: expectedDesc contract — the executor armed it with the scan
+    // tupdesc, live for the duration of this call.
+    let expected = expected_desc.map(|p| unsafe { p.cast::<TupleDescData<'_>>().as_ref() });
     let mcx = fcinfo.result_mcx();
-    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, expected)?;
     if resolved.class != funcapi::TypeFuncClass::Composite {
         return Err(Box::new(PgError::error("return type must be a row type")));
     }

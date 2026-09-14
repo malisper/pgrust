@@ -267,3 +267,28 @@ fn fgets_line_splitting() {
     let lines: Vec<&[u8]> = fgets_lines(with_nul).collect();
     assert_eq!(lines, vec![b"ab".as_slice(), b"ef".as_slice()]);
 }
+
+#[test]
+fn xlog_temp_path_is_named_by_the_backend_pid() {
+    let prev = init_small::globals::MyProcPid();
+    init_small::globals::SetMyProcPid(4242);
+    assert_eq!(xlog_temp_path(), "pg_wal/xlogtemp.4242");
+    init_small::globals::SetMyProcPid(prev);
+}
+
+#[test]
+fn archive_recovery_is_requested_only_in_the_startup_process() {
+    if !xlogrecovery_seams::archive_recovery_requested::is_installed() {
+        xlogrecovery_seams::archive_recovery_requested::set(|| true);
+    }
+    let prev = miscinit::GetMyBackendType();
+    miscinit::SetMyBackendType(types_core::BackendType::WalSender);
+    assert!(!archive_recovery_requested());
+    miscinit::SetMyBackendType(types_core::BackendType::WalSummarizer);
+    assert!(!archive_recovery_requested());
+    miscinit::SetMyBackendType(types_core::BackendType::Startup);
+    assert!(archive_recovery_requested());
+    miscinit::SetMyBackendType(types_core::BackendType::StandaloneBackend);
+    assert!(archive_recovery_requested());
+    miscinit::SetMyBackendType(prev);
+}

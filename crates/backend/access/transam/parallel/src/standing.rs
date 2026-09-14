@@ -1084,6 +1084,7 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
     // Parallel-worker impersonation for the binder's validate() and the
     // executor's IsParallelWorker gates; cleared on every exit path.
     super::PARALLEL_WORKER_NUMBER.with(|c| c.set(ticket as i32));
+    init_small::globals::SetParallelLeaderProcNumber(shared.parallel_leader_proc_number);
     // EAGER-binding drivers (the sink arms) cannot bind over a parked
     // sticky retention (the eager validate()'s envelope gate refuses a
     // live retained session bind) — evict it with the full session restore
@@ -1173,6 +1174,7 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
         }
     }
     super::PARALLEL_WORKER_NUMBER.with(|c| c.set(-1));
+    init_small::globals::SetParallelLeaderProcNumber(types_core::INVALID_PROC_NUMBER);
     // GL-GANGWEDGE-1 deterministic wedge injection (inert in production).
     maybe_inject_pool_stall();
     // Park invisibility (see the fn doc): leave the procarray (parked

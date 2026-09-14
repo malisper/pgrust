@@ -1581,3 +1581,11 @@ fn xlog_outdesc_and_block_info_render_like_c() {
     xlog_block_info(&mut buf, &view).unwrap();
     assert_eq!(String::from_utf8_lossy(buf.as_bytes()), "XLOG/BACKUP_END: 0/1000028");
 }
+
+#[test]
+fn wal_retry_wait_ms_clamps_a_backward_clock_step() {
+    assert_eq!(wal_retry_wait_ms(1_000_000, 500_000, 5000), Some(5000));
+    assert_eq!(wal_retry_wait_ms(0, 4_000_000, 5000), Some(1000));
+    assert_eq!(wal_retry_wait_ms(0, 4_000_001, 5000), Some(999));
+    assert_eq!(wal_retry_wait_ms(0, 5_000_000, 5000), None);
+}

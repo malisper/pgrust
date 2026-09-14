@@ -277,13 +277,17 @@ fn short_main_data() -> Box<PgError> {
 }
 
 // xl_restore_point: rp_time i64 at 0, rp_name[MAXFNAMELEN] at 8.
-fn restore_point_name(data: &[u8]) -> PgResult<String> {
+fn restore_point_name_bytes(data: &[u8]) -> PgResult<&[u8]> {
     if data.len() < 8 {
         return Err(short_main_data());
     }
     let raw = &data[8..8 + MAXFNAMELEN.min(data.len() - 8)];
     let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-    Ok(String::from_utf8_lossy(&raw[..end]).into_owned())
+    Ok(&raw[..end])
+}
+
+fn restore_point_name(data: &[u8]) -> PgResult<String> {
+    Ok(String::from_utf8_lossy(restore_point_name_bytes(data)?).into_owned())
 }
 
 pub(crate) fn getRecordTimestamp(
@@ -421,8 +425,10 @@ pub(crate) fn recoveryStopsAfter(reader: &xlogreader::XLogReaderState<'_>) -> Pg
         && rmid == transam_xlog::RM_XLOG_ID
         && info == transam_xlog::XLOG_RESTORE_POINT
     {
-        let rp_name = restore_point_name(reader.XLogRecGetData())?;
-        if rp_name == recovery_target_name() {
+        let rp_name_bytes = restore_point_name_bytes(reader.XLogRecGetData())?;
+        // xlogrecovery.c:2785: strcmp on the raw name bytes.
+        if rp_name_bytes == recovery_target_name().as_bytes() {
+            let rp_name = String::from_utf8_lossy(rp_name_bytes).into_owned();
             clear_stop(true);
             let xtime = getRecordTimestamp(reader)?.unwrap_or(0);
             STOP_TIME.store(xtime, Relaxed);
@@ -998,6 +1004,16 @@ mod short_main_data_tests {
         // rp_time only, empty name.
         let data = 0i64.to_ne_bytes().to_vec();
         assert_eq!(restore_point_name(&data).unwrap(), "");
+    }
+
+    #[test]
+    fn restore_point_name_matches_on_raw_bytes() {
+        let mut data = 1i64.to_ne_bytes().to_vec();
+        data.extend_from_slice(b"a\xffb\0");
+        let raw = restore_point_name_bytes(&data).unwrap();
+        assert_eq!(raw, b"a\xffb");
+        assert_ne!(raw, "a\u{FFFD}b".as_bytes());
+        assert_eq!(restore_point_name(&data).unwrap(), "a\u{FFFD}b");
     }
 }
 

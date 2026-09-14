@@ -14,6 +14,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 types_guc = { path = "../../../../_support/types/types_guc" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
 datum = { path = "../../../../_support/types/datum" }
 elog = { path = "../../../utils/error/elog" }
 init_small = { path = "../../../utils/init/init_small" }

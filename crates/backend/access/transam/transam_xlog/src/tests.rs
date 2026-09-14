@@ -1306,6 +1306,25 @@ fn delay_chkpt_wait_events_are_c_exact() {
 // seam like XLogFileInitInternal's (std::process::id aborts on wasm32-wasip1).
 // Detail bug_b2485c35.
 #[test]
+fn xlog_temp_path_is_named_by_the_backend_pid() {
+    let prev = init_small::globals::MyProcPid();
+    init_small::globals::SetMyProcPid(4242);
+    assert_eq!(crate::write::xlog_temp_path(), "pg_wal/xlogtemp.4242");
+    init_small::globals::SetMyProcPid(prev);
+}
+
+#[test]
+fn checkpoint_phase_milliseconds_saturate_at_int_max() {
+    assert_eq!(crate::startup::timestamp_difference_milliseconds(0, 0), 0);
+    assert_eq!(crate::startup::timestamp_difference_milliseconds(5, 0), 0);
+    assert_eq!(crate::startup::timestamp_difference_milliseconds(0, 1001), 2);
+    assert_eq!(
+        crate::startup::timestamp_difference_milliseconds(0, i64::MAX / 2),
+        i32::MAX as i64
+    );
+}
+
+#[test]
 fn write_rs_never_calls_std_process_id_outside_tests() {
     let body = include_str!("write.rs").split("#[cfg(test)]").next().unwrap();
     assert!(!body.contains("std::process::id()"), "write.rs: use init_small::globals::process_id()");

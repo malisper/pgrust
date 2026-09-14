@@ -302,6 +302,12 @@ pub(crate) fn InstallXLogFileSegment(
     Ok(true)
 }
 
+// xlog.c:3227 names the temp segment by getpid(): backends are threads of one
+// process here, so the per-backend MyProcPid keeps concurrent creators apart.
+pub(crate) fn xlog_temp_path() -> String {
+    format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::MyProcPid())
+}
+
 fn XLogFileInitInternal(
     logsegno: XLogSegNo,
     logtli: TimeLineID,
@@ -332,10 +338,7 @@ fn XLogFileInitInternal(
         }
     }
 
-    // Merge composition (dst/p4-simnet): p5's wasm-safe process_id seam
-    // (std::process::id aborts on wasm32-wasip1) + substrate's vfs-routed
-    // unlink.
-    let tmppath = format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::process_id());
+    let tmppath = xlog_temp_path();
     let _ = fd::pg_unlink(&tmppath);
 
     let f = fd::BasicOpenFile(&tmppath, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)?;
@@ -481,7 +484,7 @@ pub(crate) fn XLogFileCopy(
             .finish(loc("XLogFileCopy"));
     }
 
-    let tmppath = format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::process_id());
+    let tmppath = xlog_temp_path();
     let _ = std::fs::remove_file(&tmppath);
 
     // No get_sync_bit(): fsync only once at end of fill.

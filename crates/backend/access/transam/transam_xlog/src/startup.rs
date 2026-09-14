@@ -58,15 +58,15 @@ thread_local! {
     static CKPT_AGG_SYNC_TIME: Cell<u64> = const { Cell::new(0) };
 }
 
-// TimestampDifferenceMilliseconds (utils/adt/timestamp.c): clamp negatives to
-// 0, ceiling-divide microseconds, saturate at INT32_MAX seconds' worth.
-fn timestamp_difference_milliseconds(start_time: i64, stop_time: i64) -> i64 {
+// TimestampDifferenceMilliseconds (utils/adt/timestamp.c:1761-1775): clamp
+// negatives to 0, ceiling-divide microseconds, saturate at INT_MAX.
+pub(crate) fn timestamp_difference_milliseconds(start_time: i64, stop_time: i64) -> i64 {
     if start_time >= stop_time {
         return 0;
     }
     let diff = stop_time - start_time;
     if diff >= i32::MAX as i64 * 1000 - 999 {
-        i32::MAX as i64 * 1000
+        i32::MAX as i64
     } else {
         (diff + 999) / 1000
     }

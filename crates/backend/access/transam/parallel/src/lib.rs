@@ -1414,6 +1414,7 @@ struct WorkerIdentityReset;
 impl Drop for WorkerIdentityReset {
     fn drop(&mut self) {
         PARALLEL_WORKER_NUMBER.with(|c| c.set(-1));
+        init_small::globals::SetParallelLeaderProcNumber(types_core::INVALID_PROC_NUMBER);
         INITIALIZING_PARALLEL_WORKER.with(|c| c.set(false));
     }
 }
@@ -1441,6 +1442,8 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
             .finish(loc(1347, "ParallelWorkerMain"));
     };
     MY_WORKER_SHARED.with(|s| *s.borrow_mut() = Some(Arc::clone(&shared)));
+    // parallel.c:1368: temp relations resolve against the leader's proc number.
+    init_small::globals::SetParallelLeaderProcNumber(shared.parallel_leader_proc_number);
 
     let sender = take_my_error_sender(&shared, worker_number);
     MY_PROGRESS_SENDER.with(|c| *c.borrow_mut() = Some(sender.clone()));
