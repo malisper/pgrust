@@ -268,25 +268,47 @@ pub(crate) fn fetch_table_list(
     Ok(tablelist)
 }
 
-// libpqrcv_create_slot (libpqwalreceiver.c), logical arm with CRS_NOEXPORT_SNAPSHOT.
+// libpqrcv_create_slot (libpqwalreceiver.c:952), logical arm with
+// CRS_NOEXPORT_SNAPSHOT: parenthesized options from publisher 15 on, the
+// legacy keyword syntax (TWO_PHASE FAILOVER NOEXPORT_SNAPSHOT) below that.
+pub(crate) fn create_slot_cmd(
+    server_version: i32,
+    slotname: &str,
+    two_phase: bool,
+    failover: bool,
+) -> String {
+    let new_syntax = server_version >= 150000;
+    let mut cmd = format!(
+        "CREATE_REPLICATION_SLOT \"{}\" LOGICAL pgoutput ",
+        slotname.replace('"', "\"\"")
+    );
+    if new_syntax {
+        cmd.push('(');
+    }
+    let sep = if new_syntax { ", " } else { " " };
+    if two_phase {
+        cmd.push_str("TWO_PHASE");
+        cmd.push_str(sep);
+    }
+    if failover {
+        cmd.push_str("FAILOVER");
+        cmd.push_str(sep);
+    }
+    if new_syntax {
+        cmd.push_str("SNAPSHOT 'nothing')");
+    } else {
+        cmd.push_str("NOEXPORT_SNAPSHOT");
+    }
+    cmd
+}
+
 pub(crate) fn walrcv_create_slot(
     conn: &mut PgConn,
     slotname: &str,
     two_phase: bool,
     failover: bool,
 ) -> PgResult<()> {
-    let mut opts: Vec<&str> = vec!["SNAPSHOT 'nothing'"];
-    if two_phase {
-        opts.push("TWO_PHASE");
-    }
-    if failover {
-        opts.push("FAILOVER");
-    }
-    let cmd = format!(
-        "CREATE_REPLICATION_SLOT \"{}\" LOGICAL pgoutput ({})",
-        slotname.replace('"', "\"\""),
-        opts.join(", ")
-    );
+    let cmd = create_slot_cmd(conn.server_version(), slotname, two_phase, failover);
     let res = conn.exec(&cmd)?;
     if res.status != ExecStatus::TuplesOk {
         // libpqwalreceiver.c:1036: ERRCODE_PROTOCOL_VIOLATION.
@@ -573,6 +595,28 @@ mod tests {
         note_published_table(&mut tablelist, "public".into(), "u".into()).unwrap();
         note_published_table(&mut tablelist, "other".into(), "t".into()).unwrap();
         assert_eq!(tablelist.len(), 3);
+    }
+
+    // libpqrcv_create_slot (libpqwalreceiver.c:952): parenthesized options
+    // from publisher 15 on; the legacy keyword syntax below that.
+    #[test]
+    fn create_slot_syntax_follows_publisher_version() {
+        assert_eq!(
+            create_slot_cmd(180006, "s", false, false),
+            "CREATE_REPLICATION_SLOT \"s\" LOGICAL pgoutput (SNAPSHOT 'nothing')"
+        );
+        assert_eq!(
+            create_slot_cmd(150000, "s\"q", true, true),
+            "CREATE_REPLICATION_SLOT \"s\"\"q\" LOGICAL pgoutput (TWO_PHASE, FAILOVER, SNAPSHOT 'nothing')"
+        );
+        assert_eq!(
+            create_slot_cmd(140000, "s", false, false),
+            "CREATE_REPLICATION_SLOT \"s\" LOGICAL pgoutput NOEXPORT_SNAPSHOT"
+        );
+        assert_eq!(
+            create_slot_cmd(140000, "s", true, true),
+            "CREATE_REPLICATION_SLOT \"s\" LOGICAL pgoutput TWO_PHASE FAILOVER NOEXPORT_SNAPSHOT"
+        );
     }
 
     // fetch_table_list (subscriptioncmds.c:2262-2303): the 16+ query is

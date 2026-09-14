@@ -661,11 +661,16 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> PgResu
 // afterTriggerInvokeEvents (trigger.c); returns all_fired. Owns the
 // per-tuple scratch (C's AfterTriggerTupleContext) so the empty-queue
 // mark_events loop in every caller never pays a context create/destroy.
+// C ri_TrigFunctions per result relation: the FmgrInfo (and its fn_extra)
+// survives across the events one invocation fires.
+type TrigFmgrCaches = std::collections::HashMap<Oid, crate::exec::TriggerFmgrCache>;
+
 fn invoke_events(
     sel: EvList,
     firing_id: CommandId,
     delete_ok: bool,
     mut instr: Option<&mut (dyn AfterTriggerInstrSink + '_)>,
+    finfos: &mut TrigFmgrCaches,
 ) -> PgResult<bool> {
     // Bump backend: C's per-tuple context shape — reset is a wholesale free
     // (the executor's per-tuple context rides the same arm; an exact-
@@ -704,6 +709,7 @@ fn invoke_events(
         AfterTriggerExecute(
             scratch.mcx(), ctid1, ctid2, fdw, event, tgoid, relid, table_idx, src_part, dst_part,
             rolid, modifiedcols.as_deref(), desc.as_ref(), instr.as_deref_mut(),
+            finfos.entry(relid).or_default(),
         )?;
         scratch.reset();
         with_list(sel, |evs| {
@@ -767,6 +773,7 @@ pub fn AfterTriggerEndQuery(mut instr: Option<&mut (dyn AfterTriggerInstrSink + 
         QUERY_DEPTH.with(|c| c.set(depth - 1));
         return Ok(());
     }
+    let mut finfos = TrigFmgrCaches::new();
     loop {
         if !mark_events(EvList::Query(d), true, true)? {
             break;
@@ -776,7 +783,7 @@ pub fn AfterTriggerEndQuery(mut instr: Option<&mut (dyn AfterTriggerInstrSink + 
             c.set(id + 1);
             id
         });
-        if invoke_events(EvList::Query(d), firing_id, false, instr.as_deref_mut())? {
+        if invoke_events(EvList::Query(d), firing_id, false, instr.as_deref_mut(), &mut finfos)? {
             break;
         }
     }
@@ -810,7 +817,7 @@ pub fn AfterTriggerFireDeferred() -> PgResult<()> {
             c.set(id + 1);
             id
         });
-        if invoke_events(EvList::Xact, firing_id, true, None)? {
+        if invoke_events(EvList::Xact, firing_id, true, None, &mut TrigFmgrCaches::new())? {
             break;
         }
     }
@@ -940,7 +947,7 @@ pub(crate) fn fire_now_immediate() -> PgResult<()> {
             c.set(id + 1);
             id
         });
-        if invoke_events(EvList::Xact, firing_id, !xact::IsSubTransaction(), None)? {
+        if invoke_events(EvList::Xact, firing_id, !xact::IsSubTransaction(), None, &mut TrigFmgrCaches::new())? {
             break;
         }
     }
@@ -969,6 +976,7 @@ fn AfterTriggerExecute<'mcx>(
     // trig-target open does.
     desc: Option<&Rc<TriggerDesc<'static>>>,
     mut instr: Option<&mut (dyn AfterTriggerInstrSink + '_)>,
+    finfos: &mut crate::exec::TriggerFmgrCache,
 ) -> PgResult<()> {
     let fresh_desc;
     let trigdesc: &TriggerDesc<'static> = match desc {
@@ -1034,7 +1042,7 @@ fn AfterTriggerExecute<'mcx>(
 
     if event & TRIGGER_EVENT_ROW == 0 {
         let tg_event = event & TRIGGER_EVENT_OPMASK;
-        let mut finfo = fmgr_seams::fmgr_info::call(trigger.tgfoid)?;
+        let finfo = finfos.get(tgindx, trigger.tgfoid)?;
         let mut tdata =
             types_trigger_call::TriggerData::new(tg_event, &rel, None, None, trigger);
         tdata.tg_oldtable = tg_oldtable.0;
@@ -1044,8 +1052,7 @@ fn AfterTriggerExecute<'mcx>(
         tdata.tg_updatedcols = updatedcols_ptr;
         // AFTER triggers: any returned tuple is discarded (C L4559-4567).
         let restore = become_queuing_role(rolid);
-        let result =
-            crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo, None).map(|_| ());
+        let result = crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, finfo, None).map(|_| ());
         restore_role(restore);
         // trigger.c:4599-4600
         if let Some(s) = instr.as_deref_mut() {
@@ -1139,7 +1146,7 @@ fn AfterTriggerExecute<'mcx>(
     let tg_event = event & (TRIGGER_EVENT_OPMASK | TRIGGER_EVENT_ROW);
     let restore = become_queuing_role(rolid);
     let result = if ri_trigger_kind(trigger.tgfoid) == RI_TRIGGER_NONE {
-        let mut finfo = fmgr_seams::fmgr_info::call(trigger.tgfoid)?;
+        let finfo = finfos.get(tgindx, trigger.tgfoid)?;
         let mut tdata = types_trigger_call::TriggerData::new(
             tg_event,
             &rel,
@@ -1151,7 +1158,7 @@ fn AfterTriggerExecute<'mcx>(
         tdata.tg_newtable = tg_newtable.0;
         tdata.tg_updatedcols = updatedcols_ptr;
         // AFTER ROW triggers: the returned tuple is ignored (C frees it).
-        crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo, None).map(|_| ())
+        crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, finfo, None).map(|_| ())
     } else {
         let data = RiTriggerData {
             tg_event,

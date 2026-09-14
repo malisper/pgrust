@@ -1,0 +1,101 @@
+-- bugs/batch-10-12-14-16-detail: SQL-level regressions, expected captured from C 18.6.
+-- fp-commands-trigger-p2#2: AFTER row events reuse the relation's FmgrInfo
+-- (ri_TrigFunctions), so a proconfig cached in fn_extra survives the firing cycle.
+CREATE TABLE trg_t(i int);
+CREATE TABLE trg_seen(v text);
+CREATE FUNCTION trg_af() RETURNS trigger LANGUAGE plpgsql SET audit.tag = 'old' AS $$
+BEGIN
+  INSERT INTO trg_seen VALUES (current_setting('audit.tag'));
+  ALTER FUNCTION trg_af() SET audit.tag = 'new';
+  RETURN NEW;
+END$$;
+CREATE TRIGGER trg_af AFTER INSERT ON trg_t FOR EACH ROW EXECUTE FUNCTION trg_af();
+INSERT INTO trg_t VALUES (1),(2),(3);
+SELECT * FROM trg_seen;
+  v  
+-----
+ old
+ old
+ old
+(3 rows)
+
+DROP TABLE trg_t, trg_seen;
+DROP FUNCTION trg_af();
+-- fp-tsearch-wparser_def#1: hlCover reads phrase endpoints raw; a <16383>
+-- distance pushes the endpoint past the 14-bit position mask.
+SELECT ts_headline('simple', repeat('filler ', 20) || 'a', 'a <16383> !b'::tsquery, 'MinWords=1, MaxWords=2, ShortWord=0');
+ ts_headline 
+-------------
+ <b>a</b>
+(1 row)
+
+SELECT ts_headline('simple', repeat('filler ', 20) || 'a b', 'a <1> b'::tsquery, 'MinWords=1, MaxWords=3, ShortWord=0');
+    ts_headline    
+-------------------
+ <b>a</b> <b>b</b>
+(1 row)
+
+-- fp-fmgr-fmgr#3: fmgr_internal_validator resolves fmgr_builtins names only;
+-- SQL-language catalog functions are not internal entry points.
+CREATE FUNCTION my_desc(oid, name) RETURNS text AS 'obj_description' LANGUAGE internal;
+ERROR:  there is no built-in function named "obj_description"
+CREATE FUNCTION my_desc(oid, name, int) RETURNS text AS 'col_description' LANGUAGE internal;
+ERROR:  there is no built-in function named "col_description"
+CREATE FUNCTION my_desc(oid, name) RETURNS text AS 'shobj_description' LANGUAGE internal;
+ERROR:  there is no built-in function named "shobj_description"
+CREATE FUNCTION my_int4pl(int, int) RETURNS int AS 'int4pl' LANGUAGE internal;
+SELECT my_int4pl(40, 2);
+ my_int4pl 
+-----------
+        42
+(1 row)
+
+DROP FUNCTION my_int4pl(int, int);
+-- fp-commands-typecmds-p2#1: validateDomainCheckConstraint resets its per-tuple
+-- context per row (functional check; the memory profile is measured by hand).
+CREATE DOMAIN dom_txt AS text;
+CREATE TABLE dom_t(v dom_txt);
+INSERT INTO dom_t SELECT repeat('x', 2000)::dom_txt FROM generate_series(1, 200);
+ALTER DOMAIN dom_txt ADD CONSTRAINT dom_c1 CHECK (length(VALUE || VALUE) > 0);
+INSERT INTO dom_t VALUES ('short');
+ALTER DOMAIN dom_txt ADD CONSTRAINT dom_c2 CHECK (length(VALUE || VALUE) > 100);
+ERROR:  column "v" of table "dom_t" contains values that violate the new constraint
+SELECT count(*) FROM dom_t;
+ count 
+-------
+   201
+(1 row)
+
+DROP TABLE dom_t;
+DROP DOMAIN dom_txt;
+-- fp-tsearch-ts_parse#1: a thesaurus attempt abandoned by an unmapped token
+-- type keeps its provisional result across queue compaction (>1024 retired
+-- tokens) instead of underflowing the retired lastRes.
+CREATE TEXT SEARCH DICTIONARY thes_d (TEMPLATE = thesaurus, DictFile = thesaurus_sample, Dictionary = pg_catalog.simple);
+CREATE TEXT SEARCH CONFIGURATION thes_cfg (COPY = simple);
+ALTER TEXT SEARCH CONFIGURATION thes_cfg ALTER MAPPING FOR asciiword WITH thes_d, simple;
+SELECT lexeme, array_length(positions, 1) AS n, positions[1] AS first, positions[array_length(positions, 1)] AS last
+  FROM unnest(to_tsvector('thes_cfg', 'one 123 ' || repeat('q ', 1100) || 'supernovae q'))
+  ORDER BY lexeme;
+ lexeme |  n  | first | last 
+--------+-----+-------+------
+ 123    |   1 |     2 |    2
+ one    |   1 |     1 |    1
+ q      | 255 |     3 |  257
+ sn     |   1 |  1103 | 1103
+(4 rows)
+
+SELECT ts_headline('thes_cfg', 'one 123 ' || repeat('q ', 1100) || 'supernovae q', 'q'::tsquery);
+                                                              ts_headline                                                               
+----------------------------------------------------------------------------------------------------------------------------------------
+ <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b> <b>q</b>
+(1 row)
+
+SELECT ts_headline('thes_cfg', 'one 123 ' || repeat('q ', 1100) || 'supernovae q', 'sn'::tsquery);
+                                      ts_headline                                      
+---------------------------------------------------------------------------------------
+ q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q <b>supernovae</b> q
+(1 row)
+
+DROP TEXT SEARCH CONFIGURATION thes_cfg;
+DROP TEXT SEARCH DICTIONARY thes_d;

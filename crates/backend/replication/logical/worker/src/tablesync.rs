@@ -597,19 +597,27 @@ fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str
     Ok(())
 }
 
-// libpqrcv_create_slot's command text (libpqwalreceiver.c), permanent
-// logical USE_SNAPSHOT arm: options in C's order (FAILOVER before SNAPSHOT).
-fn create_slot_use_snapshot_cmd(slotname: &str, failover: bool) -> String {
-    let mut opts: Vec<&str> = Vec::new();
-    if failover {
-        opts.push("FAILOVER");
+// libpqrcv_create_slot's command text (libpqwalreceiver.c:952), permanent
+// logical USE_SNAPSHOT arm: options in C's order (FAILOVER before SNAPSHOT);
+// publishers below 15 take the legacy keyword syntax (FAILOVER USE_SNAPSHOT).
+fn create_slot_use_snapshot_cmd(server_version: i32, slotname: &str, failover: bool) -> String {
+    let new_syntax = server_version >= 150000;
+    let mut cmd = format!(
+        "CREATE_REPLICATION_SLOT \"{}\" LOGICAL pgoutput ",
+        slotname.replace('"', "\"\"")
+    );
+    if new_syntax {
+        cmd.push('(');
     }
-    opts.push("SNAPSHOT 'use'");
-    format!(
-        "CREATE_REPLICATION_SLOT \"{}\" LOGICAL pgoutput ({})",
-        slotname.replace('"', "\"\""),
-        opts.join(", ")
-    )
+    if failover {
+        cmd.push_str(if new_syntax { "FAILOVER, " } else { "FAILOVER " });
+    }
+    if new_syntax {
+        cmd.push_str("SNAPSHOT 'use')");
+    } else {
+        cmd.push_str("USE_SNAPSHOT");
+    }
+    cmd
 }
 
 // walrcv_create_slot's USE_SNAPSHOT arm: returns the consistent point.
@@ -618,7 +626,7 @@ fn create_slot_use_snapshot(
     slotname: &str,
     failover: bool,
 ) -> PgResult<XLogRecPtr> {
-    let cmd = create_slot_use_snapshot_cmd(slotname, failover);
+    let cmd = create_slot_use_snapshot_cmd(conn.server_version(), slotname, failover);
     let res = conn.exec(&cmd)?;
     if res.status != ExecStatus::TuplesOk {
         // libpqwalreceiver.c:1036: ERRCODE_PROTOCOL_VIOLATION.
@@ -848,12 +856,21 @@ mod tests {
     #[test]
     fn create_slot_and_copy_commands() {
         assert_eq!(
-            super::create_slot_use_snapshot_cmd("s1", false),
+            super::create_slot_use_snapshot_cmd(180006, "s1", false),
             "CREATE_REPLICATION_SLOT \"s1\" LOGICAL pgoutput (SNAPSHOT 'use')"
         );
         assert_eq!(
-            super::create_slot_use_snapshot_cmd("s1", true),
+            super::create_slot_use_snapshot_cmd(150000, "s1", true),
             "CREATE_REPLICATION_SLOT \"s1\" LOGICAL pgoutput (FAILOVER, SNAPSHOT 'use')"
+        );
+        // Publishers below 15: libpqwalreceiver.c's legacy keyword syntax.
+        assert_eq!(
+            super::create_slot_use_snapshot_cmd(140000, "s1", false),
+            "CREATE_REPLICATION_SLOT \"s1\" LOGICAL pgoutput USE_SNAPSHOT"
+        );
+        assert_eq!(
+            super::create_slot_use_snapshot_cmd(140000, "s1", true),
+            "CREATE_REPLICATION_SLOT \"s1\" LOGICAL pgoutput FAILOVER USE_SNAPSHOT"
         );
         let cols = ["a".to_string(), "b".to_string()];
         // Plain table, no row filter: direct COPY with a column list.

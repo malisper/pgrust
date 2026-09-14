@@ -98,9 +98,12 @@ impl<'mcx> LexizeData<'mcx> {
         // C frees consumed tokens (moveToWaste + pfree in setCorrLex); keep
         // the queue bounded by the live lookahead, not the whole document.
         if self.head >= 1024 && self.head * 2 >= self.queue.len() {
-            let n = self.head;
+            // A live tmpRes keeps lastRes addressable (C holds the ParsedLex
+            // pointer): compaction stops there, so a lastRes already retired
+            // by moveToWaste stays behind head instead of underflowing.
+            let n = if self.tmp_res.is_some() { self.head.min(self.last_res) } else { self.head };
             self.queue.drain(..n);
-            self.head = 0;
+            self.head -= n;
             if self.tmp_res.is_some() {
                 self.last_res -= n;
             }

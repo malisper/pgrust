@@ -29,6 +29,9 @@ const EPOCH_SHIFT_US: i64 = 946_684_800_000_000;
 const EPOCH_SHIFT_SECS: i64 = 946_684_800;
 // Days from the Unix epoch to the engine date epoch.
 const EPOCH_SHIFT_DAYS: i32 = 10_957;
+// IS_VALID_DATE (datetime.h): [DATETIME_MIN_JULIAN, DATE_END_JULIAN) - POSTGRES_EPOCH_JDATE.
+const MIN_DATE_DAYS: i32 = -2_451_545;
+const END_DATE_DAYS: i32 = 2_145_031_949;
 // Engine timestamp validity window (timestamp.h IS_VALID_TIMESTAMP).
 const MIN_TIMESTAMP_US: i64 = -211_813_488_000_000_000;
 const END_TIMESTAMP_US: i64 = 9_223_371_331_200_000_000;
@@ -485,6 +488,9 @@ fn date_from_unix_days(days: i64) -> PgResult<Datum> {
         .checked_sub(i64::from(EPOCH_SHIFT_DAYS))
         .and_then(|d| i32::try_from(d).ok())
         .ok_or_else(|| dt_out_of_range("date"))?;
+    if !(MIN_DATE_DAYS..END_DATE_DAYS).contains(&d) {
+        return Err(dt_out_of_range("date"));
+    }
     Ok(Datum::from_i32(d))
 }
 
@@ -693,6 +699,9 @@ pub(crate) fn convert_cell<'mcx>(
         Conv::DateFromDays => {
             let v = lane!(I32);
             let d = v.checked_sub(EPOCH_SHIFT_DAYS).ok_or_else(|| dt_out_of_range("date"))?;
+            if !(MIN_DATE_DAYS..END_DATE_DAYS).contains(&d) {
+                return Err(dt_out_of_range("date"));
+            }
             Datum::from_i32(d)
         }
         Conv::Timestamp(unit) => {
@@ -818,10 +827,13 @@ mod epoch_tests {
         assert!(date_from_unix_days(i64::from(i32::MAX) + 10_958).is_err());
         assert!(date_from_unix_days(3_000_000_000).is_err());
         assert!(date_from_unix_days(i64::MIN).is_err());
-        assert_eq!(
-            day(i64::from(i32::MAX) + 10_957),
-            Datum::from_i32(i32::MAX)
-        );
+        // IS_VALID_DATE: the window ends before the i32 datum bound, so the
+        // DATEVAL_NOEND sentinel (i32::MAX) is never produced from a finite day.
+        assert!(date_from_unix_days(i64::from(i32::MAX) + 10_957).is_err());
+        assert_eq!(day(2_145_031_948 + 10_957), Datum::from_i32(2_145_031_948)); // 5874897-12-31
+        assert!(date_from_unix_days(2_145_031_949 + 10_957).is_err());
+        assert_eq!(day(-2_451_545 + 10_957), Datum::from_i32(-2_451_545)); // 4714-11-24 BC
+        assert!(date_from_unix_days(-2_451_546 + 10_957).is_err());
     }
 
     #[test]

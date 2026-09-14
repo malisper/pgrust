@@ -1246,6 +1246,19 @@ fn read_prosrc_any<'mcx>(mcx: Mcx<'mcx>, funcoid: Oid) -> PgResult<PgString<'mcx
     Ok(s)
 }
 
+// The extra builtin overlay also carries names whose canonical pg_proc row is
+// a SQL-language function (obj_description, col_description,
+// shobj_description); C's fmgr_builtins has no such names.
+fn builtin_row_is_internal(foid: Oid) -> PgResult<bool> {
+    let Some(tup) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(foid)))? else {
+        return Ok(true);
+    };
+    let (d, isnull) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROLANG)?;
+    let internal = isnull || d.as_oid() == pg_proc::INTERNALlanguageId;
+    ReleaseSysCache(tup);
+    Ok(internal)
+}
+
 fn fc_fmgr_internal_validator(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
@@ -1260,7 +1273,8 @@ fn fc_fmgr_internal_validator(
     // C ignores check_function_bodies here: the name won't appear later.
     let cx = MemoryContext::new("fmgr_internal_validator");
     let prosrc = read_prosrc_any(cx.mcx(), funcoid)?;
-    if fmgr_core::fmgr_internal_function(&prosrc) == types_core::InvalidOid {
+    let foid = fmgr_core::fmgr_internal_function(&prosrc);
+    if foid == types_core::InvalidOid || !builtin_row_is_internal(foid)? {
         return Err(efn(
             ERRCODE_UNDEFINED_FUNCTION,
             format!("there is no built-in function named \"{}\"", prosrc.as_str()),

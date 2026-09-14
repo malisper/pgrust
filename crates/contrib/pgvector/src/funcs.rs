@@ -182,11 +182,12 @@ pub fn fc_array_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
 
     let elemtype: Oid = arrayfuncs::arr_elemtype(arr);
     // numeric is not in builtin_meta: varlena, int-aligned.
-    let (elems, _nulls) = if elemtype == NUMERICOID {
-        arrayfuncs::deconstruct_array(mcx, arr, -1, false, b'i', true)?
+    let (elmlen, elmbyval, elmalign) = if elemtype == NUMERICOID {
+        (-1, false, b'i')
     } else {
-        arrayfuncs::deconstruct_array_builtin(mcx, arr, elemtype, true)?
+        arrayfuncs::construct::builtin_meta(elemtype)?
     };
+    let (elems, _nulls) = arrayfuncs::deconstruct_array(mcx, arr, elmlen, elmbyval, elmalign, true)?;
     let n = elems.len();
     check_dim(n)?;
     check_expected_dim(typmod, n)?;
@@ -616,4 +617,32 @@ pub fn fc_vector_avg(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
         b.set(i, v);
     }
     Ok(image_datum(b.image()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Upstream array_to_vector deconstructs through get_typlenbyvalalign +
+    // deconstruct_array, so real[] converts (pgvector test/expected/cast.out);
+    // deconstruct_array_builtin's table has no FLOAT4OID row.
+    #[test]
+    fn real_array_casts_to_vector() {
+        let ctx = mcx::MemoryContext::new("pgvector-test");
+        let mcx = ctx.mcx();
+        let elems = [Datum::from_f32(1.0), Datum::from_f32(2.5), Datum::from_f32(-3.0)];
+        let arr = arrayfuncs::construct_array(mcx, &elems, FLOAT4OID, 4, true, b'i').unwrap();
+        let mut fcinfo = types_fmgr::LocalFcinfo::<2>::new(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { fcinfo.set_result_mcx(mcx) };
+        fcinfo.set_arg(0, Datum::from_usize(arr.as_ptr() as usize));
+        fcinfo.set_arg(1, Datum::from_i32(-1));
+        let out = fc_array_to_vector(None, &mut fcinfo).unwrap();
+        let mut probe = types_fmgr::LocalFcinfo::<1>::new(0);
+        probe.set_arg(0, out);
+        // SAFETY: out is a live vector varlena in ctx.
+        let v = unsafe { arg_vector(&probe, 0) }.unwrap();
+        assert_eq!(v.dim(), 3);
+        assert_eq!((v.x(0), v.x(1), v.x(2)), (1.0, 2.5, -3.0));
+    }
 }

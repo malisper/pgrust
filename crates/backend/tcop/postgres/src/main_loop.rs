@@ -698,6 +698,11 @@ fn dispatch_message<'mcx>(
         }
 
         x if x == EOF || x == pqmsg::TERMINATE => {
+            if x == EOF {
+                pgstat::database::pgstat_set_session_end_cause(
+                    pgstat::database::SessionEndType::DisconnectClientEof,
+                );
+            }
             if elog::config::where_to_send_output() == CommandDest::Remote {
                 elog::config::set_where_to_send_output(CommandDest::None);
             }

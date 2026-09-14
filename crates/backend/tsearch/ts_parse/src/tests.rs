@@ -70,11 +70,15 @@ impl<'mcx> TsParseEnv<'mcx> for MockEnv<'mcx> {
     }
 
     fn map_len(&mut self, toktype: i32) -> PgResult<usize> {
-        Ok(if toktype == 1 { self.dicts.len() } else { 0 })
+        Ok(match toktype {
+            1 => self.dicts.len(),
+            3 => 1,
+            _ => 0,
+        })
     }
 
-    fn map_dict(&mut self, _toktype: i32, i: usize) -> PgResult<Oid> {
-        Ok(self.dicts[i])
+    fn map_dict(&mut self, toktype: i32, i: usize) -> PgResult<Oid> {
+        Ok(if toktype == 3 { D_STEM } else { self.dicts[i] })
     }
 
     fn lexize(
@@ -282,4 +286,28 @@ fn lexize_queue_drains_consumed_tokens() {
         crate::parse::lexize_exec(&mut ld, &mut env, buf).unwrap().map(|v| v.len()),
         Some(0)
     );
+}
+
+// A multiword attempt abandoned by a token whose map lacks the thesaurus
+// (type 3 -> D_STEM only) keeps its provisional tmpRes/lastRes while the
+// tokens retire (ts_parse.c:250-280); queue compaction must not underflow the
+// retired lastRes, and the next failed attempt consumes the stale result as
+// C does.
+#[test]
+fn stale_thesaurus_result_survives_queue_compaction() {
+    let ctx = MemoryContext::new("ts-parse-test");
+    let mut text = String::from("new york 123 ");
+    let mut tokens: Vec<(i32, &'static str)> = vec![(1, "new"), (1, "york"), (3, "123")];
+    for _ in 0..1100 {
+        text.push_str("q ");
+        tokens.push((1, "q"));
+    }
+    text.push_str("new cats");
+    tokens.push((1, "new"));
+    tokens.push((1, "cats"));
+    let prs = run(ctx.mcx(), &text, tokens, vec![D_THES, D_STEM]);
+    let w = words(&prs);
+    assert_eq!(&w[..3], &[("new".into(), 1), ("york".into(), 2), ("123".into(), 3)]);
+    assert_eq!(w.len(), 1104);
+    assert_eq!(w[1103], ("nyc".into(), 1104));
 }

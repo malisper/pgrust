@@ -158,14 +158,37 @@ pub(crate) enum SrfRows {
 // wparser.c prs_setup_firstcall/tt_setup materialise the whole set into a
 // repalloc'd array: the same MaxAllocSize admission applies here, and every
 // growth is fallible so exhaustion is C's error rather than an abort.
+// prs_setup_firstcall / tt_setup_firstcall (wparser.c): st->len starts at 16
+// and doubles through repalloc(sizeof(LexemeEntry) * st->len), so the
+// MaxAllocSize check applies to the capacity the next push grows to.
+fn admit_row(cur: usize) -> PgResult<()> {
+    let next_len = cur.saturating_add(1).next_power_of_two().max(16);
+    ::mcx::check_alloc_size(next_len.saturating_mul(16))
+}
+
 fn push_image(rows: &mut Vec<Vec<u8>>, img: &[u8], mcx: ::mcx::Mcx<'_>) -> PgResult<()> {
-    ::mcx::check_alloc_size((rows.len() + 1) * 16)?;
+    admit_row(rows.len())?;
     rows.try_reserve(1).map_err(|_| mcx.oom(16))?;
     let mut v = Vec::new();
     v.try_reserve_exact(img.len()).map_err(|_| mcx.oom(img.len()))?;
     v.extend_from_slice(img);
     rows.push(v);
     Ok(())
+}
+
+#[cfg(test)]
+mod admit_tests {
+    // wparser.c grows the LexemeEntry array by doubling from 16: pushing the
+    // 2^25-th row (index 2^25) repallocs 2^26 * 16 = 1 GiB, which C rejects
+    // with "invalid memory alloc request size 1073741824".
+    #[test]
+    fn row_admission_follows_c_doubling_ceiling() {
+        assert!(super::admit_row(0).is_ok());
+        assert!(super::admit_row((1 << 25) - 1).is_ok());
+        let err = super::admit_row(1 << 25).unwrap_err();
+        assert_eq!(err.message(), "invalid memory alloc request size 1073741824");
+        assert!(super::admit_row((1 << 26) - 1).is_err());
+    }
 }
 
 fn srf_drive(

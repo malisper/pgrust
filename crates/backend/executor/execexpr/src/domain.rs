@@ -93,6 +93,15 @@ pub struct DomainCheckExpr<'mcx> {
 }
 
 impl<'mcx> DomainCheckExpr<'mcx> {
+    /// Re-arm by-ref call results at a per-tuple context the caller resets
+    /// between rows (C: the validation scan's ecxt_per_tuple_memory).
+    ///
+    /// # Safety
+    /// The armed context must outlive every later `eval`.
+    pub unsafe fn arm_result_mcx_raw(&mut self, mcx: Mcx<'_>) {
+        unsafe { self.state.arm_result_mcx_raw(mcx) };
+    }
+
     pub fn eval(&mut self, value: Datum, isnull: bool) -> PgResult<NullableDatum> {
         // SAFETY: slot lives in the program's mcx alongside the state.
         unsafe { self.slot.as_ptr().write(NullableDatum { value, isnull }) };

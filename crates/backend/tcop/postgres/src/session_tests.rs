@@ -1311,3 +1311,19 @@ fn simple_query_multi_statement_message_does_not_retain_n_times_len() {
         sql.len()
     );
 }
+
+// postgres.c:4986: a client EOF (unclean disconnect) records
+// DISCONNECT_CLIENT_EOF (pg_stat_database.sessions_abandoned); a Terminate
+// message leaves the normal cause.
+#[test]
+fn client_eof_sets_disconnect_client_eof_cause() {
+    use pgstat::database::{pgstat_session_end_cause, pgstat_set_session_end_cause, SessionEndType};
+    install_fixtures();
+    pgstat_set_session_end_cause(SessionEndType::DisconnectNormal);
+    run_session([simple_query_msg("SELECT 1"), msg(b'X', &[])].concat());
+    assert_eq!(pgstat_session_end_cause(), SessionEndType::DisconnectNormal);
+
+    pgstat_set_session_end_cause(SessionEndType::DisconnectNormal);
+    run_session(simple_query_msg("SELECT 1"));
+    assert_eq!(pgstat_session_end_cause(), SessionEndType::DisconnectClientEof);
+}

@@ -4,7 +4,6 @@
 use ::adt_tsvector_core::execute::{
     ts_execute, ts_execute_locations, ExecPhraseData, Ternary, TS_EXEC_EMPTY,
 };
-use ::adt_tsvector_core::layout::wep_getpos;
 use ::adt_tsvector_core::query::{Operand, TsQueryRef};
 use ::mcx::Mcx;
 use ::ts_cache::DefListItem;
@@ -102,7 +101,7 @@ fn hl_cover<'mcx>(
             let mut first = -1i32;
             for i in 0..pdata.npos() {
                 // Phrase matches use the ending lexeme.
-                let endp = wep_getpos(pdata.pos[i]) as i32;
+                let endp = pdata.pos[i] as i32;
                 if endp >= pos {
                     first = endp;
                     break;
@@ -125,7 +124,7 @@ fn hl_cover<'mcx>(
             let mut last = -1i32;
             for i in (0..pdata.npos()).rev() {
                 // Phrase matches use the starting lexeme.
-                let startp = wep_getpos(pdata.pos[i]) as i32 - pdata.width;
+                let startp = pdata.pos[i] as i32 - pdata.width;
                 if startp <= pose {
                     last = startp;
                     break;

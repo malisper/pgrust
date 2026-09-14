@@ -795,7 +795,12 @@ fn validateDomainCheckConstraint<'mcx>(
 ) -> PgResult<()> {
     let expr = readfuncs::stringToNode(mcx, ccbin)?;
     let planned = clauses::eval_const_expressions(mcx, expr)?;
+    // typecmds.c:3297 ResetExprContext per scanned tuple: call results
+    // (detoasts, concatenations) live one row, not the whole scan.
+    let mut per_tuple = ::mcx::MemoryContext::new_bump("validateDomainCheckConstraint per-tuple");
     let mut program = execexpr::domain::prepare_domain_check_expr(mcx, planned)?;
+    // SAFETY: per_tuple is declared before program and outlives every eval.
+    unsafe { program.arm_result_mcx_raw(per_tuple.mcx()) };
 
     let rels = get_rels_with_domain(mcx, domainoid, ShareLock)?;
     for rtc in rels.iter() {
@@ -826,6 +831,7 @@ fn validateDomainCheckConstraint<'mcx>(
                     )?);
                 }
             }
+            per_tuple.reset();
         }
         tableam::table_endscan(scan)?;
         snapmgr::UnregisterSnapshot(Some(&snapshot));
