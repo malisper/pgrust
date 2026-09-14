@@ -84,7 +84,9 @@ pub struct RelationData<'mcx> {
     pub rd_indexlist: RefCell<Option<RdIndexList>>,
     // C rd_trigdesc (rule-5 cache): Rc replaces C's CopyTriggerDesc per-query
     // deep copy; inval drops the entry's Rc, executors keep theirs.
-    pub rd_trigdesc: RefCell<Option<Rc<types_trigger::TriggerDesc<'static>>>>,
+    // Outer None = not built yet; Some(None) = built, pg_trigger had no rows
+    // (C keeps the NULL trigdesc in the entry until invalidation).
+    pub rd_trigdesc: RefCell<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
     // pg_class.relhastriggers, threaded beside the trimmed rd_rel form
     // (ScannedPgClass.relchecks precedent).
     pub rd_hastriggers: bool,
