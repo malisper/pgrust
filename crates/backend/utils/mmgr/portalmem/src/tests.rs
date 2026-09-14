@@ -426,9 +426,43 @@ fn at_abort_fails_ready_portals_and_releases_plans() {
     let ev = events();
     assert!(ev.contains(&"cleanup(ab)".to_owned()));
     assert!(ev.contains(&"release_cplan(30)".to_owned()));
+    assert!(ev.contains(&"stmt_list_free(3)".to_owned()), "{ev:?}");
 
     AtCleanup_Portals().unwrap();
     assert!(GetPortalByName(Some("ab")).is_none());
+}
+
+#[test]
+fn hold_frees_the_stmts_handle_with_the_plan() {
+    setup();
+    let portal = CreatePortal("hs", false, false).unwrap();
+    PortalDefineQuery(
+        &portal,
+        None,
+        "q",
+        CMDTAG_SELECT,
+        StmtListHandle(12),
+        CachedPlanHandle(13),
+    )
+    .unwrap();
+    {
+        let mut p = portal.borrow_mut();
+        p.cursorOptions |= CURSOR_OPT_HOLD;
+        p.status = PORTAL_READY;
+    }
+
+    assert!(PreCommit_Portals(false).unwrap());
+    {
+        let p = portal.borrow();
+        assert!(p.cplan.is_null());
+        assert!(p.stmts.is_null());
+    }
+    let ev = events();
+    assert!(ev.contains(&"release_cplan(13)".to_owned()), "{ev:?}");
+    assert!(ev.contains(&"stmt_list_free(12)".to_owned()), "{ev:?}");
+
+    PortalDrop(&portal, false).unwrap();
+    assert!(!events().contains(&"stmt_list_free(12)".to_owned()));
 }
 
 #[test]

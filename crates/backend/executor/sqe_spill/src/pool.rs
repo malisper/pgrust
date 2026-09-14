@@ -160,6 +160,9 @@ pub struct SpillPool {
     next_ext_page: u64,
     live_pins: u64,
     evict_cursor: usize,
+    /// Row pages a failed unswizzle left half-rewritten: still `swizzled`
+    /// (unloadable, unevictable), pins returned.
+    quarantined: usize,
     metrics: SpillMetrics,
 }
 
@@ -176,6 +179,7 @@ impl SpillPool {
             next_ext_page: 0,
             live_pins: 0,
             evict_cursor: 0,
+            quarantined: 0,
             metrics: SpillMetrics::default(),
         }
     }
@@ -526,7 +530,7 @@ impl SpillPool {
     /// carried is released.
     pub fn unswizzle(&mut self, mut tok: SwizzleToken) -> PgResult<()> {
         let row = tok.row;
-        {
+        let bad_addr = {
             let vars = &tok.vars;
             let SlotState::Resident { buf, swizzled, .. } = &mut self.slots[row.0 as usize].state
             else {
@@ -548,19 +552,23 @@ impl SpillPool {
                     None
                 }
             });
-            if let Some(addr) = bad_addr {
-                return spill_err(format!(
-                    "unswizzle: address {addr:#x} is below every pinned var page"
-                ));
+            if bad_addr.is_none() {
+                *swizzled = false;
             }
-            *swizzled = false;
-        }
-        // Return the pins the token carried.
+            bad_addr
+        };
+        // Return the pins the token carried, on the error path too.
         for (vp, _) in tok.vars.drain(..) {
             self.unpin(PagePin { id: vp, _not_send: PhantomData });
         }
         self.unpin(PagePin { id: row, _not_send: PhantomData });
         tok.consumed = true;
+        if let Some(addr) = bad_addr {
+            self.quarantined += 1;
+            return spill_err(format!(
+                "unswizzle: address {addr:#x} is below every pinned var page"
+            ));
+        }
         Ok(())
     }
 }
@@ -616,11 +624,12 @@ impl Drop for SpillPool {
     fn drop(&mut self) {
         if !std::thread::panicking() {
             debug_assert_eq!(self.live_pins, 0, "SpillPool dropped with live pins");
-            debug_assert!(
-                !self
-                    .slots
+            debug_assert_eq!(
+                self.slots
                     .iter()
-                    .any(|s| matches!(s.state, SlotState::Resident { swizzled: true, .. })),
+                    .filter(|s| matches!(s.state, SlotState::Resident { swizzled: true, .. }))
+                    .count(),
+                self.quarantined,
                 "SpillPool dropped with swizzled pages"
             );
         }

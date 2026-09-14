@@ -386,17 +386,20 @@ pub fn PortalDefineQuery(
 }
 
 fn PortalReleaseCachedPlan(portal: &Portal<'static>) {
-    let cplan = {
+    let (cplan, stmts) = {
         let mut p = portal.borrow_mut();
         let cplan = p.cplan;
         if cplan.is_null() {
             return;
         }
         p.cplan = CachedPlanHandle::NULL;
-        // portal->stmts is now a dangling reference into the released plan.
-        p.stmts = StmtListHandle::NULL;
-        cplan
+        // C nulls the borrowed portal->stmts pointer; the registry handle is
+        // owned by the portal and must be freed with it.
+        (cplan, core::mem::replace(&mut p.stmts, StmtListHandle::NULL))
     };
+    if !stmts.is_null() {
+        pquery_seams::stmt_list_free::call(stmts);
+    }
     plancache_portal_seams::release_cached_plan::call(cplan);
 }
 

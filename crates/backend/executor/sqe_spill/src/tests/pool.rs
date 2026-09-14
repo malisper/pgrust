@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::page::{PageKind, RowLayout, PAGE_SIZE};
+use crate::page::{PageKind, RowLayout, VarRef, PAGE_SIZE};
 use crate::pool::{PageId, SpillPool};
 use crate::set::SpillFile;
 use crate::SpillSet;
@@ -206,4 +206,41 @@ fn unswizzle_owner_is_the_frame_strictly_below_the_address() {
     assert_eq!(owner_of(&vars, 0x5_0008), Some(2));
     assert_eq!(owner_of(&vars, 0x1_0000), None);
     assert_eq!(owner_of(&vars, 0xfff8), None);
+}
+
+#[test]
+fn unswizzle_bad_address_returns_pins_and_consumes_the_token() {
+    let (set, _dir, _cwd) = super::rig("pool-unswizzle-bad");
+    let mut pool = pool_with_budget(&set, "badaddr", 4 * PAGE_SIZE);
+    let layout = RowLayout::new(16, &[8]).unwrap();
+    let var = pool.alloc_var().unwrap();
+    let off = pool.var_page_mut(&var).try_append(b"payload!").unwrap();
+    let var_id = var.id();
+    pool.unpin(var);
+    let row = pool.alloc_row(&layout).unwrap();
+    let row_id = row.id();
+    {
+        let mut rp = pool.row_page_mut(&row);
+        let mut bytes = [0u8; 16];
+        bytes[8..].copy_from_slice(&VarRef::encode(var_id.0, off).0.to_ne_bytes());
+        rp.try_push_row(&bytes).unwrap();
+    }
+    pool.unpin(row);
+
+    let tok = pool.swizzle(row_id).unwrap();
+    assert_eq!(pool.live_pins(), 2);
+    // Corrupt the swizzled word: a raw address below every pinned var page.
+    {
+        let pin = pool.pin(row_id).unwrap();
+        pool.row_page_mut(&pin).set_ref_word(0, 0, VarRef(8));
+        pool.unpin(pin);
+    }
+    let err = pool.unswizzle(tok).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(msg.contains("below every pinned var page"), "unexpected error: {msg}");
+    assert_eq!(pool.live_pins(), 0);
+    // The half-rewritten page stays quarantined: never flushed, never re-swizzled.
+    assert!(pool.unload(row_id).is_err());
+    assert!(pool.swizzle(row_id).is_err());
+    assert!(pool.is_resident(row_id));
 }
