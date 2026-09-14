@@ -1790,3 +1790,27 @@ fn cleanup_serialized_txns_reports_relative_paths_like_c() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// reorderbuffer.c:4266/4609: spill writes report ReorderBufferWrite and the
+// restore reads report ReorderBufferRead in pg_stat_activity.
+#[test]
+fn spill_io_reports_reorder_buffer_wait_events() {
+    install_file_seams();
+    let slot = "spill_waits";
+    let mut rb = spill_rb(slot);
+    (guc_tables::vars::logical_decoding_work_mem.get().set)(8);
+    let body = "x".repeat(1024);
+    for i in 0..64u64 {
+        rb.queue_change(71, 1000 + i, msg_change(&body), false).unwrap();
+    }
+    let starts = my_wait_starts();
+    assert!(starts.contains(&(0x0A00_0000 + 44)), "ReorderBufferWrite reported: {starts:?}");
+    assert!(!starts.contains(&(0x0A00_0000 + 43)));
+    let txn = rb.txn_by_xid(71, false, 0, false).0.unwrap();
+    let lsns = drain_lsns(&mut rb, txn);
+    assert_eq!(lsns.len(), 64);
+    let starts = my_wait_starts();
+    assert!(starts.contains(&(0x0A00_0000 + 43)), "ReorderBufferRead reported: {starts:?}");
+    assert_eq!(my_wait_ends(), starts.len());
+    rb.cleanup_txn(txn).unwrap();
+}

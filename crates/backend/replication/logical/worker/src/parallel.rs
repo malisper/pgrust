@@ -85,8 +85,11 @@ struct PaSharedInner {
     fileset: Option<Arc<FileSet>>,
     logicalrep_worker_generation: u16,
     logicalrep_worker_slot_no: usize,
-    // Thread-model error queue: the PA worker's fatal PgError.
+    // Thread-model error queue: the PA worker's fatal PgError, and whether
+    // the worker has left (C: shm_mq_receive on the error queue returns
+    // SHM_MQ_DETACHED).
     error: Option<Box<PgError>>,
+    error_mq_detached: bool,
 }
 
 // ParallelApplyWorkerShared (worker_internal.h).
@@ -268,6 +271,7 @@ fn pa_setup_dsm() -> (u64, Winfo) {
             logicalrep_worker_generation: 0,
             logicalrep_worker_slot_no: 0,
             error: None,
+            error_mq_detached: false,
         }),
         pending_stream_count: AtomicU32::new(0),
         last_commit_end: AtomicU64::new(InvalidXLogRecPtr),
@@ -320,7 +324,7 @@ fn pa_launch_parallel_worker() -> PgResult<Option<Winfo>> {
         WORKER_POOL.with(|p| p.borrow_mut().push(Rc::clone(&winfo)));
         Ok(Some(winfo))
     } else {
-        pa_free_worker_info(&winfo);
+        pa_free_worker_info(&winfo)?;
         Ok(None)
     }
 }
@@ -386,7 +390,7 @@ fn pa_free_worker(winfo: &Winfo) -> PgResult<()> {
     let max = guc_tables::vars::max_parallel_apply_workers_per_subscription.read();
     if winfo.borrow().serialize_changes || pool_len > max / 2 {
         logicalrep_pa_worker_stop(winfo)?;
-        pa_free_worker_info(winfo);
+        pa_free_worker_info(winfo)?;
         return Ok(());
     }
 
@@ -409,7 +413,7 @@ fn logicalrep_pa_worker_stop(winfo: &Winfo) -> PgResult<()> {
 }
 
 // pa_free_worker_info (applyparallelworker.c:594).
-fn pa_free_worker_info(winfo: &Winfo) {
+fn pa_free_worker_info(winfo: &Winfo) -> PgResult<()> {
     let (dsm_handle, serialize_changes, xid) = {
         let mut w = winfo.borrow_mut();
         w.mq_handle.detach();
@@ -420,7 +424,7 @@ fn pa_free_worker_info(winfo: &Winfo) {
 
     // Unlink the files with serialized changes.
     if serialize_changes {
-        let _ = crate::stream_apply::stream_cleanup_files(subid(), xid);
+        crate::stream_apply::stream_cleanup_files(subid(), xid)?;
     }
 
     PA_DSM_REGISTRY
@@ -431,6 +435,43 @@ fn pa_free_worker_info(winfo: &Winfo) {
     WORKER_POOL.with(|p| {
         p.borrow_mut().retain(|w| !Rc::ptr_eq(w, winfo));
     });
+    Ok(())
+}
+
+// The leader's dsm_backend_shutdown half: every pool worker's "segment" is
+// released when the leader exits (the workers hold their own Arcs until they
+// exit), so a retained pool never outlives its leader.
+pub(crate) fn pa_release_pool_dsm() {
+    let handles: Vec<u64> = WORKER_POOL.with(|p| {
+        let pool = std::mem::take(&mut *p.borrow_mut());
+        pool.iter().map(|w| w.borrow().dsm_handle).collect()
+    });
+    TXN_HASH.with(|h| h.borrow_mut().clear());
+    STREAM_APPLY_WORKER.with(|s| *s.borrow_mut() = None);
+    if handles.is_empty() {
+        return;
+    }
+    PA_DSM_REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(h, _)| !handles.contains(h));
+}
+
+#[cfg(test)]
+pub(crate) fn test_pool_worker() -> Winfo {
+    let (_, winfo) = pa_setup_dsm();
+    WORKER_POOL.with(|p| p.borrow_mut().push(Rc::clone(&winfo)));
+    winfo
+}
+
+#[cfg(test)]
+pub(crate) fn test_worker_exited(winfo: &Winfo) {
+    winfo.borrow().shared.lock().error_mq_detached = true;
+}
+
+#[cfg(test)]
+pub(crate) fn test_registry_len() -> usize {
+    PA_DSM_REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
 // pa_detach_all_error_mq (applyparallelworker.c:621).
@@ -623,7 +664,11 @@ pub fn ProcessParallelApplyMessages() -> PgResult<()> {
         if !winfo.borrow().error_mq_attached {
             continue;
         }
-        let err = winfo.borrow().shared.lock().error.take();
+        let (err, detached) = {
+            let shared = winfo.borrow().shared.clone();
+            let mut inner = shared.lock();
+            (inner.error.take(), inner.error_mq_detached)
+        };
         if let Some(e) = err {
             // C parses the worker's ErrorResponse and rethrows with an added
             // context line (applyparallelworker.c:1039); the original error
@@ -632,6 +677,12 @@ pub fn ProcessParallelApplyMessages() -> PgResult<()> {
                 .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                 .errmsg("logical replication parallel apply worker exited due to error")
                 .errcontext_msg(parallel_apply_worker_context(&e))
+                .finish(loc("ProcessParallelApplyMessages"))?;
+        }
+        if detached {
+            ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("lost connection to the logical replication parallel apply worker")
                 .finish(loc("ProcessParallelApplyMessages"))?;
         }
     }
@@ -983,8 +1034,12 @@ pub fn ParallelApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     // pa_shutdown + dsm_detach on every exit path: park a failure in the
     // error mailbox, detach the queue so the leader's sends see Detached,
     // clear the slot, and poke the leader.
-    if let Err(e) = &result {
-        shared.lock().error = Some(e.clone());
+    {
+        let mut inner = shared.lock();
+        if let Err(e) = &result {
+            inner.error = Some(e.clone());
+        }
+        inner.error_mq_detached = true;
     }
     mqh.detach();
     // No replorigin_session_reset here: the origin is the LEADER's

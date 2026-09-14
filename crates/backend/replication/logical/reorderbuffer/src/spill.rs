@@ -532,7 +532,10 @@ impl ReorderBuffer {
         let size = buf.len() as u64;
         buf[..8].copy_from_slice(&size.to_ne_bytes());
 
-        file.write_all(buf).map_err(|e| {
+        wait_start(WAIT_EVENT_REORDER_BUFFER_WRITE);
+        let written = file.write_all(buf);
+        wait_end();
+        written.map_err(|e| {
             let xid = self.txn(txn).xid;
             rb_file_error(format!("could not write to data file for XID {xid}: %m"), &e)
         })?;
@@ -813,11 +816,31 @@ impl ReorderBuffer {
     }
 }
 
+// Wait events (wait_event_names.txt, IO section): reorderbuffer.c:4266/4609.
+const PG_WAIT_IO: u32 = 0x0A00_0000;
+const WAIT_EVENT_REORDER_BUFFER_READ: u32 = PG_WAIT_IO + 43;
+const WAIT_EVENT_REORDER_BUFFER_WRITE: u32 = PG_WAIT_IO + 44;
+
+fn wait_start(info: u32) {
+    if waitevent_seams::pgstat_report_wait_start::is_installed() {
+        waitevent_seams::pgstat_report_wait_start::call(info);
+    }
+}
+
+fn wait_end() {
+    if waitevent_seams::pgstat_report_wait_end::is_installed() {
+        waitevent_seams::pgstat_report_wait_end::call();
+    }
+}
+
 // FileRead-loop shape: fill `buf` unless EOF arrives first; short only at EOF.
 fn read_full(f: &mut File, buf: &mut [u8]) -> PgResult<usize> {
     let mut off = 0usize;
     while off < buf.len() {
-        match f.read(&mut buf[off..]) {
+        wait_start(WAIT_EVENT_REORDER_BUFFER_READ);
+        let r = f.read(&mut buf[off..]);
+        wait_end();
+        match r {
             Ok(0) => break,
             Ok(n) => off += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,

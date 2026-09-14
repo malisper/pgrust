@@ -128,3 +128,31 @@ fn standby_wal_level_error_omits_trailing_server_word() {
         "logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary"
     );
 }
+
+// enlargeStringInfo (stringinfo.c:357): appends are refused once they would
+// reach MaxAllocSize, and the first refusal surfaces as C's 54000 with the
+// (len, needed) detail at the next OutputPluginWrite.
+#[test]
+fn out_buffer_refuses_growth_past_max_alloc_size_like_enlarge_string_info() {
+    assert!(!super::enlarge_refused(0, 1));
+    assert!(!super::enlarge_refused(0x3fff_fffd, 1));
+    assert!(super::enlarge_refused(0x3fff_fffe, 1));
+    assert!(super::enlarge_refused(0x2000_0000, 0x1fff_ffff));
+    assert!(!super::enlarge_refused(0x2000_0000, 0x1fff_fffe));
+
+    let mut out = super::OutBuf::default();
+    out.push_str("ab");
+    assert!(out.check_limit().is_ok());
+    out.overflow = Some((0x3fff_fffe, 1));
+    let err = out.check_limit().unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    assert_eq!(err.message(), "string buffer exceeds maximum allowed length (1073741823 bytes)");
+    assert_eq!(
+        err.detail(),
+        Some("Cannot enlarge string buffer containing 1073741822 bytes by 1 more bytes.")
+    );
+    out.push_str("dropped");
+    assert_eq!(out.as_bytes(), b"ab");
+    out.clear();
+    assert!(out.check_limit().is_ok());
+}

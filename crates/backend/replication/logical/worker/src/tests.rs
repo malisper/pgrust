@@ -512,3 +512,31 @@ fn start_replication_gates_options_on_publisher_version() {
     assert!(streamed.contains("(proto_version '4', streaming 'parallel', publication_names"));
     assert!(!streamed.contains("origin") && !streamed.contains("two_phase"));
 }
+
+// ProcessParallelApplyMessages (applyparallelworker.c:1141): a pool worker
+// that exited without parking an error (SIGUSR2, proc_exit) detached its
+// error queue, which the leader reports as 55000 "lost connection ...";
+// a worker the leader itself is stopping (mailbox detached) is skipped.
+#[test]
+fn leader_reports_lost_connection_for_a_silently_exited_pa_worker() {
+    if init_small::globals::MyProcNumber() == types_core::INVALID_PROC_NUMBER {
+        init_small::globals::SetMyProcNumber(7);
+    }
+    let w = super::parallel::test_pool_worker();
+    super::parallel::ProcessParallelApplyMessages().unwrap();
+    super::parallel::test_worker_exited(&w);
+    let err = super::parallel::ProcessParallelApplyMessages().unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE);
+    assert_eq!(
+        err.message(),
+        "lost connection to the logical replication parallel apply worker"
+    );
+    super::parallel::pa_detach_all_error_mq();
+    super::parallel::ProcessParallelApplyMessages().unwrap();
+    // The leader's exit releases every pooled worker's segment
+    // (dsm_backend_shutdown): the registry no longer holds its queue.
+    let before = super::parallel::test_registry_len();
+    super::parallel::pa_release_pool_dsm();
+    assert_eq!(super::parallel::test_registry_len(), before - 1);
+    super::parallel::ProcessParallelApplyMessages().unwrap();
+}

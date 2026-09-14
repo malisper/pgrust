@@ -972,7 +972,13 @@ fn start_logical_streaming_opts(
 
     let res = conn.exec(&cmd)?;
     if res.status != walreceiver::client::ExecStatus::CopyBoth {
-        return elog::elog(ERROR, format!("could not start WAL streaming: {}", res.err));
+        ereport(ERROR)
+            .errcode(types_error::ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg(format!(
+                "could not start WAL streaming: {}",
+                res.err.trim_end_matches('\n')
+            ))
+            .finish(loc("libpqrcv_startstreaming"))?;
     }
     Ok(())
 }
@@ -1040,6 +1046,7 @@ pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     // every exit path; the launcher notices and relaunches.
     parallel::pa_detach_all_error_mq();
     launcher::logicalrep_worker_detach();
+    parallel::pa_release_pool_dsm();
     result
 }
 

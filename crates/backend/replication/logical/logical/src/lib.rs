@@ -24,7 +24,8 @@ use types_core::{
 };
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR, LOG,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
+    ERROR, LOG,
 };
 use types_rel::RelationData;
 use types_storage::storage::{PROC_ARRAY_LOCK, REPLICATION_SLOT_CONTROL_LOCK};
@@ -145,14 +146,49 @@ pub struct OutputPluginCallbacks {
 // binary (pgoutput 'w'-payload) data. A String can't hold arbitrary bytes, so
 // the buffer is a Vec<u8> with the String-flavored methods the textual
 // plugins use; binary writers (logicalproto) reach the Vec directly.
+// enlargeStringInfo (stringinfo.c:357): an append that would carry the
+// buffer to MaxAllocSize is refused; the (len, needed) pair of the first
+// refusal is raised by OutputPluginWrite since the append API is infallible.
+const MaxAllocSize: usize = 0x3fffffff;
+
+fn enlarge_refused(len: usize, needed: usize) -> bool {
+    needed >= MaxAllocSize - len
+}
+
 #[derive(Default)]
 pub struct OutBuf {
     buf: Vec<u8>,
+    overflow: Option<(usize, usize)>,
 }
 
 impl OutBuf {
     pub fn clear(&mut self) {
         self.buf.clear();
+        self.overflow = None;
+    }
+    fn append(&mut self, bytes: &[u8]) {
+        if self.overflow.is_some() {
+            return;
+        }
+        if enlarge_refused(self.buf.len(), bytes.len()) {
+            self.overflow = Some((self.buf.len(), bytes.len()));
+            return;
+        }
+        self.buf.extend_from_slice(bytes);
+    }
+    pub fn check_limit(&self) -> PgResult<()> {
+        let Some((len, needed)) = self.overflow else {
+            return Ok(());
+        };
+        ereport(ERROR)
+            .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .errmsg(format!(
+                "string buffer exceeds maximum allowed length ({MaxAllocSize} bytes)"
+            ))
+            .errdetail(format!(
+                "Cannot enlarge string buffer containing {len} bytes by {needed} more bytes."
+            ))
+            .finish(loc("enlargeStringInfo"))
     }
     pub fn len(&self) -> usize {
         self.buf.len()
@@ -167,17 +203,17 @@ impl OutBuf {
         &mut self.buf
     }
     pub fn push_str(&mut self, s: &str) {
-        self.buf.extend_from_slice(s.as_bytes());
+        self.append(s.as_bytes());
     }
     pub fn push(&mut self, c: char) {
         let mut b = [0u8; 4];
-        self.buf.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
+        self.append(c.encode_utf8(&mut b).as_bytes());
     }
 }
 
 impl core::fmt::Write for OutBuf {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.buf.extend_from_slice(s.as_bytes());
+        self.append(s.as_bytes());
         Ok(())
     }
 }
@@ -214,14 +250,33 @@ pub struct OutputPluginContext {
 }
 
 pub struct LogicalDecodingContext {
-    context: *mut MemoryContext,
     pub slot: &'static ReplicationSlot,
     pub reader: XLogReaderState<'static>,
     pub reorder: ReorderBuffer,
     pub snapshot_builder: Box<SnapBuild>,
     pub fast_forward: bool,
     pub processing_required: bool,
+    // Declared last: C's context is a child of the caller's (logical.c:176),
+    // so error cleanup reclaims it; here the drop order does — the reader
+    // (the only user of `context`) and the reorder buffer (private_data ->
+    // `opc`) go first, whether through free() or an error unwind.
+    raw: RawParts,
+}
+
+struct RawParts {
+    context: *mut MemoryContext,
     opc: *mut OutputPluginContext,
+}
+
+impl Drop for RawParts {
+    fn drop(&mut self) {
+        // SAFETY: exclusive owner; every user of both allocations is a field
+        // declared (and therefore dropped) before this one.
+        unsafe {
+            drop(Box::from_raw(self.opc));
+            drop(Box::from_raw(self.context));
+        }
+    }
 }
 
 impl LogicalDecodingContext {
@@ -230,7 +285,7 @@ impl LogicalDecodingContext {
     // is disjoint from reorder/reader/snapshot_builder.
     #[allow(clippy::mut_from_ref)]
     pub fn opc(&self) -> &mut OutputPluginContext {
-        unsafe { &mut *self.opc }
+        unsafe { &mut *self.raw.opc }
     }
 }
 
@@ -391,14 +446,13 @@ fn StartupDecodingContext(
     };
 
     Ok(Box::new(LogicalDecodingContext {
-        context,
         slot,
         reader,
         reorder,
         snapshot_builder,
         fast_forward,
         processing_required: false,
-        opc,
+        raw: RawParts { context, opc },
     }))
 }
 
@@ -678,21 +732,16 @@ impl LogicalDecodingContext {
         }
 
         let LogicalDecodingContext {
-            context,
             reader,
             reorder,
             snapshot_builder,
-            opc,
+            raw,
             ..
         } = *self;
         snapbuild::free_snapshot_builder(snapshot_builder);
         reorder.free()?;
         drop(reader);
-        // SAFETY: exclusive owner; the reader (the only mcx user) is already dropped.
-        unsafe {
-            drop(Box::from_raw(opc));
-            drop(Box::from_raw(context));
-        }
+        drop(raw);
         Ok(())
     }
 }
@@ -717,6 +766,7 @@ pub fn OutputPluginWrite(opc: &mut OutputPluginContext, last_write: bool) -> PgR
             "OutputPluginPrepareWrite needs to be called before OutputPluginWrite",
         );
     }
+    opc.out.check_limit()?;
     let write = opc.write.expect("write installed");
     write(opc, opc.write_location, opc.write_xid, last_write)?;
     opc.prepared_write = false;

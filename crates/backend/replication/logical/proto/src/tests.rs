@@ -507,3 +507,50 @@ fn text_payloads_convert_to_client_encoding() {
     send_countedtext(&mut out, "caf\u{e9}".as_bytes());
     assert_eq!(out, b"\0\0\0\x04caf\xe9");
 }
+
+// pqformat.c:513/593: a short BEGIN body and an unterminated string are
+// ERRCODE_PROTOCOL_VIOLATION, not XX000.
+#[test]
+fn short_message_data_is_protocol_violation() {
+    let body = [0u8; 7];
+    let mut r = Reader::new(&body);
+    let e = r.get_int64().unwrap_err();
+    assert_eq!(e.message(), "insufficient data left in message");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+
+    let body = b"public";
+    let mut r = Reader::new(body);
+    let e = r.get_string().unwrap_err();
+    assert_eq!(e.message(), "invalid string in message");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+}
+
+// pq_getmsgstring verifies the client bytes against the database encoding
+// (mbutils.c pg_client_to_server -> pg_verify_mbstr): a relation name with a
+// bad UTF8 byte is 22021 with report_invalid_encoding's byte listing.
+#[test]
+fn wire_strings_are_verified_against_utf8_database_encoding() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !mbutils_seams::get_database_encoding::is_installed() {
+            mbutils_seams::get_database_encoding::set(|| 6);
+        }
+    });
+    let mut body = Vec::new();
+    send_int32(&mut body, 16384);
+    send_string(&mut body, "public");
+    body.extend_from_slice(&[b't', 0xff, 0]);
+    send_byte(&mut body, b'd');
+    send_int16(&mut body, 0);
+    let mut r = Reader::new(&body);
+    let e = logicalrep_read_rel(&mut r).err().expect("bad UTF8 relname rejected");
+    assert_eq!(e.message(), "invalid byte sequence for encoding \"UTF8\": 0xff");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE);
+
+    let mut r = Reader::new(&[0xe9, b'a', b'b', 0]);
+    let e = r.get_string().unwrap_err();
+    assert_eq!(e.message(), "invalid byte sequence for encoding \"UTF8\": 0xe9 0x61 0x62");
+
+    let mut r = Reader::new("caf\u{e9}\0".as_bytes());
+    assert_eq!(r.get_string().unwrap(), "caf\u{e9}");
+}

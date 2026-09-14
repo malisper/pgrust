@@ -20,7 +20,10 @@ use types_core::{
     InvalidOid, InvalidTransactionId, InvalidXLogRecPtr, Oid, TimestampTz, TransactionId,
     XLogRecPtr,
 };
-use types_error::{PgResult, ERROR};
+use types_error::{
+    PgError, PgResult, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
+    ERRCODE_PROTOCOL_VIOLATION, ERROR,
+};
 use types_rel::pg_class::{REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_FULL, REPLICA_IDENTITY_INDEX};
 use types_rel::RelationData;
 use types_tuple::{varatt, FormData_pg_attribute, HeapTupleData};
@@ -173,6 +176,62 @@ fn send_countedtext(out: &mut Vec<u8>, s: &[u8]) {
     out[start..start + 4].copy_from_slice(&len.to_be_bytes());
 }
 
+// pqformat.c:513/593: short or unterminated message data is 08P01.
+#[track_caller]
+fn protocol_violation(msg: &str) -> Box<PgError> {
+    let site = core::panic::Location::caller();
+    Box::new(
+        PgError::error(msg.to_string())
+            .with_sqlstate(ERRCODE_PROTOCOL_VIOLATION)
+            .with_location(site.file(), site.line() as i32, "pq_getmsgstring"),
+    )
+}
+
+// pq_getmsgstring's pg_client_to_server (mbutils.c:634): with matching
+// encodings the bytes are only verified, and pg_verify_mbstr reports the
+// first bad sequence as 22021. pgrust hosts UTF8 (verified here) and
+// SQL_ASCII (never verified) databases; harnesses without the encoding
+// seam keep the lossy conversion.
+fn client_to_server(bytes: &[u8]) -> PgResult<String> {
+    const PG_UTF8: i32 = 6;
+    if !mbutils_seams::get_database_encoding::is_installed()
+        || mbutils_seams::get_database_encoding::call() != PG_UTF8
+    {
+        return Ok(String::from_utf8_lossy(bytes).into_owned());
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Ok(s.to_owned()),
+        Err(e) => Err(report_invalid_utf8(&bytes[e.valid_up_to()..])),
+    }
+}
+
+// report_invalid_encoding (mbutils.c:1180) for UTF8: the offending sequence's
+// pg_utf_mblen bytes (clipped to what is left) as space-separated 0xNN.
+#[cold]
+fn report_invalid_utf8(bad: &[u8]) -> Box<PgError> {
+    let first = bad[0];
+    let mblen = if first & 0x80 == 0 {
+        1
+    } else if first & 0xe0 == 0xc0 {
+        2
+    } else if first & 0xf0 == 0xe0 {
+        3
+    } else if first & 0xf8 == 0xf0 {
+        4
+    } else {
+        1
+    };
+    let shown = bad[..mblen.min(bad.len())]
+        .iter()
+        .map(|b| format!("0x{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Box::new(
+        PgError::error(format!("invalid byte sequence for encoding \"UTF8\": {shown}"))
+            .with_sqlstate(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+    )
+}
+
 /// The read cursor over a received logical replication message body
 /// (C: StringInfo with cursor; the walsender's MsgReader is the same shape).
 pub struct Reader<'a> {
@@ -186,7 +245,7 @@ impl<'a> Reader<'a> {
     }
     fn need(&self, n: usize) -> PgResult<()> {
         if self.pos + n > self.buf.len() {
-            elog(ERROR, "insufficient data left in message".to_string())?;
+            return Err(protocol_violation("insufficient data left in message"));
         }
         Ok(())
     }
@@ -226,9 +285,9 @@ impl<'a> Reader<'a> {
             self.pos += 1;
         }
         if self.pos >= self.buf.len() {
-            elog(ERROR, "invalid string in message".to_string())?;
+            return Err(protocol_violation("invalid string in message"));
         }
-        let s = String::from_utf8_lossy(&self.buf[start..self.pos]).into_owned();
+        let s = client_to_server(&self.buf[start..self.pos])?;
         self.pos += 1; // NUL
         Ok(s)
     }
