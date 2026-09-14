@@ -960,6 +960,49 @@ mod agg_serial {
         out.unwrap()
     }
 
+    // typlen -2 (cstring) elements are copied by strlen+1, like C datumCopy.
+    #[test]
+    fn accum_cstring_elements() {
+        use ::types_core::CSTRINGOID;
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let mut st = ArrayBuildState::new(mcx, CSTRINGOID, false).unwrap();
+        st.typlen = -2;
+        st.typbyval = false;
+        st.typalign = b'c';
+        let mut out = Some(st);
+        for e in [Some("a"), Some("bb"), None, Some("")] {
+            let (d, isnull) = match e {
+                Some(s) => {
+                    let mut img = vec_with_capacity_in(mcx, s.len() + 1).unwrap();
+                    img.extend_from_slice(s.as_bytes());
+                    img.push(0);
+                    let d = Datum::from_usize(img.as_ptr() as usize);
+                    core::mem::forget(img);
+                    (d, false)
+                }
+                None => (Datum::null(), true),
+            };
+            out = Some(accum_array_result(mcx, out, d, isnull, CSTRINGOID).unwrap());
+        }
+        let img = make_array_result(mcx, &out.unwrap()).unwrap();
+        let (elems, nulls) = deconstruct_array(mcx, &img, -2, false, b'c', true).unwrap();
+        let got: std::vec::Vec<Option<std::string::String>> = elems
+            .iter()
+            .zip(nulls.iter())
+            .map(|(d, &n)| {
+                (!n).then(|| {
+                    // SAFETY: cstring element is NUL-terminated.
+                    unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }
+                        .to_str()
+                        .unwrap()
+                        .to_string()
+                })
+            })
+            .collect();
+        assert_eq!(got, vec![Some("a".into()), Some("bb".into()), None, Some("".into())]);
+    }
+
     fn int4_result(mcx: Mcx<'_>, st: &ArrayBuildState<'_>) -> std::vec::Vec<Option<i32>> {
         let img = make_array_result(mcx, st).unwrap();
         let (elems, nulls) = deconstruct_array(mcx, &img, 4, true, b'i', true).unwrap();

@@ -341,7 +341,10 @@ fn out_of_range(errnumber: &str, fixed_type: &str) -> PgError {
 /// subnormal result whose conversion was INEXACT (an exactly-representable
 /// subnormal like 0x1p-1074 sets no errno; probed on glibc 2.36,
 /// postgres:18.3 image, 2026-07-31) — while the inf/nan WORDS parse with
-/// no errno. None = no token (strtod endptr == str).
+/// no errno. glibc detects tininess BEFORE rounding: a token whose true
+/// value is below DBL_MIN but rounds up to it is ERANGE (real 18.3:
+/// 'P0x1.fffffffffffffp-1023Y' is 22007; macOS flags after rounding).
+/// None = no token (strtod endptr == str).
 /// Consumers needing C parse cascades verbatim (datetime.c
 /// ParseISO8601Number) call this instead of re-modeling strtod.
 pub fn strtod_c(s: &[u8]) -> Option<(f64, usize, bool)> {
@@ -362,7 +365,9 @@ pub fn strtod_c(s: &[u8]) -> Option<(f64, usize, bool)> {
             };
             let range = parsed.is_infinite()
                 || (parsed == 0.0 && tok.nonzero)
-                || subnormal_inexact(token, &tok.kind, parsed);
+                || subnormal_inexact(token, &tok.kind, parsed)
+                || (parsed.abs() == f64::MIN_POSITIVE
+                    && token_true_value_below_dblmin(token, matches!(tok.kind, NumKind::Hex)));
             Some((parsed, start + tok.len, range))
         }
         None => special_float8(rest).map(|(v, n)| (v, start + n, false)),
@@ -510,6 +515,202 @@ fn subnormal_inexact(token: &[u8], kind: &NumKind, parsed: f64) -> bool {
                 || n_stripped.iter().rev().zip(d.iter()).any(|(a, b)| a != b)
                 || q + tzn != 1074 + tzd
         }
+    }
+}
+
+/// Is the token's mathematically-true value strictly below DBL_MIN
+/// (2^-1022)? Only consulted when the ROUNDED value equals ±DBL_MIN, so
+/// glibc's tininess-before-rounding ERANGE can be reproduced exactly.
+pub(crate) fn token_true_value_below_dblmin(token: &[u8], is_hex: bool) -> bool {
+    let mut i = 0usize;
+    if token[i] == b'+' || token[i] == b'-' {
+        i += 1;
+    }
+    if is_hex {
+        // value = M * 2^E; below 2^-1022 iff the leading nonzero digit's
+        // top-bit weight is <= -1023.
+        let t = &token[i + 2..]; /* past 0x/0X */
+        let mut int_len = 0i64;
+        for &c in t {
+            if c == b'.' || c == b'p' || c == b'P' {
+                break;
+            }
+            int_len += 1;
+        }
+        let mut seen = false;
+        let mut weight = 0i64;
+        let mut lead = 0u32;
+        let mut idx = 0i64;
+        let mut consumed = 0usize;
+        for &c in t {
+            consumed += 1;
+            match c {
+                b'.' => continue,
+                b'p' | b'P' => {
+                    consumed -= 1;
+                    break;
+                }
+                c => {
+                    let d = (c as char).to_digit(16).unwrap();
+                    if !seen && d != 0 {
+                        seen = true;
+                        lead = d;
+                        weight = 4 * (int_len - 1 - idx);
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        if !seen {
+            return false;
+        }
+        let mut pexp: i64 = 0;
+        let mut i = i + 2 + consumed;
+        if i < token.len() && (token[i] == b'p' || token[i] == b'P') {
+            let neg = token.get(i + 1) == Some(&b'-');
+            if neg || token.get(i + 1) == Some(&b'+') {
+                i += 1;
+            }
+            i += 1;
+            while i < token.len() && token[i].is_ascii_digit() {
+                pexp = (pexp * 10 + (token[i] - b'0') as i64).min(1 << 40);
+                i += 1;
+            }
+            if neg {
+                pexp = -pexp;
+            }
+        }
+        let msb = weight + (32 - lead.leading_zeros() as i64 - 1) + pexp;
+        msb <= -1023
+    } else {
+        // decimal: exact big-integer compare of D*10^exp against 2^-1022,
+        // i.e. D * 2^1022 vs 10^k (k = -exp). Leading zeros are not stored
+        // and D is cut to MAX_SIG significant digits: 2^-1022 has 715
+        // significant decimal digits, so digits beyond that cannot move the
+        // comparison, and the buffer stays bounded whatever the input length.
+        const MAX_SIG: usize = 1200;
+        let mut digs: Vec<u32> = Vec::new();
+        let mut dropped = 0i64;
+        let mut frac = 0i64;
+        let mut in_frac = false;
+        let mut exp10: i64 = 0;
+        while i < token.len() {
+            match token[i] {
+                b'.' => in_frac = true,
+                b'e' | b'E' => {
+                    let neg = token.get(i + 1) == Some(&b'-');
+                    if neg || token.get(i + 1) == Some(&b'+') {
+                        i += 1;
+                    }
+                    i += 1;
+                    let mut e = 0i64;
+                    while i < token.len() && token[i].is_ascii_digit() {
+                        e = (e * 10 + (token[i] - b'0') as i64).min(1 << 40);
+                        i += 1;
+                    }
+                    exp10 = if neg { -e } else { e };
+                    break;
+                }
+                c => {
+                    let g = (c - b'0') as u32;
+                    if digs.is_empty() && g == 0 {
+                        // leading zero: contributes to `frac` only
+                    } else if digs.len() < MAX_SIG {
+                        digs.push(g);
+                    } else {
+                        dropped += 1;
+                    }
+                    if in_frac {
+                        frac += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        let exp = exp10 - frac + dropped;
+        if digs.is_empty() {
+            return false;
+        }
+        if exp >= 0 {
+            return false; /* an integer >= 1 */
+        }
+        // D has n digits: 10^(n-1) <= D < 10^n, so D*10^exp is below
+        // 10^-310 < DBL_MIN when n + exp <= -310 and at least 10^-307 >
+        // DBL_MIN when n - 1 + exp >= -307; only the band between needs the
+        // exact compare.
+        let n = digs.len() as i64;
+        if n + exp <= -310 {
+            return true;
+        }
+        if n - 1 + exp >= -307 {
+            return false;
+        }
+        let k = (-exp) as u32;
+        // bignum in u64 limbs (little-endian base 2^64)
+        fn mul_small(a: &mut Vec<u64>, m: u64) {
+            let mut carry: u128 = 0;
+            for l in a.iter_mut() {
+                let v = (*l as u128) * (m as u128) + carry;
+                *l = v as u64;
+                carry = v >> 64;
+            }
+            while carry > 0 {
+                a.push(carry as u64);
+                carry >>= 64;
+            }
+        }
+        fn add_small(a: &mut [u64], m: u64) {
+            let mut carry = m as u128;
+            for l in a.iter_mut() {
+                let v = *l as u128 + carry;
+                *l = v as u64;
+                carry = v >> 64;
+                if carry == 0 {
+                    break;
+                }
+            }
+            debug_assert!(carry == 0);
+        }
+        let mut d: Vec<u64> = vec![0];
+        for &g in &digs {
+            mul_small(&mut d, 10);
+            d.push(0);
+            add_small(&mut d, g as u64);
+            while d.len() > 1 && *d.last().unwrap() == 0 {
+                d.pop();
+            }
+        }
+        // d <<= 1022
+        let limb_shift = 1022 / 64;
+        let bit_shift = 1022 % 64;
+        let mut left: Vec<u64> = vec![0; limb_shift];
+        let mut carry = 0u64;
+        for &l in &d {
+            left.push((l << bit_shift) | carry);
+            carry = if bit_shift == 0 { 0 } else { l >> (64 - bit_shift) };
+        }
+        if carry != 0 {
+            left.push(carry);
+        }
+        let mut right: Vec<u64> = vec![1];
+        for _ in 0..k {
+            mul_small(&mut right, 10);
+        }
+        while left.len() > 1 && *left.last().unwrap() == 0 {
+            left.pop();
+        }
+        while right.len() > 1 && *right.last().unwrap() == 0 {
+            right.pop();
+        }
+        if left.len() != right.len() {
+            return left.len() < right.len();
+        }
+        for (l, r) in left.iter().rev().zip(right.iter().rev()) {
+            if l != r {
+                return l < r;
+            }
+        }
+        false /* exactly equal: not below */
     }
 }
 

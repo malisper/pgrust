@@ -21,7 +21,12 @@ fn tid_in_out() {
     // strtoul wrap: C accepts (-1,0) as block 4294967295
     assert_eq!(t("(-1,0)"), Tid { block: u32::MAX, offset: 0 });
     assert_eq!(t("( 42,7)"), Tid { block: 42, offset: 7 });
-    for bad in ["", "1,2", "(1,2", "(1 ,2)", "( 42 , 7 )", "(1,65536)", "(1,2)x"] {
+    // glibc strtoul: no digits is 0 with endptr == nptr, so an empty field
+    // directly followed by its delimiter parses as 0 (BSD libc sets EINVAL).
+    assert_eq!(t("(,5)"), Tid { block: 0, offset: 5 });
+    assert_eq!(t("(5,)"), Tid { block: 5, offset: 0 });
+    assert_eq!(t("(,)"), Tid { block: 0, offset: 0 });
+    for bad in ["", "1,2", "(1,2", "(1 ,2)", "( 42 , 7 )", "(1,65536)", "(1,2)x", "( ,5)", "(-,5)", "(5,+)"] {
         // trailing garbage after ')' is accepted by C (scan stops at RDELIM)
         if bad == "(1,2)x" {
             assert!(tidin(bad.as_bytes()).is_some());

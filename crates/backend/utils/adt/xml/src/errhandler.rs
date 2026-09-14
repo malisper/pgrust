@@ -19,8 +19,8 @@ pub const PG_XML_STRICTNESS_ALL: i32 = 2;
 const XML_FROM_NONE: i32 = 0;
 const XML_FROM_PARSER: i32 = 1;
 const XML_FROM_NAMESPACE: i32 = 3;
-const XML_FROM_IO: i32 = 13;
-const XML_FROM_MEMORY: i32 = 15;
+const XML_FROM_MEMORY: i32 = 6;
+const XML_FROM_IO: i32 = 8;
 const XML_ERR_WARNING: i32 = 1;
 const XML_ERR_ERROR: i32 = 2;
 

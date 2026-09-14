@@ -977,6 +977,9 @@ fn strtod_c_glibc_erange_model() {
         ("1e-308", true),                  // below DBL_MIN -> subnormal
         ("2.2250738585072014e-308", false), // DBL_MIN exactly (normal)
         ("2.2250738585072011e-308", true), // just below DBL_MIN
+        ("2.2250738585072012e-308", true), // below DBL_MIN, rounds up to it: tininess before rounding
+        ("0x1.fffffffffffffp-1023", true), // same, hex
+        ("0x1p-1022", false),             // DBL_MIN exactly (hex)
         ("1e-400", true),                  // rounds to zero
         ("0x1p-1050", false),              // EXACT subnormal (hex)
         ("0x1p-1074", false),              // min subnormal, exact
@@ -1027,4 +1030,27 @@ fn float4out_results_do_not_alias_across_carriers() {
     let cstr = |d: Datum| unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }.to_bytes().to_vec();
     assert_eq!(cstr(d1), b"12");
     assert_eq!(cstr(d2), b"34");
+}
+
+#[cfg(test)]
+mod dblmin_tests {
+    use crate::io::token_true_value_below_dblmin;
+
+    #[test]
+    fn long_tokens_stay_bounded_and_exact() {
+        // DBL_MIN = 2.2250738585072013830902...e-308; this decimal is above it.
+        assert!(!token_true_value_below_dblmin(b"2.2250738585072014e-308", false));
+        assert!(token_true_value_below_dblmin(b"2.2250738585072013e-308", false));
+        // Leading zeros are not stored: 1e-308 and 3e-308 through 100k zeros.
+        let z = "0.".to_string() + &"0".repeat(100_000);
+        assert!(token_true_value_below_dblmin(format!("{z}1e+99693").as_bytes(), false));
+        assert!(!token_true_value_below_dblmin(format!("{z}3e+99693").as_bytes(), false));
+        // Significant digits past the cut cannot flip the verdict.
+        let ones = "1".repeat(5000);
+        // 5000 digits: 1.1...e-308 is below DBL_MIN, 3.3...e-308 is above.
+        assert!(token_true_value_below_dblmin(format!("{ones}e-5307").as_bytes(), false));
+        let threes = "3".repeat(5000);
+        assert!(!token_true_value_below_dblmin(format!("{threes}e-5307").as_bytes(), false));
+        assert!(!token_true_value_below_dblmin(b"0.000", false));
+    }
 }

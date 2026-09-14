@@ -234,3 +234,52 @@ fn xml_error_handler_reports_below_warning_level_as_notice() {
     );
     set_strictness_for_test(0);
 }
+
+// xml.c:2199-2211: XML_FROM_MEMORY (6) and XML_FROM_IO (8) errors are
+// accepted under every strictness; other non-parser domains are dropped
+// under WELLFORMED.
+#[test]
+fn xml_error_handler_accepts_memory_and_io_domains_when_wellformed() {
+    use core::ffi::c_void;
+    use std::ffi::CString;
+
+    use crate::errhandler::{
+        set_strictness_for_test, xml_err_detail, xml_err_occurred, xml_error_handler,
+        PG_XML_STRICTNESS_WELLFORMED,
+    };
+    use crate::libxml::xmlErrorHdr;
+
+    fn raise(domain: i32, message: &str) {
+        let msg = CString::new(message).unwrap();
+        let mut err = xmlErrorHdr {
+            domain,
+            code: 0,
+            message: msg.as_ptr() as *mut _,
+            level: 2, // XML_ERR_ERROR
+            file: core::ptr::null_mut(),
+            line: 0,
+            str1: core::ptr::null_mut(),
+            str2: core::ptr::null_mut(),
+            str3: core::ptr::null_mut(),
+            int1: 0,
+            int2: 0,
+            ctxt: core::ptr::null_mut(),
+            node: core::ptr::null_mut(),
+        };
+        // SAFETY: a fully initialised xmlError header, live for the call.
+        unsafe { xml_error_handler(core::ptr::null_mut(), &mut err as *mut _ as *mut c_void) };
+    }
+
+    for (domain, name) in [(6, "memory"), (8, "io")] {
+        set_strictness_for_test(PG_XML_STRICTNESS_WELLFORMED);
+        raise(domain, &format!("{name} failed\n"));
+        assert!(xml_err_occurred(), "domain {domain} must be accepted");
+        assert_eq!(xml_err_detail(), format!("{name} failed"));
+    }
+    for domain in [13, 15] {
+        set_strictness_for_test(PG_XML_STRICTNESS_WELLFORMED);
+        raise(domain, "dropped\n");
+        assert!(!xml_err_occurred(), "domain {domain} must be dropped");
+    }
+    set_strictness_for_test(0);
+}

@@ -131,8 +131,12 @@ fn strtoul_c(s: &[u8]) -> Option<(u64, usize)> {
         v = nv;
         i += 1;
     }
-    if i == start || overflow {
+    if overflow {
         return None;
+    }
+    if i == start {
+        // glibc strtoul: no conversion is 0 with endptr == nptr, errno untouched.
+        return Some((0, 0));
     }
     Some((if neg { v.wrapping_neg() } else { v }, i))
 }

@@ -61,10 +61,19 @@ pub fn accum_array_result<'mcx>(
 
     let stored = if !disnull && !astate.typbyval {
         let p = dvalue.as_usize() as *const u8;
-        let n = if astate.typlen == -1 {
-            varsize_any(p)
-        } else {
-            astate.typlen as usize
+        let n = match astate.typlen {
+            -1 => varsize_any(p),
+            -2 => {
+                let mut n = 0usize;
+                // SAFETY: cstring datum is NUL-terminated.
+                unsafe {
+                    while *p.add(n) != 0 {
+                        n += 1;
+                    }
+                }
+                n + 1
+            }
+            l => l as usize,
         };
         // SAFETY: by-ref datum points at n live bytes.
         let bytes = unsafe { core::slice::from_raw_parts(p, n) };
