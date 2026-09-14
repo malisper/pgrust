@@ -57,6 +57,67 @@ fn posting_list_truncates_at_maxsize() {
 }
 
 #[test]
+fn posting_list_decode_continuation_runs_into_padding() {
+    // ginpostinglist.c:145: a continuation bit on the last payload byte is
+    // terminated by the segment's zero alignment pad, which C reads.
+    let ctx = MemoryContext::new_bump("t");
+    for (last, expect) in [(0x81u8, [tid(0, 1), tid(0, 2)]), (0x80u8, [tid(0, 1), tid(0, 1)])] {
+        let img: [u8; 10] = [0, 0, 0, 0, 1, 0, 1, 0, last, 0x00];
+        let mut out = mcx::vec_new_in(ctx.mcx());
+        ginPostingListDecodeAllSegments(&img, &mut out).unwrap();
+        assert_eq!(out.as_slice(), &expect);
+    }
+    let img: [u8; 10] = [0, 0, 0, 0, 1, 0, 1, 0, 0x81, 0x81];
+    let mut out = mcx::vec_new_in(ctx.mcx());
+    let err = ginPostingListDecodeAllSegments(&img, &mut out).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_DATA_CORRUPTED);
+}
+
+#[test]
+fn insert_scratch_is_released_after_the_insertion() {
+    let keep = crate::insert::with_insert_scratch(|m| {
+        let v: ::mcx::PgVec<'_, u8> = mcx::vec_from_elem_in(m, 0u8, 1 << 20);
+        Ok(v.len())
+    })
+    .unwrap();
+    assert_eq!(keep, 1 << 20);
+    assert!(crate::insert::insert_scratch_used() < 1 << 20, "scratch retained past the insertion");
+}
+
+// trgm_gin.c:24 gin_extract_trgm: a pre-9.1 pg_trgm opclass names this one
+// C symbol as both extractValue and extractQuery.
+#[test]
+fn trgm_compatibility_symbol_resolves_for_both_extractors() {
+    const PROC: ::types_core::Oid = 70_001;
+    if !::syscache_seams::lookup_pg_proc_fmgr::is_installed() {
+        ::syscache_seams::lookup_pg_proc_fmgr::set(|funcid| {
+            Ok((funcid == PROC).then_some(::syscache_seams::PgProcFmgrShape {
+                prolang: 13,
+                prorettype: 2281,
+                pronargs: 3,
+                proisstrict: true,
+                proretset: false,
+                prosecdef: false,
+                proconfig_isnull: true,
+                xmin: 0,
+                tid: Default::default(),
+            }))
+        });
+    }
+    if !::syscache_seams::lookup_pg_proc_prosrc::is_installed() {
+        ::syscache_seams::lookup_pg_proc_prosrc::set(|cx, funcid| {
+            Ok(if funcid == PROC {
+                Some(mcx::PgString::from_str_in("gin_extract_trgm", cx)?)
+            } else {
+                None
+            })
+        });
+    }
+    assert!(matches!(crate::util::resolve_extract_value(PROC).unwrap(), GinExtractValueFn::Trgm));
+    assert!(matches!(crate::util::resolve_extract_query(PROC).unwrap(), GinExtractQueryFn::Trgm));
+}
+
+#[test]
 fn merge_item_pointers_dedups() {
     let ctx = MemoryContext::new_bump("t");
     let a = [tid(1, 1), tid(2, 2), tid(5, 5)];
@@ -320,9 +381,12 @@ fn build_accumulator_compressed_keys_group_and_sort_detoasted() {
 // locks are no-ops, vacuum delay points are counted.
 pub(crate) mod fake_bufmgr {
     use std::cell::{Cell, RefCell};
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Once;
 
     use ::types_core::Buffer;
+
+    static STRATEGY_READS: AtomicU32 = AtomicU32::new(0);
 
     thread_local! {
         static PAGES: RefCell<Vec<core::ptr::NonNull<u8>>> = const { RefCell::new(Vec::new()) };
@@ -335,6 +399,11 @@ pub(crate) mod fake_bufmgr {
         INIT.call_once(|| {
             bufmgr_seams::read_buffer::set(|_rel, blkno| {
                 PINS.with(|c| c.set(c.get() + 1));
+                Ok(blkno as Buffer + 1)
+            });
+            bufmgr_seams::read_buffer_extended::set(|_rel, _fork, blkno, _mode, _strategy| {
+                PINS.with(|c| c.set(c.get() + 1));
+                STRATEGY_READS.fetch_add(1, Ordering::Relaxed);
                 Ok(blkno as Buffer + 1)
             });
             bufmgr_seams::release_buffer::set(|_buf| {
@@ -366,6 +435,11 @@ pub(crate) mod fake_bufmgr {
 
     pub(crate) fn delay_points() -> u32 {
         DELAY_POINTS.with(Cell::get)
+    }
+
+    /// Process-wide count of reads through the strategy-carrying seam.
+    pub(crate) fn strategy_reads() -> u32 {
+        STRATEGY_READS.load(Ordering::Relaxed)
     }
 }
 
@@ -564,6 +638,7 @@ mod posting_tree_vacuum {
             state: &state,
             delete: GinVacDelete::DeadItems(&[]),
             stats: &mut stats,
+            strategy: None,
         };
         let has_void = ginVacuumPostingTreeLeaves(&mut gvs, 1).unwrap();
         init_small::globals::SetVacuumCostActive(false);
@@ -575,6 +650,46 @@ mod posting_tree_vacuum {
             2,
             "one vacuum_delay_point per rightlink hop"
         );
+    }
+
+    // vacuum.c:2444 vacuum_delay_point runs unconditionally: an autovacuum
+    // worker with cost delays off still has its pending config reload
+    // processed there.
+    #[test]
+    fn delay_point_reaches_the_seam_without_cost_active() {
+        super::fake_bufmgr::install();
+        super::fake_bufmgr::set_pages(Vec::new());
+        init_small::globals::SetVacuumCostActive(false);
+        crate::vacuum::vacuum_delay_point().unwrap();
+        assert_eq!(super::fake_bufmgr::delay_points(), 1);
+    }
+
+    // ginvacuum.c reads every page through ReadBufferExtended with
+    // gvs->strategy (pg_stat_io's vacuum context / the vacuum buffer ring).
+    #[test]
+    fn posting_tree_vacuum_reads_through_the_strategy_seam() {
+        super::fake_bufmgr::install();
+        super::fake_bufmgr::set_pages(
+            [empty_leaf(InvalidBlockNumber), empty_leaf(2), empty_leaf(3), empty_leaf(InvalidBlockNumber)]
+                .into_iter()
+                .map(|page| core::ptr::NonNull::from(Box::leak(page)).cast::<u8>())
+                .collect(),
+        );
+        let before = super::fake_bufmgr::strategy_reads();
+        let ctx = MemoryContext::new("t");
+        let rel = index_rel(ctx.mcx());
+        let state = one_col_state(int4_col());
+        let mut stats = IndexBulkDeleteResult::default();
+        let mut gvs = GinVacuumState {
+            rel: &rel,
+            state: &state,
+            delete: GinVacDelete::DeadItems(&[]),
+            stats: &mut stats,
+            strategy: None,
+        };
+        ginVacuumPostingTreeLeaves(&mut gvs, 1).unwrap();
+        assert!(super::fake_bufmgr::strategy_reads() - before >= 3);
+        assert_eq!(super::fake_bufmgr::pins(), 0, "no pins leaked");
     }
 }
 

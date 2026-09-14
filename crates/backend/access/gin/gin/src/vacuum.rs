@@ -12,7 +12,9 @@ use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, InvalidB
 use ::types_error::{PgError, PgResult};
 use ::types_nbtree::IndexBulkDeleteResult;
 use ::types_rel::Relation;
+use ::types_storage::buf::BufferAccessStrategy;
 use ::types_storage::bufpage::{PageMut, PageRef, PageTemp};
+use ::types_storage::ReadBufferMode;
 use ::types_core::OffsetNumber;
 use ::types_tuple::itemptr::{
     FirstOffsetNumber, InvalidOffsetNumber, ItemPointerCompare, ItemPointerData,
@@ -48,6 +50,7 @@ pub(crate) struct GinVacuumState<'a, 'cb, 'r, 'st> {
     pub state: &'st GinState,
     pub delete: GinVacDelete<'cb>,
     pub stats: &'a mut IndexBulkDeleteResult,
+    pub strategy: BufferAccessStrategy,
 }
 
 fn am_autovacuum_worker() -> bool {
@@ -56,10 +59,44 @@ fn am_autovacuum_worker() -> bool {
 
 pub(crate) fn vacuum_delay_point() -> PgResult<()> {
     crate::check_for_interrupts()?;
-    if init_small::globals::VacuumCostActive() {
+    // vacuum.c:2444 runs unconditionally (an autovacuum worker's pending
+    // config reload is processed there); the gate only spares rigs without
+    // seams_init.
+    if init_small::globals::VacuumCostActive() || vacuum_seams::vacuum_delay_point::is_installed()
+    {
         vacuum_seams::vacuum_delay_point::call(false)?;
     }
     Ok(())
+}
+
+fn read_buffer(
+    rel: &Relation<'_>,
+    blkno: BlockNumber,
+    strategy: &BufferAccessStrategy,
+) -> PgResult<Buffer> {
+    bm::read_buffer_extended::call(
+        rel,
+        ForkNumber::MAIN_FORKNUM,
+        blkno,
+        ReadBufferMode::Normal,
+        strategy.clone(),
+    )
+}
+
+fn relation_is_local(rel: &Relation<'_>) -> bool {
+    rel.rd_islocaltemp || rel.rd_createSubid.get() != ::types_core::InvalidSubTransactionId
+}
+
+fn relation_number_of_blocks(rel: &Relation<'_>) -> PgResult<BlockNumber> {
+    let need_lock = !relation_is_local(rel);
+    if need_lock {
+        ::lmgr::LockRelationForExtension(rel, ::types_rel::ExclusiveLock)?;
+    }
+    let npages = bm::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+    if need_lock {
+        ::lmgr::UnlockRelationForExtension(rel, ::types_rel::ExclusiveLock)?;
+    }
+    Ok(npages)
 }
 
 // vac_tid_reaped over the sorted dead-TID image.
@@ -134,9 +171,9 @@ pub(crate) fn ginDeletePage(
     myoff: OffsetNumber,
 ) -> PgResult<()> {
     let rel = gvs.rel;
-    let l_buffer = bm::read_buffer::call(rel, left_blkno)?;
-    let d_buffer = bm::read_buffer::call(rel, delete_blkno)?;
-    let p_buffer = bm::read_buffer::call(rel, parent_blkno)?;
+    let l_buffer = read_buffer(rel, left_blkno, &gvs.strategy)?;
+    let d_buffer = read_buffer(rel, delete_blkno, &gvs.strategy)?;
+    let p_buffer = read_buffer(rel, parent_blkno, &gvs.strategy)?;
 
     // SAFETY: pin + exclusive lock held (scan stack).
     let rightlink = { page_opaque(&unsafe { page_ref(d_buffer) }).rightlink };
@@ -234,7 +271,7 @@ fn ginScanToDelete(
         });
     }
 
-    let buffer = bm::read_buffer::call(gvs.rel, blkno)?;
+    let buffer = read_buffer(gvs.rel, blkno, &gvs.strategy)?;
     if !is_root {
         bm::lock_buffer::call(buffer, GIN_EXCLUSIVE)?;
     }
@@ -336,7 +373,7 @@ pub(crate) fn ginVacuumPostingTreeLeaves(
     let mut blkno = root_blkno;
     let mut buffer;
     loop {
-        buffer = bm::read_buffer::call(rel, blkno)?;
+        buffer = read_buffer(rel, blkno, &gvs.strategy)?;
         bm::lock_buffer::call(buffer, GIN_SHARE)?;
         // SAFETY: pin + share lock held.
         let (is_leaf, first_child) = {
@@ -386,7 +423,7 @@ pub(crate) fn ginVacuumPostingTreeLeaves(
         // upstream 7becb647da74 (18.5): Restore vacuum_delay_point() in GIN posting-tree leaf vacuum
         // No buffer content lock (nor any other LWLock) is held here.
         vacuum_delay_point()?;
-        buffer = bm::read_buffer::call(rel, rightlink)?;
+        buffer = read_buffer(rel, rightlink, &gvs.strategy)?;
         bm::lock_buffer::call(buffer, GIN_EXCLUSIVE)?;
     }
     Ok(has_void_page)
@@ -402,7 +439,7 @@ fn ginVacuumPostingTree(
     }
     // At least one empty leaf: rescan the tree deleting empty pages under a
     // cleanup lock on the root.
-    let buffer = bm::read_buffer::call(gvs.rel, root_blkno)?;
+    let buffer = read_buffer(gvs.rel, root_blkno, &gvs.strategy)?;
     bm::lock_buffer_for_cleanup::call(buffer)?;
 
     let mut levels: Vec<DeleteLevel> = Vec::new();
@@ -583,11 +620,12 @@ fn ginbulkdelete_guts<'mcx>(
         state: &state,
         delete,
         stats: &mut stats,
+        strategy: info.strategy.clone(),
     };
 
     // Find the leftmost leaf of the entry tree.
     let mut blkno = GIN_ROOT_BLKNO;
-    let mut buffer = bm::read_buffer::call(rel, blkno)?;
+    let mut buffer = read_buffer(rel, blkno, &info.strategy)?;
     loop {
         bm::lock_buffer::call(buffer, GIN_SHARE)?;
         // SAFETY: pin + share lock held.
@@ -621,7 +659,7 @@ fn ginbulkdelete_guts<'mcx>(
         blkno = downlink;
         bm::lock_buffer::call(buffer, GIN_UNLOCK)?;
         bm::release_buffer::call(buffer)?;
-        buffer = bm::read_buffer::call(rel, blkno)?;
+        buffer = read_buffer(rel, blkno, &info.strategy)?;
     }
 
     let mut roots: Vec<BlockNumber> = Vec::new();
@@ -651,7 +689,7 @@ fn ginbulkdelete_guts<'mcx>(
         if blkno == InvalidBlockNumber {
             break;
         }
-        buffer = bm::read_buffer::call(rel, blkno)?;
+        buffer = read_buffer(rel, blkno, &info.strategy)?;
         bm::lock_buffer::call(buffer, GIN_EXCLUSIVE)?;
     }
 
@@ -727,8 +765,7 @@ pub fn ginvacuumcleanup<'mcx>(
     stats.num_index_tuples = info.num_heap_tuples.max(0.0);
     stats.estimated_count = info.estimated_count;
 
-    // LockRelationForExtension: single-backend no-op.
-    let npages = bm::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+    let npages = relation_number_of_blocks(rel)?;
 
     let mut idx_stat = GinStatsData::default();
     let mut tot_free_pages: BlockNumber = 0;
@@ -736,7 +773,7 @@ pub fn ginvacuumcleanup<'mcx>(
     for blkno in GIN_ROOT_BLKNO..npages {
         vacuum_delay_point()?;
 
-        let buffer = bm::read_buffer::call(rel, blkno)?;
+        let buffer = read_buffer(rel, blkno, &info.strategy)?;
         bm::lock_buffer::call(buffer, GIN_SHARE)?;
         // SAFETY: pin + share lock held.
         {
@@ -765,8 +802,7 @@ pub fn ginvacuumcleanup<'mcx>(
     freespace::IndexFreeSpaceMapVacuum(rel)?;
 
     stats.pages_free = tot_free_pages;
-    stats.num_pages =
-        bm::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+    stats.num_pages = relation_number_of_blocks(rel)?;
 
     Ok(Some(stats))
 }

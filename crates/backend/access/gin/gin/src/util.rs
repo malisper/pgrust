@@ -156,7 +156,7 @@ fn resolve_compare(proc_oid: ::types_core::Oid) -> PgResult<GinCompareFn> {
     })
 }
 
-fn resolve_extract_value(proc_oid: ::types_core::Oid) -> PgResult<GinExtractValueFn> {
+pub(crate) fn resolve_extract_value(proc_oid: ::types_core::Oid) -> PgResult<GinExtractValueFn> {
     Ok(match support_proc_identity(proc_oid)? {
         ProcIdentity::Builtin(oid) => match oid {
             opclass::F_GIN_EXTRACT_JSONB => GinExtractValueFn::Jsonb,
@@ -173,7 +173,8 @@ fn resolve_extract_value(proc_oid: ::types_core::Oid) -> PgResult<GinExtractValu
             other => return Err(unsupported_support_proc("extractValue", other)),
         },
         ProcIdentity::Symbol(name) => match name.as_str() {
-            "gin_extract_value_trgm" => GinExtractValueFn::Trgm,
+            // trgm_gin.c:24 gin_extract_trgm: pre-9.1 opclass compatibility symbol.
+            "gin_extract_value_trgm" | "gin_extract_trgm" => GinExtractValueFn::Trgm,
             "gin_extract_hstore" => GinExtractValueFn::Hstore,
             other => match other
                 .strip_prefix("gin_extract_value_")
@@ -201,7 +202,7 @@ pub(crate) fn resolve_extract_query(proc_oid: ::types_core::Oid) -> PgResult<Gin
             other => return Err(unsupported_support_proc("extractQuery", other)),
         },
         ProcIdentity::Symbol(name) => match name.as_str() {
-            "gin_extract_query_trgm" => GinExtractQueryFn::Trgm,
+            "gin_extract_query_trgm" | "gin_extract_trgm" => GinExtractQueryFn::Trgm,
             "gin_extract_hstore_query" => GinExtractQueryFn::Hstore,
             "ginint4_queryextract" => GinExtractQueryFn::IntArray,
             other => match other

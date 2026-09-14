@@ -590,6 +590,7 @@ fn vacuum_posting_tree_leaf_wal_record_is_inside_critical_section() {
         state: &state,
         delete: crate::vacuum::GinVacDelete::DeadItems(&dead),
         stats: &mut stats,
+        strategy: None,
     };
     crate::datapage::ginVacuumPostingTreeLeaf(mcx, &mut gvs, 3).unwrap();
 
@@ -787,6 +788,7 @@ fn uncompressed_posting_leaf_vacuum_converts_to_compressed_format() {
         state: &state,
         delete: crate::vacuum::GinVacDelete::DeadItems(&dead),
         stats: &mut stats,
+        strategy: None,
     };
     // gindatapage.c:1413-1428 disassembleLeaf: one REPLACE segment holding
     // the raw array; :992-998 dataPlaceToPageLeafRecompress: header converted.

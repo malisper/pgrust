@@ -397,6 +397,7 @@ fn delete_page_wal_record_is_inside_critical_section() {
         state: &state,
         delete: GinVacDelete::DeadItems(&[]),
         stats: &mut stats,
+        strategy: None,
     };
     ginDeletePage(&mut gvs, 2, 1, 3, 1).unwrap();
 

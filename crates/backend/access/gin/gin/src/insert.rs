@@ -34,13 +34,22 @@ pub(crate) fn with_insert_scratch<R>(
     GIN_INSERT_SCRATCH.with(|cell| match cell.try_borrow_mut() {
         Ok(mut ctx) => {
             ctx.reset();
-            f(ctx.mcx())
+            // gininsert.c:906 MemoryContextDelete(insertCtx): nothing from
+            // this insertion outlives the call.
+            let res = f(ctx.mcx());
+            ctx.reset();
+            res
         }
         Err(_) => {
             let ctx = MemoryContext::new_bump("gin insert scratch (reentrant)");
             f(ctx.mcx())
         }
     })
+}
+
+#[cfg(test)]
+pub(crate) fn insert_scratch_used() -> usize {
+    GIN_INSERT_SCRATCH.with(|cell| cell.borrow().used())
 }
 
 // INVARIANT: rd_amcache tags round-trip with the encoder in

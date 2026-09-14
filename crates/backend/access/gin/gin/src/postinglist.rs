@@ -43,20 +43,20 @@ fn encode_varbyte(mut val: u64, out: &mut [u8]) -> usize {
 }
 
 #[inline]
-fn decode_varbyte(p: &[u8], pos: &mut usize) -> u64 {
+fn decode_varbyte(p: &[u8], pos: &mut usize) -> Option<u64> {
     let mut val = 0u64;
     let mut shift = 0u32;
     loop {
-        let c = p[*pos] as u64;
+        let c = *p.get(*pos)? as u64;
         *pos += 1;
         if shift == 42 {
             // 7th byte carries no continuation bit (43-bit words).
             debug_assert!(c & 0x80 == 0);
-            return val | (c << 42);
+            return Some(val | (c << 42));
         }
         val |= (c & 0x7F) << shift;
         if c & 0x80 == 0 {
-            return val;
+            return Some(val);
         }
         shift += 7;
     }
@@ -190,10 +190,13 @@ pub fn ginPostingListDecodeAllSegments(
         out.push(first);
 
         let mut val = itemptr_to_uint64(&first);
-        let payload = &seg[SizeOfGinPostingListHeader..SizeOfGinPostingListHeader + nbytes];
+        // ginpostinglist.c:145 decode_varbyte stops at the first byte without
+        // a continuation bit, reading past nbytes into the segment's alignment
+        // padding; only the loop bound is nbytes.
+        let payload = &seg[SizeOfGinPostingListHeader..];
         let mut pos = 0usize;
         while pos < nbytes {
-            val += decode_varbyte(payload, &mut pos);
+            val += decode_varbyte(payload, &mut pos).ok_or_else(corrupt_posting_list)?;
             out.push(uint64_to_itemptr(val));
         }
         segoff += size_of_gin_posting_list(nbytes);
