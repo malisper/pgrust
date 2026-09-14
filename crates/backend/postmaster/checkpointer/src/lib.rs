@@ -115,6 +115,11 @@ struct CheckpointerRequest {
     ftag: FileTag,
 }
 
+// align(8): requests[] (64-bit FileTag fields) follows this header in the
+// same block, so the header's alignment must cover the element's on every
+// pointer width — natively it already is 8 (the slice reference); wasm32's
+// pointer-sized 4 would fail the CheckpointerShmemInit const assertion.
+#[repr(align(8))]
 struct CheckpointerShmemStruct {
     checkpointer_pid: AtomicI32,
     ckpt_lck: Spinlock,
