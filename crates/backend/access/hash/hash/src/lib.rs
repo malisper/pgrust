@@ -105,7 +105,7 @@ macro_rules! split_scan {
 
 /// hashinsert.
 pub fn hashinsert<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     values: &[Datum],
     isnull: &[bool],
@@ -116,8 +116,11 @@ pub fn hashinsert<'mcx>(
         return Ok(false);
     };
 
+    // hash.c:280 pfree(itup): `mcx` is the executor's bump arena, which
+    // would retain one image per insert until the statement ends.
+    let cx = ::mcx::MemoryContext::new("hashinsert");
     let mut itup =
-        nbtree::itup::index_form_tuple(mcx, &rel.rd_att, &[hash_datum], &[false])?;
+        nbtree::itup::index_form_tuple(cx.mcx(), &rel.rd_att, &[hash_datum], &[false])?;
     // SAFETY: t_tid = first 6 bytes of the owned image (itup.h).
     unsafe {
         itup.as_mut_ptr().cast::<ItemPointerData>().write_unaligned(*ht_ctid);

@@ -63,6 +63,29 @@ pub fn hashbuild<'mcx>(
 
     let mut indtuples = 0.0f64;
 
+    let reltuples = match build_scan(mcx, heap, index, indexInfo, &mut spool, &mut indtuples) {
+        Ok(r) => r,
+        Err(e) => {
+            // hash.c:180-190: an errored build never reaches _h_spooldestroy,
+            // so no tuplesort_end trace line is written.
+            if let Some(sp) = spool.take() {
+                sp.sortstate.discard();
+            }
+            return Err(e);
+        }
+    };
+
+    Ok(IndexBuildResult { heap_tuples: reltuples, index_tuples: indtuples })
+}
+
+fn build_scan<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap: &Relation<'mcx>,
+    index: &Relation<'mcx>,
+    indexInfo: &mut IndexInfo<'mcx>,
+    spool: &mut Option<HSpool>,
+    indtuples: &mut f64,
+) -> PgResult<f64> {
     let reltuples = execindexing::table_index_build_scan(
         mcx,
         heap,
@@ -77,8 +100,11 @@ pub fn hashbuild<'mcx>(
             match spool.as_mut() {
                 Some(sp) => sp.sortstate.putindextuplevalues(*tid, &[hash_datum], &[false])?,
                 None => {
+                    // hash.c:258/280: the tuple image is pfree'd after the
+                    // insert; the caller's context may be a bump arena.
+                    let cx = ::mcx::MemoryContext::new("hashbuildCallback");
                     let mut itup = nbtree::itup::index_form_tuple(
-                        mcx,
+                        cx.mcx(),
                         &index_rel.rd_att,
                         &[hash_datum],
                         &[false],
@@ -93,21 +119,21 @@ pub fn hashbuild<'mcx>(
                     hash::_hash_doinsert(index_rel, image, heap, false)?;
                 }
             }
-            indtuples += 1.0;
+            *indtuples += 1.0;
             Ok(())
         },
     )?;
     // hash.c:183-184.
     backend_progress::pgstat_progress_update_param(
         backend_progress::progress::PROGRESS_CREATEIDX_TUPLES_TOTAL,
-        indtuples as i64,
+        *indtuples as i64,
     );
 
-    if let Some(mut sp) = spool.take() {
-        _h_indexbuild(&mut sp, heap, index)?;
+    if let Some(sp) = spool.as_mut() {
+        _h_indexbuild(sp, heap, index)?;
     }
 
-    Ok(IndexBuildResult { heap_tuples: reltuples, index_tuples: indtuples })
+    Ok(reltuples)
 }
 
 /// hashbuildempty (INIT_FORKNUM arm for unlogged indexes).

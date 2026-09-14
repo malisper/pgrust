@@ -781,3 +781,34 @@ fn successful_update_phases_leave_no_critical_section_open() {
     let opaque = crate::page::page_opaque(&unsafe { page_ref(ovflbuf) });
     assert_eq!(opaque.hasho_flag & LH_PAGE_TYPE, LH_UNUSED_PAGE);
 }
+
+// hash.c:280 pfree(itup): the executor's ExecutorState is a bump arena whose
+// deallocate is a no-op, so an image formed there stays until the statement
+// ends (one 16-byte tuple per inserted row).
+#[test]
+fn hashinsert_does_not_retain_its_tuple_image_in_the_caller_context() {
+    install();
+    let cx = MemoryContext::new("t");
+    let idx = index_rel(cx.mcx());
+    let heap = heap_rel(cx.mcx());
+    build_index(&idx);
+
+    let exec = MemoryContext::new_bump("ExecutorState");
+    let before = exec.used();
+    for i in 1..=64u16 {
+        crate::hashinsert(
+            exec.mcx(),
+            &idx,
+            &[Datum::from_i32(i as i32)],
+            &[false],
+            &ItemPointerData::new(10, i),
+            &heap,
+        )
+        .unwrap_or_else(|e| panic!("hashinsert {i}: {e:?}"));
+    }
+    assert_eq!(
+        exec.used(),
+        before,
+        "hash.c:280: the per-insert tuple image must not accumulate in the caller's context"
+    );
+}

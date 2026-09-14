@@ -341,6 +341,9 @@ pub struct TuplesortData<'m> {
     tapes: Option<Box<tape::TapeState<'m>>>,
     // C ru_start: the trace_sort rusage baseline (zero when tracing is off).
     ru_start: PgRUsage,
+    // Dropped on an error path: C never reaches tuplesort_end there, so the
+    // "ended" trace line is not written.
+    discarded: bool,
 }
 
 ::mcx::bind!(pub TuplesortTy => TuplesortData<'mcx>);
@@ -354,7 +357,9 @@ impl Drop for Tuplesort {
     fn drop(&mut self) {
         self.0.with_mut(|st| {
             // C tuplesort_free: the space figure is read before the tapes close.
-            st.trace_free();
+            if !st.discarded {
+                st.trace_free();
+            }
             if let Some(ts) = st.tapes.take() {
                 let _ = ts.tapeset.close();
             }
@@ -1416,6 +1421,7 @@ impl Tuplesort {
                 max_space_status: TupSortStatus::Initial,
                 tapes: None,
                 ru_start,
+                discarded: false,
                 tuple_mem: 0,
                 sort_keys,
                 only_key,
@@ -2342,6 +2348,12 @@ impl Tuplesort {
     }
 
     pub fn end(self) {}
+
+    /// Release a sort abandoned by an error: C's context teardown, which
+    /// never runs tuplesort_end (no trace_sort "ended" line).
+    pub fn discard(mut self) {
+        self.0.with_mut(|st| st.discarded = true);
+    }
 
     /// Test-only: the caller-tuples context's stats (kind + real arena
     /// footprint) — pins the bounded-arm aset choice and that eviction
