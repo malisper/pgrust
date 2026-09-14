@@ -372,7 +372,7 @@ fn run() {
         alloc_track::ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
         eprintln!("ALLOC-TRACK: enabled");
     }
-    let argv: Vec<String> = std::env::args().collect();
+    let argv: Vec<String> = main_main::argv_from_os(std::env::args_os());
     if let Err(e) = main_main::pg_main(&argv) {
         elog::emit_unhandled_error_report(&e);
         std::process::exit(1);

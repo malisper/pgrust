@@ -46,10 +46,14 @@ fn sema(procno: ProcNumber) -> &'static PgSemaphore {
     })
 }
 
-// C sizeof(PGSemaphoreData) (posix_sema.c:52) = sizeof(sem_t) = 32 on
-// LP64 glibc — the unnamed-POSIX-semaphore build (USE_UNNAMED_POSIX_SEMAPHORES,
-// the Linux default; named semaphores would need no shared memory).
-const C_SIZEOF_PG_SEMAPHORE_DATA: usize = 32;
+// C sizeof(PGSemaphoreData): the unnamed-POSIX build (the Linux default)
+// pads sem_t to PG_CACHE_LINE_SIZE (posix_sema.c:45-53, pg_config_manual.h
+// PG_CACHE_LINE_SIZE = 128); the SysV build (the macOS default) is two ints
+// (sysv_sema.c:30-34).
+#[cfg(target_os = "macos")]
+const C_SIZEOF_PG_SEMAPHORE_DATA: usize = 8;
+#[cfg(not(target_os = "macos"))]
+const C_SIZEOF_PG_SEMAPHORE_DATA: usize = 128;
 
 /// PGSemaphoreShmemSize (posix_sema.c:165): one PGSemaphoreData per
 /// semaphore in shared memory.
@@ -159,6 +163,12 @@ pub fn init_seams() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sizeof_pg_semaphore_data_matches_c_build() {
+        let want = if cfg!(target_os = "macos") { 8 } else { 128 };
+        assert_eq!(super::C_SIZEOF_PG_SEMAPHORE_DATA, want);
+    }
+
     use super::*;
 
     #[test]

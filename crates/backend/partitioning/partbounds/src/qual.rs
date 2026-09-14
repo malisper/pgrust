@@ -1204,7 +1204,7 @@ pub fn fc_satisfies_hash_partition(
         flinfo.fn_extra_ref::<ColumnsHashData>().map_or(true, |x| x.relid != parent_id);
     if stale {
         let mcx = fcinfo.result_mcx();
-        let parent = table::table_open(mcx, parent_id, AccessShareLock)?;
+        let parent = relation_seams::relation_open::call(mcx, parent_id, AccessShareLock)?;
         // partcache::RelationGetPartitionKey only searches pg_partitioned_table
         // when relkind is RELKIND_PARTITIONED_TABLE (C partcache.c:51-58);
         // otherwise C hands back NULL without a syscache lookup. Mirror that

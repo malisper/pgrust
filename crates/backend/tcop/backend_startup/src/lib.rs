@@ -85,6 +85,9 @@ pub fn backend_main(startup_data: &StartupData) -> ! {
         .expect("MyClientSocket must be set before BackendMain");
 
     let top = MemoryContext::new("TopMemoryContext");
+    // mcxt.c:375-379: ErrorContext sits under TopMemoryContext (errors are
+    // PgResult here, so it only carries the pg_backend_memory_contexts row).
+    let _error_context = top.new_child("ErrorContext");
     let result = (|| -> PgResult<()> {
         backend_initialize(top.mcx(), &client_sock, bsdata.can_accept_connections)?;
         // Between here and PostgresMain's install_thread_signal_handlers

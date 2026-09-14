@@ -302,3 +302,26 @@ fn all_languages_initialize_utf8() {
     let d = init_lang(mcx, "english");
     assert_eq!(lexize_bytes(mcx, &d, b"books").as_deref(), Some(b"book".as_slice()));
 }
+
+// dict_snowball.c:253-260: an error after the Language option reclaims the
+// stemmer (dictCtx); the Rust environment must be closed, not leaked.
+#[test]
+fn failed_init_closes_located_stemmer() {
+    use core::sync::atomic::Ordering::SeqCst;
+    let mcx = static_mcx();
+    let before = crate::dict::STEMMERS_CLOSED.load(SeqCst);
+    let init = DictInitData {
+        mcx,
+        drop_fn: core::cell::Cell::new(None),
+        dict_options: opts(mcx, &[("language", "english"), ("bogus", "x")]),
+        int_options: {
+            let mut v = PgVec::new_in(mcx);
+            v.push(None);
+            v.push(None);
+            v
+        },
+    };
+    let Err(err) = dsnowball_init(&init) else { panic!("init with a bogus option succeeded") };
+    assert_eq!(err.message(), "unrecognized Snowball parameter: \"bogus\"");
+    assert!(crate::dict::STEMMERS_CLOSED.load(SeqCst) > before);
+}

@@ -120,7 +120,7 @@ pub fn CreateSharedMemoryAndSemaphores(fastpath_lock_groups_per_backend: i32) ->
     debug_assert!(!g::IsUnderPostmaster());
 
     let cfg = proc_global_config(fastpath_lock_groups_per_backend);
-    let (size, _num_semas) = CalculateShmemSize(&cfg)?;
+    let (size, num_semas) = CalculateShmemSize(&cfg)?;
     elog::elog(DEBUG3, format!("invoking IpcMemoryCreate(size={size})"))?;
 
     // PGSharedMemoryCreate (sysv_shmem.c:702): the huge_pages refusals and the
@@ -137,7 +137,7 @@ pub fn CreateSharedMemoryAndSemaphores(fastpath_lock_groups_per_backend: i32) ->
     // PGSharedMemoryCreate sized (totalsize = size, sysv_shmem.c:855): seeds
     // the freeoffset bump and the totalsize the free row of
     // pg_shmem_allocations reports.
-    shmem::InitShmemAllocation(size);
+    shmem::InitShmemAllocation(size, pg_sema::PGSemaphoreShmemSize(num_semas)?);
 
     CreateOrAttachShmemStructs(&cfg)?;
 

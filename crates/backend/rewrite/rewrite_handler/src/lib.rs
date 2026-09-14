@@ -3217,7 +3217,8 @@ fn fc_pg_column_is_updatable(
         return Ok(datum::Datum::from_bool(false));
     }
     let mcx = fcinfo.result_mcx();
-    let col = attnum as i32 - FirstLowInvalidHeapAttributeNumber;
+    // C stores attnum - FirstLowInvalidHeapAttributeNumber in an AttrNumber (misc.c:669).
+    let col = attnum.wrapping_sub(FirstLowInvalidHeapAttributeNumber as i16) as i32;
     let mut cols = Bitmapset::empty();
     cols.add_member(mcx, col)?;
     let mut outer_reloids = PgVec::new_in(mcx);

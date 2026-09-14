@@ -12037,6 +12037,7 @@ dependencies = [
  "pg_inherits",
  "planner_seams",
  "readfuncs",
+ "relation_seams",
  "rewrite_manip",
  "ruleutils_seams",
  "snapmgr",

@@ -449,12 +449,24 @@ fn fc_make_tuple_indirect(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
 
 /* ========================= get_environ() ================================= */
 
+// regress.c:448-470 copies the raw environ bytes; no UTF-8 validation.
+fn environ_entries() -> Vec<Vec<u8>> {
+    std::env::vars_os()
+        .map(|(k, v)| {
+            let mut e = k.as_encoded_bytes().to_vec();
+            e.push(b'=');
+            e.extend_from_slice(v.as_encoded_bytes());
+            e
+        })
+        .collect()
+}
+
 fn fc_get_environ(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
-    let env: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+    let env = environ_entries();
     let mut datums: Vec<Datum> = Vec::with_capacity(env.len());
     for s in &env {
-        datums.push(varlena_result(varlena::cstring_to_text(mcx, s.as_bytes())?));
+        datums.push(varlena_result(varlena::cstring_to_text(mcx, s)?));
     }
     let (elmlen, elmbyval, elmalign) =
         arrayfuncs::construct::builtin_meta(::types_core::TEXTOID).expect("text is a builtin");
@@ -1304,6 +1316,15 @@ pub fn init_seams() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn get_environ_copies_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        std::env::set_var("PGRUST_B68_RAW", std::ffi::OsString::from_vec(vec![b'a', 0xff, b'b']));
+        let entries = super::environ_entries();
+        assert!(entries.iter().any(|e| e == b"PGRUST_B68_RAW=a\xffb"));
+    }
+
     use super::*;
 
     #[test]

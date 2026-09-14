@@ -26,6 +26,7 @@ clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 planner_seams = { path = "../../optimizer/plan/planner_seams" }
 execexpr = { path = "../../executor/execexpr" }
 table = { path = "../../access/table/table" }
+relation_seams = { path = "../../access/common/relation_seams" }
 tableam = { path = "../../access/table/tableam" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 pg_inherits = { path = "../../catalog/pg_inherits" }

@@ -107,6 +107,23 @@ struct Located {
     needrecode: bool,
 }
 
+#[cfg(test)]
+pub(crate) static STEMMERS_CLOSED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+// C pallocs the stemmer into the dictionary context, so an error after
+// locate_stem_module reclaims it (dict_snowball.c:253-260).
+impl Drop for Located {
+    fn drop(&mut self) {
+        if !self.z.is_null() {
+            // SAFETY: z came from this module's create and is closed once.
+            unsafe { (self.close)(self.z) };
+            #[cfg(test)]
+            STEMMERS_CLOSED.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 fn locate_stem_module(lang: &[u8]) -> PgResult<Located> {
     let db_enc = ::mbutils::GetDatabaseEncoding();
     for m in &STEMMER_MODULES {
@@ -161,12 +178,12 @@ pub fn dsnowball_init(init: &DictInitData<'static>) -> PgResult<DictSnowball> {
         }
     }
 
-    let Some(located) = located else {
+    let Some(mut located) = located else {
         return Err(invalid_param("missing Language parameter").into());
     };
 
     Ok(DictSnowball {
-        z: located.z,
+        z: core::mem::replace(&mut located.z, core::ptr::null_mut()),
         stem: located.stem,
         close: located.close,
         stoplist: stoplist.unwrap_or(StopList { stop: PgVec::new_in(mcx) }),

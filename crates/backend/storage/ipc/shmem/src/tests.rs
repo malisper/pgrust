@@ -310,5 +310,8 @@ fn init_hash_of_a_registered_name_is_the_attach_refusal() {
 #[test]
 fn init_shmem_allocation_seeds_freeoffset_like_c() {
     assert_eq!(core::mem::size_of::<types_storage::PGShmemHeader>(), 56);
-    assert_eq!(initial_freeoffset(), 128);
+    assert_eq!(initial_freeoffset(0), 128);
+    // PGReserveSemaphores' carve precedes the slock_t: 56 + 12800 + 8 -> 12928.
+    assert_eq!(initial_freeoffset(12800), 12928);
+    assert_eq!(initial_freeoffset(20), 128);
 }

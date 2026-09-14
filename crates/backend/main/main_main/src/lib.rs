@@ -115,6 +115,13 @@ pub enum ProfileArgvError {
 /// when no `--profile` token is present (the stock path: caller keeps the
 /// original slice, untouched).
 pub fn expand_profile_argv(argv: &[String]) -> Result<Option<Vec<String>>, ProfileArgvError> {
+    // main.c:163-176: a first-argument --help/--version answers before any
+    // other argument is read.
+    if let Some(arg1) = argv.get(1) {
+        if matches!(arg1.as_str(), "--help" | "-?" | "--version" | "-V") {
+            return Ok(None);
+        }
+    }
     if !argv
         .iter()
         .skip(1)
@@ -188,6 +195,18 @@ fn check_root(progname: &str) {
         elog::write_stderr(&format!("{progname}: real and effective user IDs must match\n"));
         std::process::exit(1);
     }
+}
+
+/// main.c:165-176 ignores printf/fputs failures on --help/--version output
+/// and still exits 0.
+fn write_stdout_ignoring_errors(w: &mut dyn std::io::Write, s: &str) {
+    let _ = w.write_all(s.as_bytes());
+    let _ = w.flush();
+}
+
+/// C's argv is raw bytes (main.c:163); a non-UTF-8 argument must not panic.
+pub fn argv_from_os<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Vec<String> {
+    args.into_iter().map(|a| a.to_string_lossy().into_owned()).collect()
 }
 
 pub fn pg_main(argv: &[String]) -> PgResult<()> {
@@ -275,11 +294,11 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
     if argv.len() > 1 {
         let arg1 = argv[1].as_str();
         if arg1 == "--help" || arg1 == "-?" {
-            print!("{}", help(&progname));
+            write_stdout_ignoring_errors(&mut std::io::stdout(), &help(&progname));
             std::process::exit(0);
         }
         if arg1 == "--version" || arg1 == "-V" {
-            print!("{PG_BACKEND_VERSIONSTR}");
+            write_stdout_ignoring_errors(&mut std::io::stdout(), PG_BACKEND_VERSIONSTR);
             std::process::exit(0);
         }
         if arg1 == "--describe-config" {
@@ -507,6 +526,56 @@ mod tests {
 
     fn sv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn help_and_version_answer_before_profile_expansion() {
+        // main.c:163-176 never reads argv[2..] once argv[1] is --help/--version.
+        assert_eq!(expand_profile_argv(&sv(&["postgres", "--help", "--profile"])), Ok(None));
+        assert_eq!(expand_profile_argv(&sv(&["postgres", "-?", "--profile=nope"])), Ok(None));
+        assert_eq!(
+            expand_profile_argv(&sv(&["postgres", "--version", "--profile=unknown"])),
+            Ok(None)
+        );
+        assert_eq!(expand_profile_argv(&sv(&["postgres", "-V", "--profile"])), Ok(None));
+        assert_eq!(
+            expand_profile_argv(&sv(&["postgres", "-D", "dd", "--help", "--profile"])),
+            Err(ProfileArgvError::MissingValue)
+        );
+    }
+
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from_raw_os_error(28))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from_raw_os_error(28))
+        }
+    }
+
+    #[test]
+    fn help_output_ignores_write_failure() {
+        write_stdout_ignoring_errors(&mut FailingWriter, &help("postgres"));
+        write_stdout_ignoring_errors(&mut FailingWriter, PG_BACKEND_VERSIONSTR);
+        let mut buf = Vec::new();
+        write_stdout_ignoring_errors(&mut buf, PG_BACKEND_VERSIONSTR);
+        assert_eq!(buf, PG_BACKEND_VERSIONSTR.as_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn argv_from_os_tolerates_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let argv = argv_from_os([
+            std::ffi::OsString::from("postgres"),
+            std::ffi::OsString::from("--help"),
+            std::ffi::OsString::from_vec(vec![0xff]),
+        ]);
+        assert_eq!(argv[0], "postgres");
+        assert_eq!(argv[1], "--help");
+        assert_eq!(argv[2], "\u{fffd}");
     }
 
     #[test]

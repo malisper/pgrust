@@ -87,14 +87,19 @@ const fn MAXALIGN(len: usize) -> usize {
 /// Data" and the launcher block before CreateSharedMemoryAndSemaphores —
 /// C does both inside CreateOrAttachShmemStructs — so those two carry
 /// pre-header offsets until that ordering is C's; the bytes stay accounted.)
-pub fn InitShmemAllocation(totalsize: usize) {
+/// `reserved` is PGReserveSemaphores' ShmemAllocUnlocked carve
+/// (posix_sema.c:222, sysv_sema.c:325), which C makes between the header
+/// and InitShmemAllocation (ipci.c:227-234).
+pub fn InitShmemAllocation(totalsize: usize, reserved: usize) {
     SHMEM_TOTALSIZE.store(totalsize, Ordering::Relaxed);
-    SHMEM_FREEOFFSET.fetch_add(initial_freeoffset(), Ordering::Relaxed);
+    SHMEM_FREEOFFSET.fetch_add(initial_freeoffset(reserved), Ordering::Relaxed);
 }
 
-// freeoffset after InitShmemAllocation: sysv_shmem.c:856 then shmem.c:129-138.
-fn initial_freeoffset() -> usize {
+// freeoffset after InitShmemAllocation: sysv_shmem.c:856, the semaphore
+// carve (shmem.c:238-262 MAXALIGNs it), then shmem.c:129-138.
+fn initial_freeoffset(reserved: usize) -> usize {
     let freeoffset = MAXALIGN(core::mem::size_of::<types_storage::PGShmemHeader>());
+    let freeoffset = freeoffset + MAXALIGN(reserved);
     // slock_t is 1 byte (x86_64) or an int (aarch64): MAXALIGN(1) = MAXALIGN(4).
     let freeoffset = MAXALIGN(freeoffset) + MAXALIGN(1);
     CACHELINEALIGN(freeoffset).expect("segment header fits the counter")

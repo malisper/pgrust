@@ -230,8 +230,9 @@ fn calculate_shmem_size_rounds_and_counts_addin() {
 // pg_shmem_allocations rows a C 18.6 server reports for the same structs
 // ("Proc Array" 580, "KnownAssignedXids" 35360, "KnownAssignedXidsValid"
 // 8840, "XLOG Recovery Ctl" 104, "Wal Sender Ctl" 1072, "BTree Vacuum
-// State" 1644, "Shared Memory Stats" 315552) and posix_sema.c's
-// PGSemaphoreShmemSize for ProcGlobalSemas = 136 + NUM_AUXILIARY_PROCS.
+// State" 1644, "Shared Memory Stats" 315552) and PGSemaphoreShmemSize for
+// ProcGlobalSemas = 136 + NUM_AUXILIARY_PROCS: posix_sema.c:45-53 pads each
+// PGSemaphoreData to PG_CACHE_LINE_SIZE (128); the SysV build (macOS) is 8.
 #[test]
 fn shmem_size_terms_match_c_18_6_census() {
     bringup();
@@ -244,7 +245,8 @@ fn shmem_size_terms_match_c_18_6_census() {
     assert_eq!(nbtree::BTreeShmemSize().unwrap(), 1644);
     assert_eq!(pgstat::shmem::StatsShmemSize().unwrap(), 315552);
     assert_eq!(lmgr_proc::ProcGlobalSemas(), 174);
-    assert_eq!(pg_sema::PGSemaphoreShmemSize(174).unwrap(), 174 * 32);
+    let sizeof_pg_semaphore_data = if cfg!(target_os = "macos") { 8 } else { 128 };
+    assert_eq!(pg_sema::PGSemaphoreShmemSize(174).unwrap(), 174 * sizeof_pg_semaphore_data);
     // BufferManagerShmemSize (buf_init.c:145) at this harness's NBuffers:
     // descriptors + cache-line pad, blocks + I/O-align pad, freelist.c's
     // estimate, I/O CVs + pad, checkpoint sort items.
