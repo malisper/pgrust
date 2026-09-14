@@ -117,16 +117,6 @@ impl<'mcx> NodeWalker<'mcx> for ContainMutable {
                 if cnst.constisnull {
                     return Ok(false);
                 }
-                let p = cnst.constvalue.as_usize() as *const u8;
-                // Parse-built jsonpath Consts are plain 4B varlenas
-                // (jsonpath_in output; never short/toast).
-                assert!(
-                    // SAFETY: live by-ref varlena datum, header readable.
-                    unsafe { *p } & 0x03 == 0,
-                    "jsonpath Const with a non-4B varlena header"
-                );
-                // SAFETY: 4B-header varlena readable for its VARSIZE.
-                let image = unsafe { datum::VarlenaRef::from_ptr(p) }.as_bytes();
                 let mut vars: Vec<(&[u8], Oid)> = Vec::with_capacity(je.passing_names.len());
                 for (name, value) in je.passing_names.iter().zip(je.passing_values.iter()) {
                     vars.push((
@@ -134,7 +124,7 @@ impl<'mcx> NodeWalker<'mcx> for ContainMutable {
                         nodes_core::node_funcs::expr_type(value),
                     ));
                 }
-                if adt_jsonpath::mutability::jsp_is_mutable(image, &vars)? {
+                if jsonpath_const_is_mutable(cnst.constvalue, &vars)? {
                     return Ok(true);
                 }
                 expression_tree_walker(node, self)
@@ -890,6 +880,47 @@ fn saop_const_array_nitems(value: datum::Datum) -> PgResult<i64> {
     drop(plain);
     drop(scratch);
     Ok(n)
+}
+
+// C clauses.c:446 DatumGetJsonPathP: a bound-parameter Const substituted
+// from a tuple (fold.rs datum_copy_in) keeps its short header, and a wide
+// one can be compressed; jsp_is_mutable reads a plain 4B image.
+fn jsonpath_const_is_mutable(value: datum::Datum, vars: &[(&[u8], Oid)]) -> PgResult<bool> {
+    let p = value.as_usize() as *const u8;
+    // SAFETY: non-null by-ref varlena datum, readable for its
+    // header-declared (VARSIZE_ANY) size.
+    let image: &[u8] = unsafe {
+        let b0 = *p;
+        if b0 & 0x03 == 0 {
+            return adt_jsonpath::mutability::jsp_is_mutable(
+                datum::VarlenaRef::from_ptr(p).as_bytes(),
+                vars,
+            );
+        }
+        if b0 & 0x01 == 0x01 && b0 != 0x01 {
+            let total = ((b0 >> 1) & 0x7F) as usize;
+            let mut plain = Vec::with_capacity(total + 3);
+            plain.extend_from_slice(&(((total + 3) as u32) << 2).to_ne_bytes());
+            plain.extend_from_slice(core::slice::from_raw_parts(p.add(1), total - 1));
+            return adt_jsonpath::mutability::jsp_is_mutable(&plain, vars);
+        }
+        if b0 == 0x01 {
+            let body = match *p.add(1) {
+                18 => 16,
+                1 | 2 | 3 => core::mem::size_of::<usize>(),
+                other => panic!("jsonpath_const_is_mutable: unknown vartag {other}"),
+            };
+            core::slice::from_raw_parts(p, 2 + body)
+        } else {
+            core::slice::from_raw_parts(p, datum::VarlenaRef::from_ptr(p).varsize())
+        }
+    };
+    let scratch = mcx::MemoryContext::new_bump("jsonpath_const_is_mutable");
+    let plain = detoast_seams::detoast_attr::call(scratch.mcx(), image)?;
+    let r = adt_jsonpath::mutability::jsp_is_mutable(plain.as_slice(), vars)?;
+    drop(plain);
+    drop(scratch);
+    Ok(r)
 }
 
 pub fn find_nonnullable_rels<'mcx>(

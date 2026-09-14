@@ -1381,7 +1381,12 @@ fn compute_partition_bounds<'mcx>(
                 fcinfo.set_arg(0, image_datum(a));
                 fcinfo.set_arg(1, image_datum(b));
                 let r = supfuncs[keycol].invoke(&mut fcinfo)?;
-                assert!(!fcinfo.isnull, "partition comparison function returned NULL");
+                if fcinfo.isnull {
+                    return Err(Box::new(types_error::PgError::error(format!(
+                        "function {} returned NULL",
+                        supfuncs[keycol].fn_oid
+                    ))));
+                }
                 Ok(r.as_i32())
             };
             let dummy_flags = |run: &PlannerRun<'mcx>, rel: RelId| {

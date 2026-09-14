@@ -157,7 +157,7 @@ pub(crate) fn patternsel_common<'mcx>(
     let nullfrac = vardata.nullfrac();
 
     let (pstatus, mut prefix, rest_selec) =
-        pattern_fixed_prefix(run.mcx, constval, consttype, ptype, collation)?;
+        pattern_fixed_prefix(run.mcx, constval, consttype, ptype, collation, true)?;
 
     if let Some(p) = prefix.as_mut() {
         if p.typ != rdatatype {
@@ -232,18 +232,25 @@ fn nondeterministic(coll: Oid) -> PgResult<bool> {
     Ok(coll != 0 && !lsyscache::get_collation_isdeterministic(coll)?)
 }
 
+// C's rest_selec out-parameter: match_pattern_prefix passes NULL
+// (like_support.c:283), so the regex selectivity walk is skipped there.
 fn pattern_fixed_prefix<'mcx>(
     mcx: Mcx<'mcx>,
     patt: Datum,
     patt_type: Oid,
     ptype: PatternType,
     collation: Oid,
+    want_rest_selec: bool,
 ) -> PgResult<(PrefixStatus, Option<PrefixConst>, f64)> {
     match ptype {
         PatternType::Like => like_fixed_prefix(mcx, patt, patt_type, false, collation),
         PatternType::LikeIc => like_fixed_prefix(mcx, patt, patt_type, true, collation),
-        PatternType::Regex => regex_fixed_prefix(mcx, patt, patt_type, false, collation),
-        PatternType::RegexIc => regex_fixed_prefix(mcx, patt, patt_type, true, collation),
+        PatternType::Regex => {
+            regex_fixed_prefix(mcx, patt, patt_type, false, collation, want_rest_selec)
+        }
+        PatternType::RegexIc => {
+            regex_fixed_prefix(mcx, patt, patt_type, true, collation, want_rest_selec)
+        }
         PatternType::Prefix => {
             let prefix = text_const(mcx, varlena_payload(patt), patt_type)?;
             Ok((PrefixStatus::Partial, Some(prefix), 1.0))
@@ -336,6 +343,7 @@ fn regex_fixed_prefix<'mcx>(
     typeid: Oid,
     case_insensitive: bool,
     collation: Oid,
+    want_rest_selec: bool,
 ) -> PgResult<(PrefixStatus, Option<PrefixConst>, f64)> {
     if typeid == BYTEAOID {
         return Err(Box::new(
@@ -346,12 +354,16 @@ fn regex_fixed_prefix<'mcx>(
     let patt = varlena_payload(patt_const);
     match regexp_seams::regexp_fixed_prefix::call(mcx, patt, case_insensitive, collation)? {
         None => {
-            let rest = regex_selectivity(patt, case_insensitive, 0)?;
+            let rest = if want_rest_selec {
+                regex_selectivity(patt, case_insensitive, 0)?
+            } else {
+                1.0
+            };
             Ok((PrefixStatus::None, None, rest))
         }
         Some((prefix_bytes, exact)) => {
             let prefix = text_const(mcx, &prefix_bytes, typeid)?;
-            let rest = if exact {
+            let rest = if exact || !want_rest_selec {
                 1.0
             } else {
                 regex_selectivity(patt, case_insensitive, prefix_bytes.len())?
@@ -711,7 +723,7 @@ pub fn match_pattern_prefix<'mcx>(
         return Ok(None);
     }
     let (pstatus, prefix, _rest) =
-        pattern_fixed_prefix(mcx, patt.constvalue, patt.consttype, ptype, expr_coll)?;
+        pattern_fixed_prefix(mcx, patt.constvalue, patt.consttype, ptype, expr_coll, false)?;
     if pstatus == PrefixStatus::None {
         return Ok(None);
     }
@@ -844,7 +856,7 @@ mod tests {
     fn regex_bytea_is_0a000() {
         let cx = mcx::MemoryContext::new_bump("d434-bytea-re");
         let d = text_const(cx.mcx(), b"a", BYTEAOID).unwrap().value;
-        let e = regex_fixed_prefix(cx.mcx(), d, BYTEAOID, false, 0).unwrap_err();
+        let e = regex_fixed_prefix(cx.mcx(), d, BYTEAOID, false, 0, true).unwrap_err();
         assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
         assert_eq!(e.message(), "regular-expression matching not supported on type bytea");
     }
