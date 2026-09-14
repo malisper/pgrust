@@ -1,0 +1,56 @@
+-- Two-binary differential corpus for the 2026-09-13 bug-inventory batch
+-- batch-144-backend-libpq (C 18.6 oracle vs pgrust): scripts/backend-libpq-b144-e2e.sh.
+\set VERBOSITY verbose
+CREATE DATABASE b144e2e TEMPLATE template0 ENCODING 'UTF8';
+\c b144e2e
+\set VERBOSITY verbose
+-- fp-libpq-be-fsstubs#3: lo_get_fragment_internal's loSize - offset must not
+-- overflow (pgrust panicked "attempt to subtract with overflow").
+SELECT lo_create(4242);
+ lo_create 
+-----------
+      4242
+(1 row)
+
+SELECT length(lo_get(4242, -9223372036854775808, 1));
+ERROR:  54000: large object read request is too large
+SELECT length(lo_get(4242, -9223372036854775808, -1));
+ERROR:  22023: requested length cannot be negative
+SELECT length(lo_get(4242, -9223372036854775807, 1));
+ERROR:  22023: invalid large object seek target: -9223372036854775807
+SELECT length(lo_get(4242, -1, 1));
+ERROR:  22023: invalid large object seek target: -1
+SELECT length(lo_get(4242, 0, 1));
+ length 
+--------
+      0
+(1 row)
+
+SELECT lo_from_bytea(4243, '\xdeadbeef');
+ lo_from_bytea 
+---------------
+          4243
+(1 row)
+
+SELECT length(lo_get(4243, -9223372036854775808, 4));
+ERROR:  54000: large object read request is too large
+SELECT lo_get(4243, -9223372036854775807, 4);
+ERROR:  54000: large object read request is too large
+SELECT lo_get(4243, 2, 4);
+ lo_get 
+--------
+ \xbeef
+(1 row)
+
+SELECT lo_get(4243, 2, 2147483647);
+ lo_get 
+--------
+ \xbeef
+(1 row)
+
+SELECT lo_unlink(4242), lo_unlink(4243);
+ lo_unlink | lo_unlink 
+-----------+-----------
+         1 |         1
+(1 row)
+

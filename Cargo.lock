@@ -2201,6 +2201,7 @@ dependencies = [
  "elog",
  "fd",
  "init_small",
+ "injection_point",
  "ip",
  "ipc_seams",
  "latch",

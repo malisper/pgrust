@@ -819,13 +819,23 @@ pub fn be_tls_init(is_server_start: bool) -> PgResult<i32> {
     // SAFETY: live SSL_CTX; static callback.
     unsafe { cffi::SSL_CTX_set_info_callback(ctx.as_ptr(), Some(info_cb)) };
     ctx.set_alpn_select_callback(|_ssl, client| {
-        select_next_proto(ALPN_PROTOS, client).ok_or(AlpnError::ALERT_FATAL)
+        select_next_proto(ALPN_PROTOS, client).ok_or_else(|| alpn_no_overlap(client))
     });
 
     *SSL_CONTEXT.write().unwrap() = Some(ctx.build());
     SSL_LOADED_VERIFY_LOCATIONS.store(!ssl_ca_file.is_empty(), Ordering::Relaxed);
 
     Ok(0)
+}
+
+// alpn_cb (be-secure-openssl.c:1357): SSL_select_next_proto's no-overlap
+// fallback is the client's first name; one longer than the server vector (or
+// empty) is NOACK — TLS continues without ALPN — not the fatal alert.
+fn alpn_no_overlap(client: &[u8]) -> AlpnError {
+    match client.first() {
+        Some(&len) if len > 0 && (len as usize) <= ALPN_PROTOS.len() => AlpnError::ALERT_FATAL,
+        _ => AlpnError::NOACK,
+    }
 }
 
 pub fn be_tls_destroy() {

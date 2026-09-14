@@ -157,3 +157,13 @@ fn system_getnameinfo_failure_fills_question_marks() {
     assert_eq!(node, "???");
     assert_eq!(service, "???");
 }
+
+// hba.c:1118 check_hostname resolves with a NULL hints pointer.
+#[test]
+fn default_hints_resolve_numeric_host() {
+    let mut out = Vec::new();
+    assert_eq!(pg_getaddrinfo_default_hints("127.0.0.1", &mut out), 0);
+    assert!(out.iter().any(|ai| sockaddr_family(&ai.addr) == libc::AF_INET));
+    assert_ne!(pg_getaddrinfo_default_hints("no.such.host.invalid", &mut out), 0);
+    assert!(out.is_empty());
+}

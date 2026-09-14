@@ -218,8 +218,7 @@ pub(crate) fn check_hostname(port: &mut Port, hostname: &str) -> PgResult<bool> 
 
     // Lookup IP from host name and check against original IP.
     let mut gai_result: Vec<ip::PgAddrInfo> = Vec::new();
-    let hint = ip::AddrInfoHint::default();
-    let ret = ip::pg_getaddrinfo_all(Some(&remote_hostname), None, &hint, &mut gai_result);
+    let ret = ip::pg_getaddrinfo_default_hints(&remote_hostname, &mut gai_result);
     if ret != 0 {
         port.remote_hostname_resolv = -2;
         port.remote_hostname_errcode = ret;

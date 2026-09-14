@@ -87,11 +87,35 @@ pub fn pg_getaddrinfo_all(
     hint: &AddrInfoHint,
     result: &mut Vec<PgAddrInfo>,
 ) -> i32 {
-    result.clear();
-
     if hint.family == libc::AF_UNIX {
+        result.clear();
         return getaddrinfo_unix(servname.unwrap_or(""), Some(hint), result);
     }
+    getaddrinfo_inet(hostname, servname, Some(hint), result)
+}
+
+// getaddrinfo(host, NULL, NULL, ...) as hba.c:1118 check_hostname calls it:
+// a NULL hints pointer keeps the platform defaults (glibc adds AI_ADDRCONFIG
+// and AI_V4MAPPED), which zeroed hints do not.
+#[cfg(target_family = "wasm")]
+pub fn pg_getaddrinfo_default_hints(_hostname: &str, result: &mut Vec<PgAddrInfo>) -> i32 {
+    result.clear();
+    wasm_netdb::EAI_FAIL
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub fn pg_getaddrinfo_default_hints(hostname: &str, result: &mut Vec<PgAddrInfo>) -> i32 {
+    getaddrinfo_inet(Some(hostname), None, None, result)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn getaddrinfo_inet(
+    hostname: Option<&str>,
+    servname: Option<&str>,
+    hint: Option<&AddrInfoHint>,
+    result: &mut Vec<PgAddrInfo>,
+) -> i32 {
+    result.clear();
 
     let host_c = match hostname {
         Some(h) if !h.is_empty() => match std::ffi::CString::new(h) {
@@ -109,9 +133,11 @@ pub fn pg_getaddrinfo_all(
     };
 
     let mut hints: libc::addrinfo = unsafe { MaybeUninit::zeroed().assume_init() };
-    hints.ai_flags = hint.flags;
-    hints.ai_family = hint.family;
-    hints.ai_socktype = hint.socktype;
+    if let Some(hint) = hint {
+        hints.ai_flags = hint.flags;
+        hints.ai_family = hint.family;
+        hints.ai_socktype = hint.socktype;
+    }
 
     let mut res: *mut libc::addrinfo = ptr::null_mut();
     // SAFETY: host/serv are NUL-terminated CStrings or NULL; res freed iff rc==0.
@@ -119,7 +145,7 @@ pub fn pg_getaddrinfo_all(
         libc::getaddrinfo(
             host_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
             serv_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
-            &hints,
+            hint.map_or(ptr::null(), |_| &hints),
             &mut res,
         )
     };

@@ -24,6 +24,7 @@ postgres_seams = { path = "../../tcop/postgres_seams" }
 pqcomm = { path = "../pqcomm" }
 be_secure_seams = { path = "../be_secure_seams" }
 elog = { path = "../../utils/error/elog" }
+injection_point = { path = "../../utils/misc/injection_point" }
 types_core = { path = "../../../_support/types/types_core" }
 libc = "0.2"
 

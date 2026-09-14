@@ -85,6 +85,8 @@ pub fn secure_open_server() -> PgResult<i32> {
     }
     debug_assert_eq!(pqcomm::pq_buffer_remaining_data(), 0);
 
+    injection_point::injection_point("backend-ssl-startup")?;
+
     let (sock, _, _) = my_port_state();
     let open = tls_impl::be_tls_open_server(sock, raw_buf)?;
 

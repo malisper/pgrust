@@ -584,6 +584,8 @@ pub fn parse_hba_line(
         }
 
         // Ensure a validator library is set and permitted by the config.
+        // Deliberate divergence: auth-oauth.c:827 `*err_msg = NULL` drops an
+        // earlier hostssl/SSL-disabled warning on success; kept here.
         if let Some(msg) = check_oauth_validator(&mut parsedline, elevel)? {
             tok_line.err_msg = Some(msg);
             return Ok(None);

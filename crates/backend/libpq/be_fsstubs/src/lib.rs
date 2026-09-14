@@ -55,6 +55,16 @@ fn invalid_descriptor(fd: i32) -> Box<types_error::PgError> {
         .into()
 }
 
+#[cold]
+fn close_error(fnamebuf: &str, errnum: i32) -> Box<types_error::PgError> {
+    ereport(ERROR)
+        .with_saved_errno(errnum)
+        .errcode_for_file_access()
+        .errmsg(format!("could not close file \"{fnamebuf}\": %m"))
+        .into_error()
+        .into()
+}
+
 fn fd_is_valid(fd: i32) -> bool {
     fd >= 0
         && with_state(|s| {
@@ -379,12 +389,9 @@ fn lo_import_internal<'mcx>(mcx: Mcx<'mcx>, filename: &[u8], lobjOid: Oid) -> Pg
     })();
 
     if fd::desc::CloseTransientFile(fd) != 0 {
+        let errnum = elog::errno::current_errno();
         result?;
-        return Err(ereport(ERROR)
-            .errcode_for_file_access()
-            .errmsg(format!("could not close file \"{fnamebuf}\": %m"))
-            .into_error()
-            .into());
+        return Err(close_error(&fnamebuf, errnum));
     }
     result?;
 
@@ -473,12 +480,9 @@ pub fn be_lo_export<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid, filename: &[u8]) -> PgRes
     })();
 
     if fd::desc::CloseTransientFile(fd) != 0 {
+        let errnum = elog::errno::current_errno();
         result?;
-        return Err(ereport(ERROR)
-            .errcode_for_file_access()
-            .errmsg(format!("could not close file \"{fnamebuf}\": %m"))
-            .into_error()
-            .into());
+        return Err(close_error(&fnamebuf, errnum));
     }
     result?;
 
@@ -577,11 +581,13 @@ fn lo_get_fragment_internal<'mcx>(
     // Compute the byte count actually read, accommodating nbytes == -1 and
     // reads beyond the end of the LO.
     let loSize = inv_seek(mcx, &mut loDesc, 0, SEEK_END)?;
+    // be-fsstubs.c:781 `loSize - offset` overflows for offset near INT64_MIN
+    // (C UB; the clang oracle lands on the too-large error): checked here.
     let result_length: int64 = if loSize > offset {
-        if nbytes as int64 >= 0 && (nbytes as int64) <= loSize - offset {
-            nbytes as int64
-        } else {
-            loSize - offset
+        match loSize.checked_sub(offset) {
+            Some(avail) if nbytes >= 0 && (nbytes as int64) <= avail => nbytes as int64,
+            Some(avail) => avail,
+            None => int64::MAX,
         }
     } else {
         0
@@ -689,6 +695,17 @@ mod tests {
         // An admitted len reaches lo_read, whose fd check fails as before.
         let e = crate::be_loread(mcx, 0, 16).expect_err("fd 0 is not open");
         assert_eq!(e.message(), "invalid large-object descriptor: 0");
+    }
+
+    // be-fsstubs.c:545/:475: the close failure's %m expands the close errno.
+    #[test]
+    fn close_error_expands_errno() {
+        let e = crate::close_error("/tmp/lo.out", libc::EIO);
+        assert_eq!(
+            e.message(),
+            "could not close file \"/tmp/lo.out\": Input/output error"
+        );
+        assert_eq!(e.sqlstate(), types_error::ERRCODE_IO_ERROR);
     }
 
     // text_to_cstring_buffer hands the raw bytes to open(2); a filename

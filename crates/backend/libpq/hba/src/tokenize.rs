@@ -180,7 +180,10 @@ pub fn tokenize_auth_file(
         // Collect the next input line, handling backslash continuations.
         let mut buf: Vec<u8> = Vec::new();
         while let Some(raw) = lines.next() {
-            append_stripped(&mut buf, raw);
+            buf.extend_from_slice(&raw);
+            while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
+                buf.pop();
+            }
 
             if buf.len() > last_backslash_buflen && buf.last() == Some(&b'\\') {
                 buf.pop();
@@ -265,8 +268,8 @@ pub fn tokenize_auth_file(
     Ok(())
 }
 
-// pg_get_line_append + pg_strip_crlf: content is split on '\n'; each piece is
-// truncated at the first NUL (C strlen) and stripped of trailing \r / \n.
+// pg_get_line_append: content is split on '\n'; an embedded NUL truncates the
+// piece (C strlen) and hides its newline, so the next physical line is glued on.
 struct LineIter<'a> {
     rest: &'a [u8],
 }
@@ -286,32 +289,33 @@ impl<'a> LineIter<'a> {
 }
 
 impl<'a> Iterator for LineIter<'a> {
-    type Item = &'a [u8];
+    type Item = Vec<u8>;
 
-    fn next(&mut self) -> Option<&'a [u8]> {
+    fn next(&mut self) -> Option<Vec<u8>> {
         if self.rest.is_empty() {
             return None;
         }
-        match self.rest.iter().position(|&c| c == b'\n') {
-            Some(i) => {
-                let line = &self.rest[..=i];
-                self.rest = &self.rest[i + 1..];
-                Some(line)
-            }
-            None => {
-                let line = self.rest;
-                self.rest = &[];
-                Some(line)
+        let mut line = Vec::new();
+        loop {
+            let end = self
+                .rest
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(self.rest.len(), |i| i + 1);
+            let piece = &self.rest[..end];
+            self.rest = &self.rest[end..];
+            match piece.iter().position(|&c| c == 0) {
+                None => {
+                    line.extend_from_slice(piece);
+                    return Some(line);
+                }
+                Some(z) => {
+                    line.extend_from_slice(&piece[..z]);
+                    if self.rest.is_empty() {
+                        return Some(line);
+                    }
+                }
             }
         }
     }
-}
-
-fn append_stripped(buf: &mut Vec<u8>, line: &[u8]) {
-    let end = line.iter().position(|&c| c == 0).unwrap_or(line.len());
-    let mut piece = &line[..end];
-    while matches!(piece.last(), Some(b'\n') | Some(b'\r')) {
-        piece = &piece[..piece.len() - 1];
-    }
-    buf.extend_from_slice(piece);
 }
