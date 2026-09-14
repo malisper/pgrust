@@ -865,7 +865,7 @@ fn get_relation_policy_oid<'mcx>(
     const POLICY_POLRELID_POLNAME_INDEX_ID: Oid = 3258;
     let rel = table::table_open(mcx, PolicyRelationId, types_rel::AccessShareLock)?;
     let mut namebuf = [0u8; 64];
-    let n = policy_name.len().min(63);
+    let n = policy_name.len().min(namebuf.len());
     namebuf[..n].copy_from_slice(&policy_name.as_bytes()[..n]);
     let mut keys = [types_scan::scankey::ScanKeyData::empty(), types_scan::scankey::ScanKeyData::empty()];
     keys[0].sk_attno = 3;

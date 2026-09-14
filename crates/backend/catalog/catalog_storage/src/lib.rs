@@ -81,13 +81,9 @@ pub fn RestorePendingSyncs(syncs: &[(RelFileLocator, bool)]) {
     });
 }
 
-pub fn RelationCreateStorage(
-    rlocator: RelFileLocator,
-    relpersistence: u8,
-    register_delete: bool,
-) -> PgResult<RelFileLocatorBackend> {
-    let (proc_number, needs_wal) = match relpersistence {
-        RELPERSISTENCE_TEMP => (init_small::globals::MyProcNumber(), false),
+fn storage_proc_number(relpersistence: u8) -> PgResult<(ProcNumber, bool)> {
+    Ok(match relpersistence {
+        RELPERSISTENCE_TEMP => (init_small::globals::ProcNumberForTempRelations(), false),
         RELPERSISTENCE_UNLOGGED => (INVALID_PROC_NUMBER, false),
         RELPERSISTENCE_PERMANENT => (INVALID_PROC_NUMBER, true),
         _ => {
@@ -97,7 +93,16 @@ pub fn RelationCreateStorage(
             msg.push(relpersistence);
             return Err(types_error::PgError::error_raw_message(msg).into());
         }
-    };
+    })
+}
+
+pub fn RelationCreateStorage(
+    rlocator: RelFileLocator,
+    relpersistence: u8,
+    register_delete: bool,
+) -> PgResult<RelFileLocatorBackend> {
+    debug_assert!(!xact::IsInParallelMode());
+    let (proc_number, needs_wal) = storage_proc_number(relpersistence)?;
 
     let key = RelFileLocatorBackend { locator: rlocator, backend: proc_number };
     smgr::smgropen(rlocator, proc_number)?;

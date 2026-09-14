@@ -640,7 +640,11 @@ pub fn makeMultirangeTypeName(rangeTypeName: &str, typeNamespace: Oid) -> PgResu
             b.len() + 5
         }
         None => {
-            let n = b.len().min(NAMEDATALEN as usize - 12);
+            // Deliberate divergence from pg_type.c:973 (pnstrdup at NAMEDATALEN-12
+            // can split a multibyte character and store an invalidly encoded
+            // name): clip on a character boundary instead.
+            let n = mbutils_seams::pg_mbcliplen::call(b, b.len() as i32, NAMEDATALEN as i32 - 12)
+                as usize;
             buf[..n].copy_from_slice(&b[..n]);
             buf[n..n + 11].copy_from_slice(b"_multirange");
             n + 11

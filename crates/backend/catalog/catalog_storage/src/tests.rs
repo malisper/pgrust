@@ -101,6 +101,21 @@ fn relation_create_storage_invalid_relpersistence_is_internal_error() {
     assert_eq!(err.message(), "invalid relpersistence: x");
 }
 
+// storage.c:134: a temp relation's storage is keyed by
+// ProcNumberForTempRelations() (the parallel leader's slot when set), not the
+// creating backend's own proc number.
+#[test]
+fn temp_storage_is_keyed_by_the_leader_proc_number() {
+    init_small::globals::SetMyProcNumber(7);
+    init_small::globals::SetParallelLeaderProcNumber(3);
+    assert_eq!(storage_proc_number(RELPERSISTENCE_TEMP).unwrap(), (3, false));
+    init_small::globals::SetParallelLeaderProcNumber(INVALID_PROC_NUMBER);
+    assert_eq!(storage_proc_number(RELPERSISTENCE_TEMP).unwrap(), (7, false));
+    assert_eq!(storage_proc_number(RELPERSISTENCE_UNLOGGED).unwrap(), (INVALID_PROC_NUMBER, false));
+    assert_eq!(storage_proc_number(RELPERSISTENCE_PERMANENT).unwrap(), (INVALID_PROC_NUMBER, true));
+    init_small::globals::SetMyProcNumber(INVALID_PROC_NUMBER);
+}
+
 // audit-18.6 b108 (a186-candidate-fp-catalog-storage-e1e9cb312d4a29373004-1):
 // storage.c:626-630 SerializePendingSyncs removes every relation that a
 // commit-time pendingDeletes entry drops (CREATE TABLE ... DROP TABLE in one
