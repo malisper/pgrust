@@ -45,6 +45,8 @@ numutils = { path = "../../utils/adt/numutils" }
 objectaccess = { path = "../objectaccess" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 elog = { path = "../../utils/error/elog" }
+commands_define = { path = "../../commands/commands_define" }
+parser_small1 = { path = "../../parser/parser_small1" }
 
 pg_largeobject = { path = "../pg_largeobject" }
 pg_parameter_acl = { path = "../pg_parameter_acl" }

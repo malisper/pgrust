@@ -771,6 +771,8 @@ pub fn GetPublicationSchemas<'mcx>(mcx: Mcx<'mcx>, pubid: Oid) -> PgResult<PgVec
     }
     genam::systable_endscan(mcx, scan)?;
     pubschsrel.close(AccessShareLock)?;
+    // PublicationNamespacePnnspidPnpubidIndexId order (pg_publication.c:945).
+    result.sort_unstable();
     Ok(result)
 }
 
@@ -935,7 +937,8 @@ fn fc_pg_relation_is_publishable(
 
 // Cross-arena SRF carrier (fn_extra is 'static): std Vec by necessity.
 struct PubTablesRows {
-    tuples: Vec<Vec<u8>>,
+    table_infos: Vec<(Oid, Oid)>,
+    next: usize,
 }
 
 fn filter_partitions(mcx: Mcx<'_>, table_infos: &mut Vec<(Oid, Oid)>) -> PgResult<()> {
@@ -1004,7 +1007,16 @@ fn collect_publication_tables(fcinfo: &Fcinfo) -> PgResult<PubTablesRows> {
     if viaroot {
         filter_partitions(mcx, &mut table_infos)?;
     }
+    Ok(PubTablesRows { table_infos, next: 0 })
+}
 
+// pg_publication.c:1279-1368: one table is opened per SRF call, so a caller
+// that stops early never locks the later tables. None: dropped meanwhile.
+fn publication_table_row<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    pubid: Oid,
+) -> PgResult<Option<Vec<u8>>> {
     let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, 4)?;
     tupdesc::TupleDescInitEntry(&mut desc, 1, Some("pubid"), OIDOID, -1, 0)?;
     tupdesc::TupleDescInitEntry(&mut desc, 2, Some("relid"), OIDOID, -1, 0)?;
@@ -1016,16 +1028,15 @@ fn collect_publication_tables(fcinfo: &Fcinfo) -> PgResult<PubTablesRows> {
     // rowtype lookup, record_out) need the registered typmod.
     ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
 
-    let mut tuples = Vec::with_capacity(table_infos.len());
-    for &(relid, pubid) in &table_infos {
-        // upstream 73d63d1c1f67 (18.6): Fix pg_get_publication_tables() failure with concurrent DROP TABLE.
-        // The table OIDs were collected earlier, so a table may have been
-        // dropped before we get here; try_table_open returns None if it is
-        // already gone, in which case we skip it: such tables are simply
-        // absent from the result set, the expected point-in-time behavior.
-        let Some(rel) = table::try_table_open(mcx, relid, AccessShareLock)? else {
-            continue;
-        };
+    // upstream 73d63d1c1f67 (18.6): Fix pg_get_publication_tables() failure with concurrent DROP TABLE.
+    // The table OIDs were collected earlier, so a table may have been
+    // dropped before we get here; try_table_open returns None if it is
+    // already gone, in which case we skip it: such tables are simply
+    // absent from the result set, the expected point-in-time behavior.
+    let Some(rel) = table::try_table_open(mcx, relid, AccessShareLock)? else {
+        return Ok(None);
+    };
+    {
         let publication = GetPublication(mcx, pubid)?;
         let schemaid = rel.rd_rel.relnamespace;
 
@@ -1096,10 +1107,8 @@ fn collect_publication_tables(fcinfo: &Fcinfo) -> PgResult<PubTablesRows> {
             None => nulls[3] = true,
         }
         let tuple = heaptuple::heap_form_tuple(mcx, &desc, &values, &nulls)?;
-        tuples.push(tuple.image().to_vec());
+        Ok(Some(tuple.image().to_vec()))
     }
-
-    Ok(PubTablesRows { tuples })
 }
 
 fn fc_pg_get_publication_tables(
@@ -1112,20 +1121,28 @@ fn fc_pg_get_publication_tables(
         let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
         fctx.user_fctx = Some(Box::new(rows));
     }
-    let fctx = funcapi::per_MultiFuncCall(flinfo);
-    let idx = fctx.call_cntr as usize;
-    let rows = fctx
-        .user_fctx
-        .as_ref()
-        .expect("pg_get_publication_tables: rows set at first call")
-        .downcast_ref::<PubTablesRows>()
-        .expect("pg_get_publication_tables: user_fctx is PubTablesRows");
-    match rows.tuples.get(idx) {
-        Some(img) => {
-            let d = byref_result(fcinfo.result_mcx(), img)?;
-            Ok(funcapi::srf_return_next(flinfo, fcinfo, d))
+    loop {
+        let next = {
+            let fctx = funcapi::per_MultiFuncCall(flinfo);
+            let rows = fctx
+                .user_fctx
+                .as_mut()
+                .expect("pg_get_publication_tables: rows set at first call")
+                .downcast_mut::<PubTablesRows>()
+                .expect("pg_get_publication_tables: user_fctx is PubTablesRows");
+            let next = rows.table_infos.get(rows.next).copied();
+            if next.is_some() {
+                rows.next += 1;
+            }
+            next
+        };
+        let Some((relid, pubid)) = next else {
+            return Ok(funcapi::srf_return_done(flinfo, fcinfo));
+        };
+        if let Some(img) = publication_table_row(fcinfo.result_mcx(), relid, pubid)? {
+            let d = byref_result(fcinfo.result_mcx(), &img)?;
+            return Ok(funcapi::srf_return_next(flinfo, fcinfo, d));
         }
-        None => Ok(funcapi::srf_return_done(flinfo, fcinfo)),
     }
 }
 

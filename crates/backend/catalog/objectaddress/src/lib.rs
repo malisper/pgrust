@@ -237,6 +237,22 @@ pub fn TypeNameToString(tn: &TypeName<'_>) -> String {
 // lanes: pre-resolved typeOid (names == NIL), %TYPE column references, and
 // plain (possibly qualified) names. setof is not examined here, as in C.
 pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
+    let typoid = lookup_type_name(tn, missing_ok)?;
+    if typoid == InvalidOid && !missing_ok {
+        return Err(err_at(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!("type \"{}\" does not exist", TypeNameToString(tn)),
+            "parse_type.c",
+            245,
+            "LookupTypeNameOid",
+        ));
+    }
+    Ok(typoid)
+}
+
+// LookupTypeNameExtended (parse_type.c): InvalidOid for a missing type; a
+// missing explicit schema is LookupExplicitNamespace's 3F000 unless missing_ok.
+fn lookup_type_name(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
     let typoid: Oid;
     if tn.names.is_nil() {
         // We have the OID already if it's an internally generated TypeName —
@@ -345,15 +361,6 @@ pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
         } else {
             base_typoid
         };
-    }
-    if typoid == InvalidOid && !missing_ok {
-        return Err(err_at(
-            ERRCODE_UNDEFINED_OBJECT,
-            format!("type \"{}\" does not exist", TypeNameToString(tn)),
-            "parse_type.c",
-            245,
-            "LookupTypeNameOid",
-        ));
     }
     // C LookupTypeNameExtended validates typmod decoration on every found
     // type, even though LookupTypeNameOid discards the value (and BEFORE
@@ -470,9 +477,9 @@ fn get_object_address_type(
     missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
     let mut address = ObjectAddress::set(TYPE_RELATION_ID, InvalidOid);
-    // C: LookupTypeNameExtended(missing_ok) then its own ereport — the
-    // LOCATION is get_object_address_type, not the parse_type.c lookup.
-    let typoid = LookupTypeNameOid(tn, true)?;
+    // C: LookupTypeName(missing_ok) then its own ereport — the LOCATION is
+    // get_object_address_type, not the parse_type.c lookup.
+    let typoid = lookup_type_name(tn, missing_ok)?;
     if typoid == InvalidOid {
         if !missing_ok {
             return Err(err_at(
@@ -1166,14 +1173,33 @@ fn c_atoi(s: &str) -> i32 {
         Some(b'+') => (1i64, &b[1..]),
         _ => (1i64, b),
     };
-    let mut v = 0i64;
+    // atoi = (int) strtol(s, NULL, 10): strtol saturates at LONG_MIN/LONG_MAX
+    // and the int conversion keeps the low 32 bits.
+    let mut v = 0u64;
+    let mut overflow = false;
     for &c in rest {
         if !c.is_ascii_digit() {
             break;
         }
-        v = (v * 10 + (c - b'0') as i64).min(i32::MAX as i64);
+        if !overflow {
+            match v.checked_mul(10).and_then(|x| x.checked_add((c - b'0') as u64)) {
+                Some(x) => v = x,
+                None => overflow = true,
+            }
+        }
     }
-    (sign * v).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    let long = if sign < 0 {
+        if overflow || v > 1u64 << 63 {
+            i64::MIN
+        } else {
+            (v as i64).wrapping_neg()
+        }
+    } else if overflow || v > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        v as i64
+    };
+    long as i32
 }
 
 // get_object_address_opf_member (objectaddress.c).
@@ -1874,6 +1900,20 @@ mod tests {
         let e = crate::description::cache_lookup_failed("foreign-data wrapper", 0);
         assert_eq!(e.message(), "cache lookup failed for foreign-data wrapper 0");
         assert_eq!(e.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    }
+
+    // objectaddress.c:1702 atoi (fp-catalog-objectaddress-p1#2): INT_MIN is
+    // representable, larger magnitudes wrap through (int) strtol.
+    #[test]
+    fn c_atoi_is_int_strtol() {
+        assert_eq!(c_atoi("-2147483648"), i32::MIN);
+        assert_eq!(c_atoi("2147483647"), i32::MAX);
+        assert_eq!(c_atoi("2147483648"), i32::MIN);
+        assert_eq!(c_atoi("99999999999999999999"), -1);
+        assert_eq!(c_atoi("-99999999999999999999"), 0);
+        assert_eq!(c_atoi("-9223372036854775808"), 0);
+        assert_eq!(c_atoi("  +12x"), 12);
+        assert_eq!(c_atoi("x"), 0);
     }
 
     const KNOWN_TYPE: Oid = 23;

@@ -13,12 +13,12 @@ use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, NAMESPACE_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_GRANT_OPERATION,
-    ERRCODE_SYNTAX_ERROR,
 };
 use types_nodes::parsenodes::{
-    AlterDefaultPrivilegesStmt, DefElem, DropBehavior, ObjectType, RoleSpecType,
+    AlterDefaultPrivilegesStmt, DropBehavior, ObjectType, RoleSpecType,
 };
 use types_rel::RowExclusiveLock;
+use parser_small1::ParseState;
 
 use crate::grant::{
     get_rolespec_oid, merge_acl_with_grant, privilege_to_string, string_to_privilege,
@@ -53,21 +53,6 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(sqlstate))
 }
 
-// errorConflictingDefElem (define.c) as ExecAlterDefaultPrivilegesStmt
-// reaches it with ProcessUtilitySlow's pstate (aclchk.c:937/942):
-// parser_errposition(pstate, defel->location) puts the cursor on the
-// repeated IN SCHEMA / FOR ROLE clause.
-fn conflicting_def_elem(defel: &DefElem<'_>) -> Box<PgError> {
-    let mut e = err(
-        "conflicting or redundant options".into(),
-        ERRCODE_SYNTAX_ERROR,
-    );
-    if defel.location >= 0 {
-        e.cursor_position = Some(defel.location + 1);
-    }
-    e
-}
-
 struct InternalDefaultACL<'mcx> {
     roleid: Oid,
     nspid: Oid,
@@ -83,6 +68,7 @@ struct InternalDefaultACL<'mcx> {
 // ExecAlterDefaultPrivilegesStmt (aclchk.c).
 pub fn ExecAlterDefaultPrivilegesStmt<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: Option<&ParseState<'_, '_>>,
     stmt: &AlterDefaultPrivilegesStmt<'_>,
 ) -> PgResult<()> {
     let action = stmt
@@ -96,13 +82,13 @@ pub fn ExecAlterDefaultPrivilegesStmt<'mcx>(
         match defel.defname.unwrap_or("") {
             "schemas" => {
                 if dnspnames.is_some() {
-                    return Err(conflicting_def_elem(defel));
+                    return Err(commands_define::errorConflictingDefElem(defel, pstate));
                 }
                 dnspnames = defel.arg;
             }
             "roles" => {
                 if drolespecs.is_some() {
-                    return Err(conflicting_def_elem(defel));
+                    return Err(commands_define::errorConflictingDefElem(defel, pstate));
                 }
                 drolespecs = defel.arg;
             }

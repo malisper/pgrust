@@ -31,6 +31,8 @@ pub const Anum_pg_enum_oid: AttrNumber = 1;
 pub const Anum_pg_enum_enumtypid: AttrNumber = 2;
 pub const Anum_pg_enum_enumsortorder: AttrNumber = 3;
 pub const Anum_pg_enum_enumlabel: AttrNumber = 4;
+// sizeof(FormData_pg_enum): oid, enumtypid, enumsortorder, enumlabel.
+const FORMDATA_PG_ENUM_SIZE: usize = 3 * 4 + NAMEDATALEN as usize;
 const Natts_pg_enum: usize = 4;
 
 struct Uncommitted<'mcx> {
@@ -196,14 +198,25 @@ pub fn EnumValuesCreate<'mcx>(mcx: Mcx<'mcx>, enumTypeOid: Oid, vals: &[&str]) -
 
     // C divergence: C batches through CatalogTuplesMultiInsertWithInfo;
     // per-row CatalogTupleInsert yields identical rows (only the WAL record
-    // shape differs).
+    // shape differs). The batch grain is kept (pg_enum.c:156-198): every
+    // label of a batch is validated before any of it reaches the catalog.
+    let nslots = num_elems.min(catalog_indexing::MAX_CATALOG_MULTI_INSERT_BYTES / FORMDATA_PG_ENUM_SIZE);
+    let mut batch: Vec<(Oid, f32, NameData)> = Vec::with_capacity(nslots);
     for (elemno, lab) in vals.iter().enumerate() {
         if lab.len() > NAMEDATALEN as usize - 1 {
             return Err(invalid_label(lab));
         }
         let mut label = NameData::default();
         label.namestrcpy(lab);
-        form_and_insert(mcx, &pg_enum, oids[elemno], enumTypeOid, (elemno + 1) as f32, &label)?;
+        batch.push((oids[elemno], (elemno + 1) as f32, label));
+        if batch.len() == nslots {
+            for (oid, order, label) in batch.drain(..) {
+                form_and_insert(mcx, &pg_enum, oid, enumTypeOid, order, &label)?;
+            }
+        }
+    }
+    for (oid, order, label) in batch.drain(..) {
+        form_and_insert(mcx, &pg_enum, oid, enumTypeOid, order, &label)?;
     }
 
     pg_enum.close(RowExclusiveLock)
@@ -350,11 +363,7 @@ pub fn AddEnumLabel<'mcx>(
         };
 
         let newOid = if init_small::globals::IsBinaryUpgrade() {
-            let oid = take_next_pg_enum_oid().ok_or_else(oid_not_set)?;
-            if neighbor.is_some() {
-                return Err(binary_upgrade_incompatible_neighbor());
-            }
-            oid
+            binary_upgrade_enum_oid(neighbor.is_some())?
         } else {
             // Prefer an even OID when it sorts correctly against existing even
             // OIDs; otherwise the value must carry an odd OID.
@@ -557,14 +566,18 @@ pub fn SetNextPgEnumOid(oid: Oid) {
     NEXT_PG_ENUM_OID.set(oid);
 }
 
-fn take_next_pg_enum_oid() -> Option<Oid> {
+// pg_enum.c:459-477: presence check, then the neighbor check, and only then
+// the consume — a rejected BEFORE/AFTER leaves the OID for the next ADD VALUE.
+fn binary_upgrade_enum_oid(has_neighbor: bool) -> PgResult<Oid> {
     let oid = NEXT_PG_ENUM_OID.get();
-    if OidIsValid(oid) {
-        NEXT_PG_ENUM_OID.set(InvalidOid);
-        Some(oid)
-    } else {
-        None
+    if !OidIsValid(oid) {
+        return Err(oid_not_set());
     }
+    if has_neighbor {
+        return Err(binary_upgrade_incompatible_neighbor());
+    }
+    NEXT_PG_ENUM_OID.set(InvalidOid);
+    Ok(oid)
 }
 
 fn oid_not_set() -> Box<PgError> {
@@ -711,12 +724,18 @@ mod tests {
         }
     }
 
+    // pg_enum.c:459-477: a rejected BEFORE/AFTER (fp-catalog-pg_enum#2) must
+    // leave the preset OID for the next plain ADD VALUE; it is consumed once.
     #[test]
-    fn next_pg_enum_oid_set_take_once() {
-        assert_eq!(take_next_pg_enum_oid(), None);
+    fn next_pg_enum_oid_survives_rejected_neighbor_and_is_taken_once() {
+        let e = binary_upgrade_enum_oid(false).unwrap_err();
+        assert_eq!(e.message(), "pg_enum OID value not set when in binary upgrade mode");
+        assert_eq!(e.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
         SetNextPgEnumOid(123456);
-        assert_eq!(take_next_pg_enum_oid(), Some(123456));
-        assert_eq!(take_next_pg_enum_oid(), None);
+        let e = binary_upgrade_enum_oid(true).unwrap_err();
+        assert_eq!(e.message(), "ALTER TYPE ADD BEFORE/AFTER is incompatible with binary upgrade");
+        assert_eq!(binary_upgrade_enum_oid(false).unwrap(), 123456);
+        assert!(binary_upgrade_enum_oid(false).is_err());
     }
     #[test]
     fn session_enum_empty_reads_do_not_allocate() {

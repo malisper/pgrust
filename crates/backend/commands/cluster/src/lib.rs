@@ -86,6 +86,7 @@ pub fn make_new_heap<'mcx>(
             reloptions: reloptions.as_deref(),
             // cluster.c:777 relrewrite = OIDOldHeap.
             relrewrite: old_heap_oid,
+            use_user_acl: false,
             is_internal: true,
         },
         &old_heap.rd_att,

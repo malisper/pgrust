@@ -305,23 +305,16 @@ pub fn CheckAttributeType<'mcx>(
     Ok(())
 }
 
-pub fn heap_create<'mcx>(
-    mcx: Mcx<'mcx>,
+// heap.c:314-326 (heap_create). heap_create_with_catalog also runs it ahead
+// of its hoisted AssignTypeArrayOid, keeping C's error order in binary
+// upgrade mode (heap.c:1330 before :1368).
+fn check_system_namespace_create(
+    mcx: Mcx<'_>,
     relname: &str,
     relnamespace: Oid,
-    reltablespace: Oid,
-    relid: Oid,
-    reltype: Oid,
-    relfilenumber: types_core::RelFileNumber,
-    accessmtd: Oid,
-    tupdesc: &TupleDescData<'_>,
     relkind: u8,
-    relpersistence: u8,
-    shared_relation: bool,
-    mapped_relation: bool,
     allow_system_table_mods: bool,
-    create_storage: bool,
-) -> PgResult<(Rc<RelationData<'static>>, TransactionId, MultiXactId)> {
+) -> PgResult<()> {
     if ((catalog::IsCatalogNamespace(relnamespace) && relkind != types_rel::RELKIND_INDEX)
         || catalog::IsToastNamespace(relnamespace))
         && !allow_system_table_mods
@@ -339,6 +332,27 @@ pub fn heap_create<'mcx>(
             .with_detail("System catalog modifications are currently disallowed."),
         ));
     }
+    Ok(())
+}
+
+pub fn heap_create<'mcx>(
+    mcx: Mcx<'mcx>,
+    relname: &str,
+    relnamespace: Oid,
+    reltablespace: Oid,
+    relid: Oid,
+    reltype: Oid,
+    relfilenumber: types_core::RelFileNumber,
+    accessmtd: Oid,
+    tupdesc: &TupleDescData<'_>,
+    relkind: u8,
+    relpersistence: u8,
+    shared_relation: bool,
+    mapped_relation: bool,
+    allow_system_table_mods: bool,
+    create_storage: bool,
+) -> PgResult<(Rc<RelationData<'static>>, TransactionId, MultiXactId)> {
+    check_system_namespace_create(mcx, relname, relnamespace, relkind, allow_system_table_mods)?;
 
     let mut reltablespace = reltablespace;
     if !RELKIND_HAS_TABLESPACE(relkind) {
@@ -696,6 +710,9 @@ pub struct HeapCreateParams<'a> {
     // pg_class.relrewrite of a transient heap (cluster.c make_new_heap) or of
     // its toast table (toasting.c OIDOldToast); InvalidOid otherwise.
     pub relrewrite: Oid,
+    // heap.c use_user_acl: false for toast tables (toasting.c) and rewrite
+    // heaps (cluster.c make_new_heap), whose relacl stays NULL.
+    pub use_user_acl: bool,
     pub is_internal: bool,
 }
 
@@ -814,6 +831,13 @@ pub fn heap_create_with_catalog<'mcx>(
     }
     let relid = relid;
     lmgr::LockRelationOid(relid, AccessExclusiveLock)?;
+    check_system_namespace_create(
+        mcx,
+        p.relname,
+        p.relnamespace,
+        p.relkind,
+        p.allow_system_table_mods,
+    )?;
 
     // C allocates the array-type oid after heap_create and the composite oid
     // inside TypeCreate; both are hoisted here so the relcache entry can carry
@@ -851,10 +875,10 @@ pub fn heap_create_with_catalog<'mcx>(
         (InvalidOid, InvalidOid)
     };
 
-    // C's use_user_acl=false callers are exactly the toast path, which the
-    // relkind switch already maps to NULL. heap.c:1300-1308: RELATION, VIEW,
-    // MATVIEW, FOREIGN_TABLE and PARTITIONED_TABLE share OBJECT_TABLE.
+    // heap.c:1297-1311: RELATION, VIEW, MATVIEW, FOREIGN_TABLE and
+    // PARTITIONED_TABLE share OBJECT_TABLE.
     let relacl: Option<mcx::PgVec<'mcx, u8>> = match p.relkind {
+        _ if !p.use_user_acl => None,
         RELKIND_RELATION
         | RELKIND_VIEW
         | types_rel::RELKIND_MATVIEW

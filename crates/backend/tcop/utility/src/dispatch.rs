@@ -1136,7 +1136,10 @@ fn slow_switch<'mcx>(
             // C: ExecAlterDefaultPrivilegesStmt + EventTriggerCollectAlterDefPrivs
             // (utility.c:1823); commandCollected = true.
             let stmt = parsetree.as_alter_default_privileges_stmt().unwrap();
-            aclchk::ExecAlterDefaultPrivilegesStmt(mcx, stmt)?;
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            pstate.p_sourcetext = Some(source_text.as_bytes());
+            aclchk::ExecAlterDefaultPrivilegesStmt(mcx, Some(&pstate), stmt)?;
+            parser_small1::free_parsestate(pstate)?;
             event_trigger::EventTriggerCollectAlterDefPrivs(
                 CreateCommandTag(parsetree),
                 stmt.action.expect("AlterDefaultPrivilegesStmt.action").objtype,

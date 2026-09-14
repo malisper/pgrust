@@ -316,17 +316,16 @@ fn ConstructTupleDescriptor<'mcx>(
         } else {
             let indexkey = indexpr_item.next().expect("too few entries in indexprs list");
             let keyType = nodes_core::expr_type(indexkey);
-            // index.c ConstructTupleDescriptor calls CheckAttributeType(flags=0),
-            // rejecting any pseudo-type result (e.g. an anonymous record).
-            if lsyscache::get_typtype(keyType)? == b'p' as i8 {
-                return Err(err(
-                    format!(
-                        "column \"{colname}\" has pseudo-type {}",
-                        format_type::format_type_be(keyType)?
-                    ),
-                    types_error::ERRCODE_INVALID_TABLE_DEFINITION,
-                ));
-            }
+            let attcollation = if i < numkeyatts { collationIds[i] } else { InvalidOid };
+            let mut containing_rowtypes = mcx::PgVec::new_in(mcx);
+            catalog_heap::CheckAttributeType(
+                mcx,
+                colname,
+                keyType,
+                attcollation,
+                &mut containing_rowtypes,
+                0,
+            )?;
             let Some(shape) = syscache_seams::lookup_pg_type_shape::call(keyType)? else {
                 return Err(crate::type_lookup_failed(keyType));
             };
