@@ -622,14 +622,14 @@ fn assign_collations_walker<'mcx>(
                 }
                 NodeTag::T_JsonExpr => {
                     let j = node.as_json_expr().unwrap();
-                    for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
-                        .into_iter()
-                        .flatten()
-                    {
+                    for e in [j.formatted_expr, j.path_spec].into_iter().flatten() {
                         assign_collations_walker(e, &mut loccontext)?;
                     }
                     for v in &j.passing_values {
                         assign_collations_walker(v, &mut loccontext)?;
+                    }
+                    for e in [j.on_empty, j.on_error].into_iter().flatten() {
+                        assign_collations_walker(e, &mut loccontext)?;
                     }
                 }
                 NodeTag::T_JsonBehavior => {
@@ -637,13 +637,23 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(e, &mut loccontext)?;
                     }
                 }
+                // nodeFuncs.c:2332-2335 walks named_args and args as two
+                // List nodes, each merging its own state upward.
                 NodeTag::T_XmlExpr => {
                     let x = node.as_xml_expr().unwrap();
-                    for arg in &x.named_args {
-                        assign_collations_walker(arg, &mut loccontext)?;
-                    }
-                    for arg in &x.args {
-                        assign_collations_walker(arg, &mut loccontext)?;
+                    for list in [&x.named_args, &x.args] {
+                        let mut listcontext = AssignCollationsCtx::new(context.mcx, context.pstate);
+                        for arg in list {
+                            assign_collations_walker(arg, &mut listcontext)?;
+                        }
+                        merge_collation_state(
+                            listcontext.collation,
+                            listcontext.strength,
+                            listcontext.location,
+                            listcontext.collation2,
+                            listcontext.location2,
+                            &mut loccontext,
+                        )?;
                     }
                 }
                 _ => unreachable!(),

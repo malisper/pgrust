@@ -703,7 +703,6 @@ fn check_generic_type_consistency(
                 if actual_type == UNKNOWNOID {
                     continue;
                 }
-                actual_type = lsyscache::getBaseType(actual_type)?;
                 anycompatible_actual_types[n_anycompatible_args] = actual_type;
                 n_anycompatible_args += 1;
             }

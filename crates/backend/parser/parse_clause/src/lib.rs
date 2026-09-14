@@ -2215,14 +2215,12 @@ fn resolve_arbiter_position(
     e: Box<PgError>,
     location: ParseLoc,
 ) -> Box<PgError> {
-    if e.cursor_position().is_some() {
-        return e;
-    }
-    Box::new((*e).with_cursor_position(parser_errposition(
-        pstate,
+    parser_small1::attach_parser_errposition_source(
+        pstate.p_sourcetext,
         location,
         mbutils::GetDatabaseEncoding(),
-    )))
+        e,
+    )
 }
 
 pub fn transformLimitClause<'mcx>(

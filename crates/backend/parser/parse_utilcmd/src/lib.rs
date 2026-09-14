@@ -1922,6 +1922,10 @@ pub fn transformCreateStmt<'mcx>(
         nspid = n;
         existing_relid = e;
         adjusted_persistence = p;
+    } else if catalog_namespace::my_temp_namespace() == InvalidOid {
+        // namespace.c:684-688 -> InitTempTableNamespace: the TEMP privilege
+        // check still runs here, before the columns are looked at.
+        catalog_namespace::check_temp_table_namespace_access().map_err(at_rel)?;
     }
     if stmt.if_not_exists {
         let existing_relid = if probe {
@@ -2977,6 +2981,19 @@ fn transform_existing_index_constraint<'mcx>(
             including.lappend(mcx, Node::mk_string(mcx, attname)?)?;
         }
     }
+    // parse_utilcmd.c:2753-2769: the extracted keys still go through the
+    // common key loop, which rejects a column named twice.
+    for (i, keynode) in keys.iter().enumerate() {
+        let key = keynode.as_string().expect("constraint keys").sval;
+        if keys.iter().take(i).any(|k| k.as_string().expect("constraint keys").sval == key) {
+            return Err(duplicate_key_column(
+                key,
+                index.primary,
+                Some(src.as_bytes()),
+                constraint.location,
+            ));
+        }
+    }
     // SAFETY: parse tree is statement-owned; no derived refs live.
     unsafe {
         cnode
@@ -3488,7 +3505,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 &mut nnconstraints,
                 &mut ixconstraints,
                 &mut fkconstraints,
-                false,
+                rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE,
                 false,
                 false,
                 rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE,

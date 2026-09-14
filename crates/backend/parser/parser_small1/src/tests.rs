@@ -619,3 +619,33 @@ fn udeescape_non_utf8_server_runs_the_conversion_lane() {
 
     mbutils::SetDatabaseEncoding(saved).unwrap();
 }
+
+#[test]
+fn attach_parser_errposition_source_skips_query_canceled() {
+    // parse_node.c:174: pcb_error_callback leaves ERRCODE_QUERY_CANCELED
+    // without a cursor; everything else gets the location's position.
+    use alloc::boxed::Box;
+    use types_error::{PgError, ERRCODE_QUERY_CANCELED, ERRCODE_UNDEFINED_TABLE, ERROR};
+    let src = Some(b"CREATE TABLE dst (LIKE src)".as_slice());
+    let cancel = Box::new(
+        PgError::new(ERROR, "canceling statement due to statement timeout")
+            .with_sqlstate(ERRCODE_QUERY_CANCELED),
+    );
+    let e = crate::attach_parser_errposition_source(src, 23, PG_UTF8, cancel);
+    assert_eq!(e.cursor_position(), None);
+
+    let missing = Box::new(
+        PgError::new(ERROR, "relation \"src\" does not exist")
+            .with_sqlstate(ERRCODE_UNDEFINED_TABLE),
+    );
+    let e = crate::attach_parser_errposition_source(src, 23, PG_UTF8, missing);
+    assert_eq!(e.cursor_position(), Some(24));
+
+    let positioned = Box::new(
+        PgError::new(ERROR, "x")
+            .with_sqlstate(ERRCODE_UNDEFINED_TABLE)
+            .with_cursor_position(3),
+    );
+    let e = crate::attach_parser_errposition_source(src, 23, PG_UTF8, positioned);
+    assert_eq!(e.cursor_position(), Some(3));
+}

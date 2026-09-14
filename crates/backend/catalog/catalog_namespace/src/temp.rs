@@ -46,9 +46,9 @@ pub fn AccessTempTableNamespace(mcx: Mcx<'_>, force: bool) -> PgResult<()> {
     InitTempTableNamespace(mcx)
 }
 
-fn InitTempTableNamespace(mcx: Mcx<'_>) -> PgResult<()> {
-    debug_assert!(!OidIsValid(my_temp_namespace()));
-
+// namespace.c:4406-4438, the InitTempTableNamespace guards that run before
+// anything is created; transformCreateStmt applies them at analysis time.
+pub fn check_temp_table_namespace_access() -> PgResult<()> {
     let dbid = init_small::globals::MyDatabaseId();
     if aclchk_seams::object_aclcheck::call(
         DATABASE_RELATION_ID,
@@ -91,6 +91,12 @@ fn InitTempTableNamespace(mcx: Mcx<'_>) -> PgResult<()> {
             .with_sqlstate(ERRCODE_READ_ONLY_SQL_TRANSACTION),
         ));
     }
+    Ok(())
+}
+
+fn InitTempTableNamespace(mcx: Mcx<'_>) -> PgResult<()> {
+    debug_assert!(!OidIsValid(my_temp_namespace()));
+    check_temp_table_namespace_access()?;
 
     let proc_number = init_small::globals::MyProcNumber();
 

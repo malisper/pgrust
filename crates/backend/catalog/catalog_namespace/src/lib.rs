@@ -29,7 +29,8 @@ mod tests;
 mod visibility;
 
 pub use temp::{
-    AccessTempTableNamespace, GetTempTableNamespace, QualifiedNameGetCreationNamespace,
+    check_temp_table_namespace_access, AccessTempTableNamespace, GetTempTableNamespace,
+    QualifiedNameGetCreationNamespace,
     RangeVarAdjustRelationPersistence, RangeVarGetAndCheckCreationNamespace,
     RangeVarGetCreationNamespace, ResetTempTableNamespace,
 };

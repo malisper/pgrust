@@ -152,7 +152,8 @@ pub mod udeescape;
 
 pub use parse_enr::{get_visible_ENR, name_matches_visible_ENR};
 pub use parse_node::{
-    arm_parser_errposition, cancel_parser_errposition_callback, free_parsestate, make_const, make_parsestate,
+    arm_parser_errposition, attach_parser_errposition_source, cancel_parser_errposition_callback,
+    free_parsestate, make_const, make_parsestate,
     parser_errposition, setup_parser_errposition_callback, transformContainerSubscripts,
     transformContainerType, ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState, PreColumnRefHook,
 };

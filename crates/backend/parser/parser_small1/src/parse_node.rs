@@ -301,6 +301,24 @@ fn attach_parser_errposition(
     Box::new((*e).with_cursor_position(pos))
 }
 
+// pcb_error_callback for callers holding the source text instead of a
+// ParseState; an error that already carries a cursor keeps it.
+pub fn attach_parser_errposition_source(
+    src: Option<&[u8]>,
+    location: i32,
+    encoding: pg_enc,
+    e: Box<PgError>,
+) -> Box<PgError> {
+    if e.sqlstate() == ERRCODE_QUERY_CANCELED || e.cursor_position().is_some() {
+        return e;
+    }
+    let pos = parser_errposition_source(src, location, encoding);
+    if pos <= 0 {
+        return e;
+    }
+    Box::new((*e).with_cursor_position(pos))
+}
+
 pub fn transformContainerType(
     container_type: &mut Oid,
     container_typmod: &mut i32,

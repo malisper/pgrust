@@ -153,18 +153,13 @@ pub(crate) fn transformTableLikeClause<'mcx>(
     let src_rv = tlc.relation.expect("TableLikeClause.relation");
     let location = src_rv.location;
 
-    let attach_errpos = |mut e: Box<PgError>| -> Box<PgError> {
-        if e.cursor_position().is_none() {
-            let pos = parser_small1::parser_errposition_source(
-                Some(query_string.as_bytes()),
-                location,
-                mbutils::GetDatabaseEncoding(),
-            );
-            if pos > 0 {
-                e = Box::new((*e).with_cursor_position(pos));
-            }
-        }
-        e
+    let attach_errpos = |e: Box<PgError>| -> Box<PgError> {
+        parser_small1::attach_parser_errposition_source(
+            Some(query_string.as_bytes()),
+            location,
+            mbutils::GetDatabaseEncoding(),
+            e,
+        )
     };
 
     let rv = rel_vocab_rv(src_rv);

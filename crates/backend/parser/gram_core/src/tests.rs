@@ -3662,3 +3662,20 @@ fn sql_ascii_escape_literal_with_non_utf8_bytes_errors_cleanly() {
     };
     assert_eq!(s.sval, "\u{e9}");
 }
+
+#[test]
+fn duplicate_order_by_cursor_through_exprlocation_arms() {
+    // gram.y:19044 reports the second ORDER BY through exprLocation;
+    // nodeFuncs.c:1412 (GroupingFunc) and :1565 (XmlExpr) carry positions.
+    let e = parse_err("(SELECT 1 ORDER BY 1) ORDER BY GROUPING(1);");
+    assert_eq!(e.message(), "multiple ORDER BY clauses not allowed");
+    assert_eq!(e.cursor_position(), Some(32));
+    let e = parse_err("(SELECT 1 ORDER BY 1) ORDER BY XMLPARSE(DOCUMENT '<a/>');");
+    assert_eq!(e.cursor_position(), Some(32));
+    let e = parse_err("(SELECT 1 ORDER BY 1) ORDER BY XMLSERIALIZE(CONTENT x AS text);");
+    assert_eq!(e.cursor_position(), Some(32));
+    let e = parse_err("(SELECT 1 ORDER BY 1) ORDER BY (a).b;");
+    assert_eq!(e.cursor_position(), Some(33));
+    let e = parse_err("(SELECT 1 ORDER BY 1) ORDER BY '1' IS JSON;");
+    assert_eq!(e.cursor_position(), Some(32));
+}

@@ -892,9 +892,6 @@ pub fn parseCheckAggregates<'mcx>(
     for tle in &qry.targetList {
         finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, 0, tle)?;
     }
-    if let Some(having) = qry.havingQual {
-        finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, 0, having)?;
-    }
     let mut constraint_deps: PgVec<'_, Oid> = PgVec::new_in(mcx);
     let (new_tlist, new_having) = {
         let mut ctx = SgcCtx {
@@ -922,9 +919,12 @@ pub fn parseCheckAggregates<'mcx>(
             let substituted = sgc_mutate(&mut ctx, clause)?.unwrap_or(clause);
             new_tlist.lappend(mcx, substituted)?;
         }
+        // parse_agg.c:1313-1318: HAVING is finalized only after the target
+        // list has been checked and substituted.
         let new_having = match ctx.qry.havingQual {
             None => None,
             Some(having) => {
+                finalize_grouping_exprs(mcx, ctx.pstate, ctx.qry, grp, has_join_rtes, hnvg, 0, having)?;
                 let clause = if has_join_rtes {
                     vars::flatten_join_alias_vars(
                         mcx,
@@ -1542,15 +1542,18 @@ fn sgc_mutate<'mcx>(
             ctx.sublevels_up -= 1;
             Ok(None)
         }
-        // The generic engine keeps SubLink.subselect shared; grouped outer
-        // Vars inside are rewritten in place before testexpr goes through it.
+        // The generic engine keeps SubLink.subselect shared; testexpr goes
+        // through it first (nodeFuncs.c:3171), then the grouped outer Vars
+        // inside the subselect are rewritten in place.
         NodeTag::T_SubLink => {
             let sl = node.as_sub_link().unwrap();
             debug_assert!(sl.subselect.node_tag() == NodeTag::T_Query);
+            let out =
+                nodes_core::expression_tree_mutator(ctx.mcx, node, &mut |n| sgc_mutate(ctx, n))?;
             ctx.sublevels_up += 1;
             sgc_query_inplace(ctx, sl.subselect)?;
             ctx.sublevels_up -= 1;
-            nodes_core::expression_tree_mutator(ctx.mcx, node, &mut |n| sgc_mutate(ctx, n))
+            Ok(out)
         }
         _ => nodes_core::expression_tree_mutator(ctx.mcx, node, &mut |n| sgc_mutate(ctx, n)),
     }

@@ -12238,6 +12238,18 @@ fn expr_location(n: Node<'_>) -> i32 {
         leftmost_loc(bt.location, expr_location_opt(bt.arg))
     } else if let Some(cc) = n.as_collate_clause() {
         expr_location_opt(cc.arg)
+    } else if let Some(g) = n.as_grouping_func() {
+        g.location
+    } else if let Some(x) = n.as_xml_expr() {
+        leftmost_loc(x.location, expr_location_list(&x.args))
+    } else if let Some(xs) = n.as_xml_serialize() {
+        xs.location
+    } else if let Some(na) = n.as_named_arg_expr() {
+        leftmost_loc(na.location, expr_location_opt(na.arg))
+    } else if let Some(ind) = n.as_a_indirection() {
+        expr_location_opt(ind.arg)
+    } else if let Some(jp) = n.as_json_is_predicate() {
+        jp.location
     } else {
         -1
     }

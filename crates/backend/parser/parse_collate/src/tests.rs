@@ -218,3 +218,57 @@ fn unrecognized_aggkind_is_an_internal_error() {
         assign_expr_collations(mcx, &pstate, agg).unwrap();
     }
 }
+
+#[test]
+fn xmlexpr_named_args_and_args_merge_as_separate_lists() {
+    // nodeFuncs.c:2332-2335 walks XmlExpr.named_args and .args as two List
+    // nodes (parse_collate.c:528-540), so an explicit-collation conflict is
+    // found inside the content list ("C" vs "POSIX" at the last COLLATE)
+    // before the attribute list's state is merged in.
+    install_type_shape_fixture();
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| syscache_seams::lookup_pg_collation_shape::set(|_| Ok(None)));
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let pstate = make_parsestate(mcx, None);
+
+    let collated = |coll: Oid, location: i32| {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::CollateExpr {
+                arg: collated_var(mcx, DEFAULT_COLLATION_OID),
+                collOid: coll,
+                location,
+            },
+        )
+        .unwrap()
+    };
+    let xml = Node::mk(
+        mcx,
+        types_nodes::primnodes::XmlExpr {
+            op: types_nodes::primnodes::XmlExprOp::IS_XMLELEMENT,
+            name: Some("e"),
+            named_args: NodeList::make1(mcx, collated(POSIX_COLLATION_OID, 40)).unwrap(),
+            arg_names: NodeList::nil(),
+            args: NodeList::make2(
+                mcx,
+                collated(C_COLLATION_OID, 60),
+                collated(POSIX_COLLATION_OID, 80),
+            )
+            .unwrap(),
+            xmloption: types_nodes::primnodes::XmlOptionType::XMLOPTION_CONTENT,
+            indent: false,
+            r#type: types_core::catalog::XMLOID,
+            typmod: -1,
+            location: 7,
+        },
+    )
+    .unwrap();
+    let err = assign_expr_collations(mcx, &pstate, xml).unwrap_err();
+    assert_eq!(
+        err.message(),
+        format!(
+            "collation mismatch between explicit collations \"{C_COLLATION_OID}\" and \"{POSIX_COLLATION_OID}\""
+        )
+    );
+}
