@@ -193,8 +193,19 @@ fn validate_locale_threadsafe(category: c_int, locale: &str) -> Option<String> {
     Some(if locale.is_empty() {
         resolve_env_locale_name(category)
     } else {
-        locale.to_owned()
+        canonical_locale_name(locale).to_owned()
     })
+}
+
+// setlocale's returned name, which newlocale cannot supply: glibc and musl
+// answer "C" for the "POSIX" alias (createdb compares it against the
+// template's stored datcollate); macOS libc returns the alias unchanged.
+pub(crate) fn canonical_locale_name(locale: &str) -> &str {
+    if cfg!(target_os = "linux") && locale == "POSIX" {
+        "C"
+    } else {
+        locale
+    }
 }
 
 fn setenv(name: &str, value: &str) -> bool {

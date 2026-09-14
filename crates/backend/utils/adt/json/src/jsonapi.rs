@@ -874,9 +874,11 @@ impl<'src, 'mcx> JsonLexDe<'src, 'mcx> {
                     }
                     // C: pg_unicode_to_server_noerror — its ASCII and UTF8
                     // server-encoding arms inlined to skip the arena round trip.
+                    // Backend lexers carry GetDatabaseEncoding(); a frontend
+                    // caller (parse_manifest) names UTF8 (jsonapi.c:2136).
                     if ch <= 0x7F {
                         self.strval.push(ch as u8);
-                    } else if mbutils::GetDatabaseEncoding() == wchar::PG_UTF8 {
+                    } else if self.lex.encoding == wchar::PG_UTF8 {
                         let mut buf = [0u8; 4];
                         wchar::unicode_to_utf8(ch, &mut buf);
                         let n = wchar::pg_utf_mblen(&buf) as usize;

@@ -33,16 +33,37 @@ fn accum_field<'m>(
 
 // C split_text (varlena.c): field boundaries only, shared by the array
 // (text_to_array) and table/SRF (text_to_table) output arms below.
-#[derive(Debug)]
+// One text_to_table row: a slice of the input string (C materialises the
+// fields through a tuplestore; a per-field copy would cost 33,554,432
+// single-character fields over 1 GB of descriptors).
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct TableField {
-    bytes: Vec<u8>,
+    start: u32,
+    len: u32,
     is_null: bool,
 }
 
-pub(crate) fn split_fields(fcinfo: &Fcinfo) -> PgResult<Vec<TableField>> {
+#[derive(Debug)]
+pub(crate) struct TableFields {
+    input: Vec<u8>,
+    fields: Vec<TableField>,
+}
+
+impl TableFields {
+    pub(crate) fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    pub(crate) fn get(&self, idx: usize) -> Option<(&[u8], bool)> {
+        let f = self.fields.get(idx)?;
+        Some((&self.input[f.start as usize..(f.start + f.len) as usize], f.is_null))
+    }
+}
+
+pub(crate) fn split_fields(fcinfo: &Fcinfo) -> PgResult<TableFields> {
     let mut out = Vec::new();
     if fcinfo.argisnull(0) {
-        return Ok(out);
+        return Ok(TableFields { input: Vec::new(), fields: out });
     }
     // SAFETY: arg 0 checked non-null; a live text varlena.
     let inputstring: Vec<u8> = unsafe { fcinfo.arg_varlena_packed(0) }?.data().to_vec();
@@ -61,20 +82,21 @@ pub(crate) fn split_fields(fcinfo: &Fcinfo) -> PgResult<Vec<TableField>> {
     let collation = fcinfo.get_collation();
     let ns = null_string.as_deref();
 
-    // C materialises through a tuplestore: rows are admitted under
-    // MaxAllocSize and every growth is fallible, so an oversized set is an
-    // ERROR, never an abort.
+    // C materialises through a tuplestore whose growth is fallible, so an
+    // oversized set is an ERROR, never an abort.
+    let base = inputstring.as_ptr() as usize;
     let push = |out: &mut Vec<TableField>, field: &[u8]| -> PgResult<()> {
         let is_null = match ns {
             Some(n) => texteq(field, n, collation)?,
             None => false,
         };
-        ::mcx::check_alloc_size((out.len() + 1).saturating_mul(core::mem::size_of::<TableField>()))?;
-        out.try_reserve(1).map_err(|_| ::mcx::oom_named("text_to_table", 32))?;
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(field.len()).map_err(|_| ::mcx::oom_named("text_to_table", field.len()))?;
-        bytes.extend_from_slice(field);
-        out.push(TableField { bytes, is_null });
+        out.try_reserve(1)
+            .map_err(|_| ::mcx::oom_named("text_to_table", core::mem::size_of::<TableField>()))?;
+        out.push(TableField {
+            start: (field.as_ptr() as usize - base) as u32,
+            len: field.len() as u32,
+            is_null,
+        });
         Ok(())
     };
 
@@ -115,7 +137,7 @@ pub(crate) fn split_fields(fcinfo: &Fcinfo) -> PgResult<Vec<TableField>> {
             }
         }
     }
-    Ok(out)
+    Ok(TableFields { input: inputstring, fields: out })
 }
 
 // C: text_to_table/text_to_table_null — same field split as text_to_array,
@@ -136,13 +158,13 @@ pub fn fc_text_to_table(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
         .user_fctx
         .as_ref()
         .expect("text_to_table: fields set at first call")
-        .downcast_ref::<Vec<TableField>>()
-        .expect("text_to_table: user_fctx is Vec<TableField>");
+        .downcast_ref::<TableFields>()
+        .expect("text_to_table: user_fctx is TableFields");
     match fields.get(idx) {
-        Some(field) if field.is_null => Ok(funcapi_srf::srf_return_next_null(flinfo, fcinfo)),
-        Some(field) => {
+        Some((_, true)) => Ok(funcapi_srf::srf_return_next_null(flinfo, fcinfo)),
+        Some((bytes, false)) => {
             let mcx = fcinfo.result_mcx();
-            let t = types_fmgr::varlena_result(crate::cstring_to_text(mcx, &field.bytes)?);
+            let t = types_fmgr::varlena_result(crate::cstring_to_text(mcx, bytes)?);
             Ok(funcapi_srf::srf_return_next(flinfo, fcinfo, t))
         }
         None => Ok(funcapi_srf::srf_return_done(flinfo, fcinfo)),

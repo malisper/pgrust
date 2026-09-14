@@ -478,7 +478,7 @@ pub fn from_char_seq_search<'mcx>(
 
 #[inline]
 pub fn is_scanner_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 #[cfg(test)]
@@ -512,5 +512,30 @@ mod tests {
         assert_eq!(search("ocak 1"), (0, 4));
         assert_eq!(search("aral 2010"), (-1, 0));
         assert_eq!(search(""), (-1, 0));
+    }
+
+    // scansup.c scanner_isspace: the six C-locale whitespace bytes, so the
+    // "invalid value" excerpt stops at a vertical tab too.
+    #[test]
+    fn seq_search_error_excerpt_stops_at_scanner_whitespace() {
+        for c in [b' ', b'\t', b'\n', b'\r', 0x0b, 0x0c] {
+            assert!(is_scanner_space(c), "{c:#x}");
+        }
+        assert!(!is_scanner_space(b'x'));
+        let ctx = ::mcx::MemoryContext::new("t");
+        let mut dest = 0;
+        let mut cur = FromCharCursor::new(b"Foo\x0bbar");
+        let err = from_char_seq_search(
+            ctx.mcx(),
+            &mut dest,
+            &mut cur,
+            &["Jan", "Feb"],
+            None,
+            ::types_core::DEFAULT_COLLATION_OID,
+            "Mon",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.message(), "invalid value \"Foo\" for \"Mon\"");
     }
 }

@@ -44,6 +44,22 @@ fn parse_xml_decl_absent_and_pi() {
     assert_eq!((rc, len), (0, 0));
 }
 
+// xmlStrchr stops at NUL: a version quote never closed before an embedded
+// NUL (reachable through xml_recv) leaves the declaration unterminated and
+// the encoding absent, instead of reading an encoding from past the NUL.
+#[test]
+fn parse_xml_decl_quote_search_stops_at_nul() {
+    let (rc, _, version, encoding, _) =
+        decl(b"<?xml version='1.0\0' encoding='bogus'?><a/>");
+    assert_eq!(rc, XML_ERR_VERSION_MISSING);
+    assert!(version.is_none());
+    assert!(encoding.is_none());
+    let (rc, _, _, encoding, _) =
+        decl(b"<?xml version='1.0' encoding='bo\0gus'?><a/>");
+    assert_eq!(rc, XML_ERR_MISSING_ENCODING);
+    assert!(encoding.is_none());
+}
+
 #[test]
 fn xpath_numbers_print_like_float8out() {
     let eval = |expr: &[u8]| {

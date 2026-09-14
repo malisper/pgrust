@@ -1,6 +1,6 @@
 use ::datum::Datum;
 use ::types_core::BackendType;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_fmgr::{byref_result, varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
 use pgstat::io::{
@@ -224,8 +224,12 @@ fn record_datum(
 ) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
     let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
-    debug_assert_eq!(resolved.class, funcapi::TypeFuncClass::Composite);
-    let tupdesc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
+    let Some(tupdesc) = resolved
+        .result_tuple_desc
+        .filter(|_| resolved.class == funcapi::TypeFuncClass::Composite)
+    else {
+        return Err(Box::new(PgError::error("return type must be a row type")));
+    };
     let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, values, nulls)?;
     let d = Datum::from_usize(tup.header_ptr() as usize);
     core::mem::forget(tup); // leak into the arming context (C palloc ownership)

@@ -438,6 +438,22 @@ fn comparisons() {
     assert_eq!(uuid_internal_cmp(&lo, &lo), 0);
 }
 
+// uuid_cmp(a, b) is uuid_internal_cmp's raw memcmp result (uuid.c:287):
+// glibc reports the first differing bytes' difference, not a sign.
+#[test]
+fn cmp_returns_first_differing_byte_difference() {
+    let z = parse("00000000-0000-0000-0000-000000000000");
+    let two = parse("00000000-0000-0000-0000-000000000002");
+    let ff = parse("ff000000-0000-0000-0000-000000000000");
+    let mixed = parse("00000000-0000-0000-0000-0300000000ff");
+    assert_eq!(uuid_internal_cmp(&z, &two), -2);
+    assert_eq!(uuid_internal_cmp(&two, &z), 2);
+    assert_eq!(uuid_internal_cmp(&ff, &z), 255);
+    assert_eq!(uuid_internal_cmp(&z, &ff), -255);
+    assert_eq!(uuid_internal_cmp(&mixed, &two), 3);
+    assert_eq!(uuid_internal_cmp(&two, &two), 0);
+}
+
 #[test]
 fn binary_wire_round_trip() {
     use ::mcx::MemoryContext;

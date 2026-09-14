@@ -269,6 +269,18 @@ fn byteaout_hex_and_escape() {
     assert!(bytea::byteaout_into(b"x", 99, &mut buf).is_err());
 }
 
+// varlena.c:406: the hex arm pallocs len*2+3 outright, so a 536870911-byte
+// bytea fails with palloc's XX000 (the escape arm keeps its own 54000).
+#[test]
+fn byteaout_hex_over_max_alloc_is_palloc_error() {
+    let v = vec![0u8; 536870911];
+    let mut buf = Vec::new();
+    let err = bytea::byteaout_into(&v, guc_tables::consts::BYTEA_OUTPUT_HEX, &mut buf).unwrap_err();
+    assert_eq!(err.message(), "invalid memory alloc request size 1073741825");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INTERNAL_ERROR);
+    bytea::byteaout_into(&v, guc_tables::consts::BYTEA_OUTPUT_ESCAPE, &mut buf).unwrap_err();
+}
+
 #[test]
 fn byteain_hex_digit_message_is_c_exact() {
     install_mb_for_levenshtein();
@@ -1790,5 +1802,34 @@ mod interrupts {
         arm_cancel();
         assert_canceled(split_fields(&fcinfo).unwrap_err());
         assert_eq!(split_fields(&fcinfo).unwrap().len(), 5);
+    }
+
+    // string_to_table(repeat('x', 33554432), NULL) returns 33,554,432 rows in
+    // C (tuplestore); a per-field Vec<u8> descriptor set cost 1 GB and hit
+    // MaxAllocSize. Fields are now (offset, len) slices of the one input.
+    #[test]
+    fn text_to_table_fields_are_input_slices() {
+        install();
+        assert_eq!(core::mem::size_of::<crate::split_text::TableField>(), 12);
+        let input = text_image(b"a,,c");
+        let sep = text_image(b",");
+        let ns = text_image(b"");
+        let mut fcinfo = LocalFcinfo::<3>::new(C);
+        fcinfo.set_arg(0, Datum::from_usize(input.as_ptr() as usize));
+        fcinfo.set_arg(1, Datum::from_usize(sep.as_ptr() as usize));
+        fcinfo.set_arg(2, Datum::from_usize(ns.as_ptr() as usize));
+        let fields = split_fields(&fcinfo).unwrap();
+        assert_eq!(fields.len(), 3);
+        let rows: Vec<(Vec<u8>, bool)> =
+            (0..3).map(|i| fields.get(i).map(|(b, n)| (b.to_vec(), n)).unwrap()).collect();
+        assert_eq!(rows, vec![(b"a".to_vec(), false), (b"".to_vec(), true), (b"c".to_vec(), false)]);
+        assert!(fields.get(3).is_none());
+        let big = text_image(&vec![b'x'; 1 << 20]);
+        let mut fcinfo = LocalFcinfo::<2>::new(C);
+        fcinfo.set_arg(0, Datum::from_usize(big.as_ptr() as usize));
+        fcinfo.set_arg_null(1);
+        let fields = split_fields(&fcinfo).unwrap();
+        assert_eq!(fields.len(), 1 << 20);
+        assert_eq!(fields.get((1 << 20) - 1).unwrap(), (b"x".as_slice(), false));
     }
 }

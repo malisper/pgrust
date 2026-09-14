@@ -236,23 +236,30 @@ pub fn parse_snapshot<'mcx>(
     Ok(Some(snapshot_image(mcx, xmin, xmax, &xips)?))
 }
 
+// xid8funcs.c:442 appends through a StringInfo: the buffer grows with the
+// decimal text actually written, so only the output itself is held to
+// MaxAllocSize, never a 21-bytes-per-xip estimate.
 pub fn snapshot_out_bytes<'mcx>(mcx: Mcx<'mcx>, snap: &SnapView<'_>) -> PgResult<PgVec<'mcx, u8>> {
     let nxip = snap.nxip() as usize;
-    let mut out: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, 2 + 21 * (2 + nxip))?;
-    push_u64(&mut out, snap.xmin());
-    out.push(b':');
-    push_u64(&mut out, snap.xmax());
-    out.push(b':');
+    let mut out: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, out_reservation(nxip))?;
+    push_u64(&mut out, snap.xmin())?;
+    ::mcx::vec_append_bytes(&mut out, b":")?;
+    push_u64(&mut out, snap.xmax())?;
+    ::mcx::vec_append_bytes(&mut out, b":")?;
     for i in 0..nxip {
         if i > 0 {
-            out.push(b',');
+            ::mcx::vec_append_bytes(&mut out, b",")?;
         }
-        push_u64(&mut out, snap.xip(i));
+        push_u64(&mut out, snap.xip(i))?;
     }
     Ok(out)
 }
 
-fn push_u64(out: &mut PgVec<'_, u8>, v: u64) {
+fn out_reservation(nxip: usize) -> usize {
+    (2 + 21 * (2 + nxip)).min(1024 * 1024)
+}
+
+fn push_u64(out: &mut PgVec<'_, u8>, v: u64) -> PgResult<()> {
     let mut buf = [0u8; 20];
     let mut i = buf.len();
     let mut v = v;
@@ -264,7 +271,7 @@ fn push_u64(out: &mut PgVec<'_, u8>, v: u64) {
             break;
         }
     }
-    out.extend_from_slice(&buf[i..]);
+    ::mcx::vec_append_bytes(out, &buf[i..])
 }
 
 #[track_caller]

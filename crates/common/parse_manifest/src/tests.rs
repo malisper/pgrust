@@ -197,6 +197,21 @@ fn accepts_version_1_manifest() {
     assert!(m.wal_ranges.is_empty());
 }
 
+// jsonapi.c:2136 (FRONTEND): a manifest is lexed as UTF8, so a non-ASCII
+// Unicode escape in a Path decodes to UTF-8 bytes regardless of the
+// (unset, SQL_ASCII) database encoding pg_combinebackup never sets.
+#[test]
+fn decodes_non_ascii_unicode_escape_in_path() {
+    let body = concat!(
+        "{ \"PostgreSQL-Backup-Manifest-Version\": 1,\n",
+        "\"Files\": [\n",
+        "{ \"Path\": \"base/caf\\u00e9\", \"Size\": 3 }\n",
+        "],\n",
+    );
+    let m = parse(&with_checksum(body)).unwrap();
+    assert_eq!(m.files[0].pathname, "base/café".as_bytes());
+}
+
 #[test]
 fn version_int_truncation_matches_c() {
     // C parses the version with strtoi64 and assigns through `int`:

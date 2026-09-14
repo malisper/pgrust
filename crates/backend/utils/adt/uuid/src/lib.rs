@@ -252,11 +252,13 @@ pub fn uuid_out_into(uuid: &PgUuid, buf: &mut [u8; UUID_OUT_LEN]) -> usize {
 
 #[inline]
 pub fn uuid_internal_cmp(a: &PgUuid, b: &PgUuid) -> i32 {
-    match a.cmp(b) {
-        core::cmp::Ordering::Less => -1,
-        core::cmp::Ordering::Equal => 0,
-        core::cmp::Ordering::Greater => 1,
+    // memcmp (uuid.c:223): glibc returns the first differing bytes' difference.
+    for i in 0..UUID_LEN {
+        if a[i] != b[i] {
+            return a[i] as i32 - b[i] as i32;
+        }
     }
+    0
 }
 
 pub fn uuid_lt(a: &PgUuid, b: &PgUuid) -> bool {

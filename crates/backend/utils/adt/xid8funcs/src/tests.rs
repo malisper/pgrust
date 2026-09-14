@@ -45,6 +45,26 @@ fn parse_out_round_trip() {
     }
 }
 
+// A 52,000,000-xip snapshot (416 MB image, 457 MB of text) prints in C; the
+// old 21-bytes-per-xip upfront reservation (1,092,000,044) tripped
+// MaxAllocSize before a byte was written. The buffer now grows with the
+// text, StringInfo-style, and the reservation is bounded.
+#[test]
+fn out_reservation_never_exceeds_max_alloc() {
+    assert!(out_reservation(52_000_000) <= MAX_ALLOC_SIZE);
+    assert!(out_reservation(PG_SNAPSHOT_MAX_NXIP) <= MAX_ALLOC_SIZE);
+    assert_eq!(out_reservation(0), 44);
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let xips: Vec<u64> = (100..300_100).collect();
+    let img = snapshot_image(mcx, 100, 1_000_000, &xips).unwrap();
+    let out = snapshot_out_bytes(mcx, &view(&img)).unwrap();
+    assert!(out.len() > out_reservation(xips.len()));
+    let text = core::str::from_utf8(&out).unwrap();
+    assert!(text.starts_with("100:1000000:100,101,102,"));
+    assert!(text.ends_with(",300098,300099"));
+}
+
 #[test]
 fn parse_errors_22p02() {
     let ctx = MemoryContext::new("t");

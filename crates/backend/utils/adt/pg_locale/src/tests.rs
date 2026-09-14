@@ -325,7 +325,7 @@ fn concurrent_locale_checks_are_threadsafe() {
                     assert!(!check_locale_numeric("bogus_locale.nope").unwrap());
                     let (ok, canon) = check_locale(libc::LC_MONETARY, "POSIX").unwrap();
                     assert!(ok);
-                    assert_eq!(canon.as_deref(), Some("POSIX"));
+                    assert_eq!(canon.as_deref(), Some(setup::canonical_locale_name("POSIX")));
                 }
             })
         })
@@ -333,6 +333,20 @@ fn concurrent_locale_checks_are_threadsafe() {
     for t in threads {
         t.join().expect("locale-check thread panicked");
     }
+}
+
+// CREATE DATABASE ... LC_COLLATE 'POSIX' on a C-locale cluster: C's
+// check_locale hands createdb setlocale's canonical name, "C" on glibc and
+// musl, so the template comparison passes; macOS setlocale keeps "POSIX".
+#[test]
+fn posix_canonicalises_like_setlocale() {
+    let expect = if cfg!(target_os = "linux") { "C" } else { "POSIX" };
+    assert_eq!(setup::canonical_locale_name("POSIX"), expect);
+    assert_eq!(setup::canonical_locale_name("C"), "C");
+    assert_eq!(setup::canonical_locale_name("en_US.UTF-8"), "en_US.UTF-8");
+    let (ok, canon) = check_locale(libc::LC_COLLATE, "POSIX").unwrap();
+    assert!(ok);
+    assert_eq!(canon.as_deref(), Some(expect));
 }
 
 #[test]

@@ -769,9 +769,11 @@ fn starts_with_at(str: &[u8], p: usize, needle: &[u8]) -> bool {
     str.get(p..p + needle.len()).map(|s| s == needle).unwrap_or(false)
 }
 
+// xmlStrchr: a C-string search, so an embedded NUL ends it.
 fn memchr_from(str: &[u8], from: usize, byte: u8) -> Option<usize> {
     str.get(from..)
-        .and_then(|s| s.iter().position(|&b| b == byte).map(|i| from + i))
+        .and_then(|s| s.iter().position(|&b| b == byte || b == 0).map(|i| from + i))
+        .filter(|&i| str[i] == byte)
 }
 
 fn strnlen(s: &[u8], maxlen: usize) -> usize {

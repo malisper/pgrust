@@ -218,17 +218,9 @@ const MAX_ALLOC_SIZE: u64 = 0x3fff_ffff;
 pub fn byteaout_into(v: &[u8], mode: i32, out: &mut Vec<u8>) -> PgResult<()> {
     out.clear();
     if mode == guc_tables::consts::BYTEA_OUTPUT_HEX {
-        // C-parity MaxAllocSize ceiling on the output cstring, matching the
-        // escape arm below. Without it a >=512MB bytea produces a >1GB cstring
-        // that overflows downstream cstring consumers (e.g. textin's header).
-        let len: u64 = (v.len() as u64) * 2 + 3;
-        if len > MAX_ALLOC_SIZE {
-            return Err(
-                PgError::error("result of bytea output conversion is too large")
-                    .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
-                    .into(),
-            );
-        }
+        // varlena.c:406 pallocs len*2+3 outright: over MaxAllocSize it is
+        // palloc's own XX000, not the escape arm's 54000.
+        ::mcx::check_alloc_size(v.len().saturating_mul(2).saturating_add(3))?;
         out.reserve(v.len() * 2 + 3);
         out.push(b'\\');
         out.push(b'x');
