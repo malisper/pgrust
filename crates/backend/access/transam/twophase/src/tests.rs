@@ -591,3 +591,26 @@ fn finish_callback_error_leaves_gxact_for_at_abort() {
     assert_eq!(unsafe { TwoPhaseState().num_prep_xacts.get() }, n0);
     assert_eq!(crate::state::MY_LOCKED_GXACT.get(), crate::state::NO_GXACT);
 }
+
+// twophase.c:236-247 TwoPhaseShmemSize: 16-byte header + GlobalTransaction
+// pointer array, MAXALIGN, + 256-byte GlobalTransactionData slots
+// (pg_shmem_allocations parity: 2656 for max_prepared_transactions = 10).
+#[test]
+fn shmem_size_matches_c_layout() {
+    assert_eq!(crate::state::two_phase_shmem_size_for(0), 16);
+    assert_eq!(crate::state::two_phase_shmem_size_for(10), 2656);
+    assert_eq!(crate::state::two_phase_shmem_size_for(20), 5296);
+}
+
+// twophase.c:2709 sscanf("%u"): strtoul saturates on overflow (sign
+// ignored) before the unsigned-int store, so an xid field of 2^64 scans as
+// 4294967295 and the GID is merely non-canonical — not the 08P01 that xid
+// 0 raises. 2^32 truncates to 0 in C as well.
+#[test]
+fn gid_for_subid_saturates_like_sscanf() {
+    use crate::core::IsTwoPhaseTransactionGidForSubid;
+    assert!(!IsTwoPhaseTransactionGidForSubid(1, "pg_gid_1_18446744073709551616").unwrap());
+    assert!(!IsTwoPhaseTransactionGidForSubid(1, "pg_gid_1_-18446744073709551616").unwrap());
+    assert!(IsTwoPhaseTransactionGidForSubid(1, "pg_gid_1_4294967295").unwrap());
+    assert!(IsTwoPhaseTransactionGidForSubid(1, "pg_gid_1_4294967296").is_err());
+}

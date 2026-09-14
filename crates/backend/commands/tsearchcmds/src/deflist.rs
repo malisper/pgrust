@@ -157,7 +157,7 @@ fn build_def_item<'mcx>(
         if let Ok(v) = sval.parse::<i32>() {
             return Ok(DefItem { name, value: Some(DefValue::Int(v)) });
         }
-        if c_strtod_accepts(sval) {
+        if sval.parse::<f64>().is_ok() {
             return Ok(DefItem { name, value: Some(DefValue::Float(alloc_str(mcx, sval)?)) });
         }
         if sval == "true" {
@@ -168,50 +168,6 @@ fn build_def_item<'mcx>(
         }
     }
     Ok(DefItem { name, value: Some(DefValue::Str(alloc_str(mcx, sval)?)) })
-}
-
-// buildDefItem's strtod probe: the whole string consumed with errno still 0.
-// Overflow and underflow (ERANGE) keep the value a String; hexadecimal floats
-// are consumed like decimal ones.
-pub(crate) fn c_strtod_accepts(sval: &str) -> bool {
-    let body = sval.strip_prefix(['+', '-']).unwrap_or(sval);
-    let lower = body.to_ascii_lowercase();
-    if let Some(hex) = lower.strip_prefix("0x") {
-        let (mant, exp) = match hex.split_once('p') {
-            Some((m, e)) => (m, Some(e)),
-            None => (hex, None),
-        };
-        let mut digits = 0;
-        let mut dots = 0;
-        for b in mant.bytes() {
-            match b {
-                b'.' => dots += 1,
-                b if b.is_ascii_hexdigit() => digits += 1,
-                _ => return false,
-            }
-        }
-        if digits == 0 || dots > 1 {
-            return false;
-        }
-        return match exp {
-            None => true,
-            Some(e) => {
-                let e = e.strip_prefix(['+', '-']).unwrap_or(e);
-                !e.is_empty() && e.bytes().all(|b| b.is_ascii_digit())
-            }
-        };
-    }
-    let Ok(v) = sval.parse::<f64>() else {
-        return false;
-    };
-    if lower == "inf" || lower == "infinity" || lower.starts_with("nan") {
-        return true;
-    }
-    if v.is_infinite() || v.is_subnormal() {
-        return false;
-    }
-    let mantissa = lower.split('e').next().unwrap_or("");
-    !(v == 0.0 && mantissa.bytes().any(|b| (b'1'..=b'9').contains(&b)))
 }
 
 // deserialize_deflist (tsearchcmds.c): the eight-state scanner, accepting

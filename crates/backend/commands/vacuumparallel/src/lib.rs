@@ -1344,13 +1344,6 @@ enum PoolPassWait {
     Fallback,
 }
 
-// Cumulative pool counters (a claim precedes its detach): read detached
-// first so a fresh detached is never compared against a stale claimed.
-fn all_detached(entry: &parallel::standing::StandingEngagement) -> bool {
-    let detached = entry.detached();
-    detached >= entry.claimed()
-}
-
 /// The leader's join loop for one pool pass (the standing channel's wait
 /// shape + the relay flush): poll completion + interrupts + participation
 /// counters; every exit path completes the RG if needed, closes the board
@@ -1458,7 +1451,7 @@ fn pool_leader_join(
             return Ok(PoolPassWait::Fallback);
         }
         if started == 0
-            && all_detached(entry)
+            && entry.detached() >= claimed
             && std::time::Duration::from_nanos(t0.elapsed_ns()) > pool_claim_deadline()
         {
             pool_drain_rg(rt, &eng.rg);
@@ -1466,7 +1459,7 @@ fn pool_leader_join(
             ptrace("pooldb claim deadline — launched fallback");
             return Ok(PoolPassWait::Fallback);
         }
-        if claimed > 0 && started > 0 && all_detached(entry) {
+        if claimed > 0 && started > 0 && entry.detached() >= claimed {
             if let Some(o) = eng.waiter.try_wait() {
                 let _ = o;
                 continue;

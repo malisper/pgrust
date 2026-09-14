@@ -4,9 +4,11 @@
 #![allow(non_upper_case_globals)]
 
 use datum::Datum;
-use types_core::{RECORDOID, TEXTOID, XIDOID};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use types_error::{
+    PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE,
+};
 use types_fmgr::{byref_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use types_tuple::TupleDescData;
 
 use multixact::{mxstatus_to_string, FirstMultiXactId, GetMultiXactIdMembers};
 
@@ -27,41 +29,43 @@ struct MemberRows {
     tuples: Vec<Vec<u8>>,
 }
 
-fn collect_rows(fcinfo: &Fcinfo, mxid: u32) -> PgResult<MemberRows> {
-    let mcx = fcinfo.result_mcx();
-    let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, 2)?;
-    tupdesc::TupleDescInitEntry(&mut desc, 1, Some("xid"), XIDOID, -1, 0)?;
-    tupdesc::TupleDescInitEntry(&mut desc, 2, Some("mode"), TEXTOID, -1, 0)?;
-    desc.tdtypeid = RECORDOID;
-    desc.tdtypmod = -1;
-    // C: BuildTupleFromCStrings over get_call_result_type's blessed tupdesc.
-    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
+fn collect_rows(flinfo: &FmgrInfo, fcinfo: &mut Fcinfo, mxid: u32) -> PgResult<MemberRows> {
+    let mut members = Vec::new();
+    GetMultiXactIdMembers(mxid, false, false, &mut |m| members.extend_from_slice(m))?;
 
-    let mut tuples: Vec<Vec<u8>> = Vec::new();
-    let mut form_err: Option<Box<PgError>> = None;
-    GetMultiXactIdMembers(mxid, false, false, &mut |members| {
-        for m in members {
-            let mode = match varlena::cstring_to_text(mcx, mxstatus_to_string(m.status).as_bytes())
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    form_err.get_or_insert(e);
-                    return;
-                }
-            };
-            let values =
-                [Datum::from_u32(m.xid), Datum::from_usize(mode.as_bytes().as_ptr() as usize)];
-            match heaptuple::heap_form_tuple(mcx, &desc, &values, &[false; 2]) {
-                Ok(tuple) => tuples.push(tuple.image().to_vec()),
-                Err(e) => {
-                    form_err.get_or_insert(e);
-                    return;
-                }
-            }
-        }
-    })?;
-    if let Some(e) = form_err {
-        return Err(e);
+    let expected_desc = fcinfo.rsinfo_mut().and_then(|rsi| rsi.expectedDesc);
+    // SAFETY: expectedDesc contract — the executor armed it with the scan
+    // tupdesc, live for the duration of this call.
+    let expected = expected_desc.map(|p| unsafe { p.cast::<TupleDescData<'_>>().as_ref() });
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, expected)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(Box::new(PgError::error("return type must be a row type")));
+    }
+    let mut desc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
+    // C: TupleDescGetAttInMetadata blesses the descriptor.
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
+    let natts = desc.natts as usize;
+    // DIVERGENCE (multixact.c:3767-3774): C's BuildTupleFromCStrings reads
+    // past its two-entry values[] for a wider column definition list and
+    // crashes the backend; refuse with the executor's tupledesc_match text.
+    if natts > 2 {
+        return Err(Box::new(
+            PgError::error("function return row and query-specified return row do not match")
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+                .with_detail(format!(
+                    "Returned row contains 2 attributes, but query expects {natts}."
+                )),
+        ));
+    }
+    let mut attinmeta = funcapi::AttInMetadata::new(&desc)?;
+    let mut tuples = Vec::with_capacity(members.len());
+    for m in &members {
+        let xid = m.xid.to_string();
+        let cstrings = [Some(xid.as_bytes()), Some(mxstatus_to_string(m.status).as_bytes())];
+        let (values, isnull) = attinmeta.build(mcx, &cstrings[..natts])?;
+        let tuple = heaptuple::heap_form_tuple(mcx, &desc, &values, &isnull)?;
+        tuples.push(tuple.image().to_vec());
     }
     Ok(MemberRows { tuples })
 }
@@ -79,9 +83,16 @@ pub fn fc_pg_get_multixact_members(
         ));
     }
     if !flinfo.has_fn_extra() {
-        let rows = collect_rows(fcinfo, mxid)?;
-        let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
-        fctx.user_fctx = Some(Box::new(rows));
+        // multixact.c:3739: SRF_FIRSTCALL_INIT precedes the member read.
+        funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        let rows = match collect_rows(flinfo, fcinfo, mxid) {
+            Ok(rows) => rows,
+            Err(e) => {
+                funcapi::end_MultiFuncCall(flinfo);
+                return Err(e);
+            }
+        };
+        funcapi::per_MultiFuncCall(flinfo).user_fctx = Some(Box::new(rows));
     }
     let fctx = funcapi::per_MultiFuncCall(flinfo);
     let idx = fctx.call_cntr as usize;
@@ -103,6 +114,7 @@ pub fn fc_pg_get_multixact_members(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
     use types_fmgr::LocalFcinfo;
 
     #[test]
@@ -119,5 +131,18 @@ mod tests {
         let mut flinfo = types_fmgr::FmgrInfo::unresolved();
         let err = fc_pg_get_multixact_members(Some(&mut flinfo), &mut fci).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+    }
+
+    // multixact.c:3739: SRF_FIRSTCALL_INIT runs before GetMultiXactIdMembers,
+    // so a non-set context is 0A000 before any member (or its absence) is
+    // reported, and no fn_extra is left behind.
+    #[test]
+    fn non_set_context_is_0a000_before_member_read() {
+        let mut fci = LocalFcinfo::<1>::new(0);
+        fci.set_arg(0, Datum::from_u32(5));
+        let mut flinfo = types_fmgr::FmgrInfo::unresolved();
+        let err = fc_pg_get_multixact_members(Some(&mut flinfo), &mut fci).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert!(!flinfo.has_fn_extra());
     }
 }

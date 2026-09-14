@@ -13,8 +13,10 @@ use types_tuple::TupleDescData;
 #[cfg(test)]
 mod tests;
 
+mod attinmeta;
 mod srf_mat;
 
+pub use attinmeta::AttInMetadata;
 pub use funcapi_srf::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall, srf_return_done, srf_return_next,
     srf_return_next_null, FuncCallContext,

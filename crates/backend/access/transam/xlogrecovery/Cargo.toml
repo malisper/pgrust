@@ -131,6 +131,7 @@ logical_seams = { path = "../../../replication/logical_seams" }
 logical_worker_seams = { path = "../../../replication/logical_worker_seams" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 multixact_seams = { path = "../multixact_seams" }
+xact_seams = { path = "../xact_seams" }
 namespace_seams = { path = "../../../catalog/namespace_seams" }
 parallel_seams = { path = "../parallel_seams" }
 pg_enum_seams = { path = "../../../catalog/pg_enum_seams" }

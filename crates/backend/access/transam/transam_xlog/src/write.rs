@@ -339,6 +339,14 @@ fn XLogFileInitInternal(
     let _ = fd::pg_unlink(&tmppath);
 
     let f = fd::BasicOpenFile(&tmppath, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)?;
+    if f < 0 {
+        return ereport(ERROR)
+            .with_saved_errno(fd::get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not create file \"{tmppath}\": %m"))
+            .finish(loc("XLogFileInitInternal"))
+            .map(|_| -1);
+    }
 
     let wal_segsz = wal_segment_size();
     // xlog.c:3258-3291: save_errno; "if write didn't set errno, assume no

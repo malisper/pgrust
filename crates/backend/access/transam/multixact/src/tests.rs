@@ -880,7 +880,7 @@ fn drain_owner_cleanups() {
 fn owned_family_session_lifecycle() {
     let _l = test_lock();
     mcx::set_session_cleanup_sink(owner_cleanup_sink);
-    MXACT_CACHE.with(|c| drop(c.borrow_mut().take()));
+    MXACT_CACHE.with(|c| drop(c.borrow_mut().cache.take()));
     clear_member_scratch();
     for _ in 0..3 {
         let mut members = [MultiXactMember {
@@ -888,7 +888,7 @@ fn owned_family_session_lifecycle() {
             status: MultiXactStatusForShare,
         }; 2048];
         assert_eq!(mXactCacheGetBySet(&mut members), InvalidMultiXactId);
-        MXACT_CACHE.with(|c| assert!(c.borrow().is_none()));
+        MXACT_CACHE.with(|c| assert!(c.borrow().cache.is_none()));
         mXactCachePut(42, &members).unwrap();
         let mut scratch = take_member_scratch().unwrap();
         scratch.owner.with_mut(|s| {
@@ -918,7 +918,7 @@ fn owned_family_session_lifecycle() {
         drain_owner_cleanups();
         MEMBER_SCRATCH.with(|s| assert!(s.borrow().is_none()));
         assert!(!MEMBER_SCRATCH_INIT.get());
-        MXACT_CACHE.with(|c| assert!(c.borrow().is_none()));
+        MXACT_CACHE.with(|c| assert!(c.borrow().cache.is_none()));
     }
 }
 
@@ -975,4 +975,22 @@ fn owned_family_wal_error_retains_buffer() {
     drain_owner_cleanups();
     WAL_SCRATCH.with(|s| assert!(s.borrow().is_none()));
     INJECT_WAL_ERROR.set(false);
+}
+
+// multixact.c:1988-1989 AtEOXact_MultiXact: the cache context is gone after
+// the transaction (pg_backend_memory_contexts parity), not merely emptied,
+// and the next transaction rebuilds it on demand.
+#[test]
+fn eoxact_drops_cache_context() {
+    let _l = test_lock();
+    setup();
+
+    let members = [MultiXactMember { xid: 79, status: MultiXactStatusForShare }];
+    mXactCachePut(43, &members).unwrap();
+    MXACT_CACHE.with(|c| assert!(c.borrow().cache.is_some()));
+    AtEOXact_MultiXact();
+    MXACT_CACHE.with(|c| assert!(c.borrow().cache.is_none()));
+    mXactCachePut(43, &members).unwrap();
+    MXACT_CACHE.with(|c| assert!(c.borrow().cache.is_some()));
+    AtEOXact_MultiXact();
 }

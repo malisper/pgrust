@@ -1599,13 +1599,6 @@ fn pool_claim_deadline() -> std::time::Duration {
     }))
 }
 
-// Cumulative pool counters (a claim precedes its detach): read detached
-// first so a fresh detached is never compared against a stale claimed.
-fn all_detached(entry: &parallel::standing::StandingEngagement) -> bool {
-    let detached = entry.detached();
-    detached >= entry.claimed()
-}
-
 /// The pool channel's submit-and-park (the standing channel's wait loop
 /// shape + this arm's leader cadence): poll completion + interrupts +
 /// progress/failsafe + board participation counters. Every exit path
@@ -1679,7 +1672,7 @@ fn pool_wait(
         // the launched gang takes over. A straggler that claims right as we
         // close simply drives the same RG (morsel claims are atomic).
         if started == 0
-            && all_detached(entry)
+            && entry.detached() >= claimed
             && std::time::Duration::from_nanos(t0.elapsed_ns()) > pool_claim_deadline()
         {
             close("pooldb claim deadline — launched fallback");
@@ -1687,7 +1680,7 @@ fn pool_wait(
         }
         // Participants all detached yet the RG is incomplete and no error
         // was recorded: a worker died outside every catch layer.
-        if claimed > 0 && started > 0 && all_detached(entry) {
+        if claimed > 0 && started > 0 && entry.detached() >= claimed {
             if let Some(o) = waiter.try_wait() {
                 close("");
                 return Ok(PoolWait::Done(o));

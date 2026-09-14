@@ -243,12 +243,8 @@ pub(crate) fn ValidateXLOGDirectoryStructure() -> PgResult<()> {
 
 fn RemoveTempXlogFiles() -> PgResult<()> {
     let dir = data_path(XLOGDIR);
-    // Silent on an unopenable dir, like the pre-P1 shape.
     let d = fd::AllocateDir(&dir)?;
-    if d.is_none() {
-        return Ok(());
-    }
-    while let Some(de) = fd::ReadDirExtended(d, &dir, types_error::DEBUG1)? {
+    while let Some(de) = fd::ReadDir(d, &dir)? {
         if de.d_name.starts_with("xlogtemp.") {
             let _ = fd::pg_unlink(&format!("{dir}/{}", de.d_name));
         }

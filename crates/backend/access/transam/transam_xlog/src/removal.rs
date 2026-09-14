@@ -205,10 +205,7 @@ pub(crate) fn RemoveOldXlogFiles(
     let lastoff = XLogFileName(0, segno, wal_segsz);
 
     let xldir = fd::AllocateDir(XLOGDIR)?;
-    if xldir.is_none() {
-        return Ok(());
-    }
-    while let Some(de) = fd::ReadDirExtended(xldir, XLOGDIR, types_error::DEBUG1)? {
+    while let Some(de) = fd::ReadDir(xldir, XLOGDIR)? {
         let fname = de.d_name.as_str();
         if !IsXLogFileName(fname) && !IsPartialXLogFileName(fname) {
             continue;
@@ -240,10 +237,7 @@ pub fn RemoveNonParentXlogFiles(
     );
 
     let xldir = fd::AllocateDir(XLOGDIR)?;
-    if xldir.is_none() {
-        return Ok(());
-    }
-    while let Some(de) = fd::ReadDirExtended(xldir, XLOGDIR, types_error::DEBUG1)? {
+    while let Some(de) = fd::ReadDir(xldir, XLOGDIR)? {
         let fname = de.d_name.as_str();
         if !IsXLogFileName(fname) {
             continue;

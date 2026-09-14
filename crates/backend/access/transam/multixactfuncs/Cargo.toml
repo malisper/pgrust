@@ -9,13 +9,12 @@ name = "multixactfuncs"
 path = "src/lib.rs"
 
 [dependencies]
-types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
 datum = { path = "../../../../_support/types/datum" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 funcapi = { path = "../../../utils/fmgr/funcapi" }
-tupdesc = { path = "../../common/tupdesc" }
 heaptuple = { path = "../../common/heaptuple" }
 varlena = { path = "../../../utils/adt/varlena" }
 typcache_seams = { path = "../../../utils/cache/typcache_seams" }

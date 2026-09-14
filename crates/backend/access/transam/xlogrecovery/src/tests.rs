@@ -319,6 +319,9 @@ fn install_boot_seams() {
         guc_tables::init_seams();
         transam_xlog::init_seams();
         xlogprefetcher::init_seams();
+        if !xact_seams::get_current_sub_transaction_id::is_installed() {
+            xact_seams::get_current_sub_transaction_id::set(|| 1);
+        }
         xlogprefetcher::XLogPrefetchShmemInit();
         guc_tables::vars::maintenance_io_concurrency
             .install_if_absent(guc_tables::GucVarAccessors { get: || 10, set: |_| {} });
@@ -369,6 +372,8 @@ fn clean_shutdown_boot_path() {
     for sub in ["global", "pg_wal"] {
         std::fs::create_dir_all(dir.join(sub)).unwrap();
     }
+    // XLOGDIR sweeps (after_timeline_switch) open the DataDir-relative pg_wal.
+    std::env::set_current_dir(&dir).unwrap();
     init_small::globals::SetDataDir(dir.to_str().unwrap());
     init_small::globals::set_enableFsync(false);
     install_boot_seams();

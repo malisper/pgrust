@@ -802,8 +802,9 @@ pub fn IsTwoPhaseTransactionGidForSubid(subid: Oid, gid: &str) -> PgResult<bool>
 }
 
 // One sscanf "%u" conversion: optional leading whitespace, optional sign,
-// at least one digit (wrapping on overflow like strtoul's 32-bit truncation);
-// returns the value and the unconsumed remainder.
+// at least one digit; strtoul saturates at ULONG_MAX on overflow (sign
+// ignored) and the store to unsigned int truncates. Returns the value and
+// the unconsumed remainder.
 fn scan_u32(s: &str) -> (Option<u32>, &str) {
     let b = s.as_bytes();
     let mut i = 0;
@@ -817,12 +818,19 @@ fn scan_u32(s: &str) -> (Option<u32>, &str) {
     }
     let start = i;
     let mut v: u64 = 0;
+    let mut overflow = false;
     while i < b.len() && b[i].is_ascii_digit() {
-        v = v.wrapping_mul(10).wrapping_add((b[i] - b'0') as u64);
+        match v.checked_mul(10).and_then(|v| v.checked_add((b[i] - b'0') as u64)) {
+            Some(next) => v = next,
+            None => overflow = true,
+        }
         i += 1;
     }
     if i == start {
         return (None, s);
+    }
+    if overflow {
+        return (Some(u64::MAX as u32), &s[i..]);
     }
     let v = v as u32;
     (Some(if neg { v.wrapping_neg() } else { v }), &s[i..])

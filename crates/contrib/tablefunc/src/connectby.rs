@@ -12,7 +12,7 @@ use types_error::{
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use types_tuple::TupleDescData;
 
-use crate::tupbuild::AttInMetadata;
+use funcapi::AttInMetadata;
 
 const CONNECTBY_NCOLS: usize = 4;
 const CONNECTBY_NCOLS_NOBRANCH: usize = 3;

@@ -418,3 +418,19 @@ fn shmem_init_registers_transam_variables_in_shmem_index() {
         sizes.iter().collect::<Vec<_>>()
     );
 }
+
+// varsup.c:58: the boot image is memset to zero, so StartupXLOG's
+// AdvanceOldestClogXid adopts a checkpoint oldestXid past 2^31 — a
+// FirstNormal seed does not precede one modularly and pg_xact_status would
+// read truncated CLOG instead of returning NULL.
+#[test]
+fn boot_image_oldest_clog_xid_is_zero_and_adopts_wrapped_horizon() {
+    let _l = test_lock();
+    setup();
+
+    assert_eq!(boot_image().oldestClogXid.load(Relaxed), 0);
+    let tv = TransamVariables();
+    tv.oldestClogXid.store(boot_image().oldestClogXid.load(Relaxed), Relaxed);
+    AdvanceOldestClogXid(3_000_000_000).unwrap();
+    assert_eq!(tv.oldestClogXid.load(Relaxed), 3_000_000_000);
+}

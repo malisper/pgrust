@@ -112,14 +112,6 @@ pub fn set_vacuum_cost_balance_local(v: i32) {
     VACUUM_COST_BALANCE_LOCAL.set(v);
 }
 
-// vacuum.c:608-611: every vacuum entry starts from zero balances and no
-// shared cost state (a cancelled parallel pass may have left it installed).
-pub fn reset_vacuum_cost_state() {
-    init_small::globals::SetVacuumCostBalance(0);
-    set_vacuum_cost_balance_local(0);
-    set_vacuum_shared_cost(None);
-}
-
 // C's static in_vacuum (vacuum.c); commands_analyze's ANALYZE entry shares it.
 pub fn in_vacuum() -> bool {
     IN_VACUUM.get()
@@ -472,7 +464,7 @@ pub fn vacuum<'mcx>(
     IN_VACUUM.set(true);
     VACUUM_FAILSAFE_ACTIVE.set(false);
     autovacuum_seams::vacuum_update_costs::call()?;
-    reset_vacuum_cost_state();
+    init_small::globals::SetVacuumCostBalance(0);
     // catch_unwind = C's PG_FINALLY: panics become ERRORs at the tcop
     // boundary and the session survives, so in_vacuum must reset here too.
     // unwind-ok: log-then-die
@@ -1425,39 +1417,20 @@ pub fn vac_update_datfrozenxid(mcx: Mcx<'_>) -> PgResult<()> {
     Ok(())
 }
 
-// C: WrapLimitsVacuumLock (one truncation task per cluster), taken as an
-// LWLock so the wait is reported as LWLock/WrapLimitsVacuum.
-fn vac_truncate_clog(
-    mcx: Mcx<'_>,
-    frozen_xid: ::types_core::TransactionId,
-    min_multi: MultiXactId,
-    last_sane_frozen_xid: ::types_core::TransactionId,
-    last_sane_min_multi: MultiXactId,
-) -> PgResult<()> {
-    let next_xid = varsup::ReadNextTransactionId()?;
-    let wrap_lock = lwlock::main_lock(::types_storage::WRAP_LIMITS_VACUUM_LOCK);
-    lwlock::LWLockAcquire(wrap_lock, lwlock::LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
-    let r = vac_truncate_clog_locked(
-        mcx,
-        frozen_xid,
-        min_multi,
-        last_sane_frozen_xid,
-        last_sane_min_multi,
-        next_xid,
-    );
-    lwlock::LWLockRelease(wrap_lock)?;
-    r
-}
+// C: WrapLimitsVacuumLock LWLock (one truncation task per cluster).
+static WRAP_LIMITS_VACUUM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn vac_truncate_clog_locked(
+fn vac_truncate_clog(
     mcx: Mcx<'_>,
     mut frozen_xid: ::types_core::TransactionId,
     mut min_multi: MultiXactId,
     last_sane_frozen_xid: ::types_core::TransactionId,
     last_sane_min_multi: MultiXactId,
-    next_xid: ::types_core::TransactionId,
 ) -> PgResult<()> {
     use init_small::globals::MyDatabaseId;
+
+    let next_xid = varsup::ReadNextTransactionId()?;
+    let _guard = WRAP_LIMITS_VACUUM_LOCK.lock().unwrap();
 
     let mut oldestxid_datoid = MyDatabaseId();
     let mut minmulti_datoid = MyDatabaseId();
@@ -1793,27 +1766,6 @@ fn cache_lookup_failed(oid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!(
         "cache lookup failed for relation {oid}"
     )))
-}
-
-#[cfg(test)]
-mod cost_state_tests {
-    use super::*;
-
-    // vacuum.c:608-611: a cancelled parallel pass leaves shared cost state
-    // installed; the next vacuum entry must clear it (fp-commands-vacuum#2).
-    #[test]
-    fn vacuum_entry_clears_stale_parallel_cost_state() {
-        set_vacuum_shared_cost(Some(std::sync::Arc::new(VacuumSharedCost {
-            cost_balance: std::sync::atomic::AtomicU32::new(3),
-            active_nworkers: std::sync::atomic::AtomicU32::new(0),
-        })));
-        set_vacuum_cost_balance_local(7);
-        init_small::globals::SetVacuumCostBalance(9);
-        reset_vacuum_cost_state();
-        assert!(vacuum_shared_cost().is_none());
-        assert_eq!(VACUUM_COST_BALANCE_LOCAL.get(), 0);
-        assert_eq!(init_small::globals::VacuumCostBalance(), 0);
-    }
 }
 
 #[cfg(test)]

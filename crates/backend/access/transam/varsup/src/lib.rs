@@ -100,7 +100,8 @@ fn boot_image() -> TransamVariablesShared {
             FullTransactionId::from_epoch_and_xid(0, FirstNormalTransactionId).value,
         ),
         xactCompletionCount: AtomicU64::new(1),
-        oldestClogXid: AtomicU32::new(FirstNormalTransactionId),
+        // varsup.c:58 memset 0: startup's AdvanceOldestClogXid must adopt a checkpoint oldestXid past 2^31.
+        oldestClogXid: AtomicU32::new(0),
     }
 }
 

@@ -215,12 +215,6 @@ fn bufferalign(len: usize) -> usize {
     (len + 31) & !31
 }
 
-// C casts 8-aligned offsets to LWLockPadded*; Rust's align(128) slices reject
-// that, so lock-array offsets round up to 128 (size accounting matches).
-fn lwlockalign(len: usize) -> usize {
-    (len + (LWLOCK_PADDED_SIZE - 1)) & !(LWLOCK_PADDED_SIZE - 1)
-}
-
 // C sizeof(SlruSharedData) on LP64; the header interior here holds only
 // latest_page_number (offset 0) and num_slots (offset 8).
 const SLRU_SHARED_DATA_SIZE: usize = 104;
@@ -237,9 +231,7 @@ pub fn SimpleLruShmemSize(nslots: i32, nlsns: i32) -> Size {
     sz += maxalign(nslots * core::mem::size_of::<bool>());
     sz += maxalign(nslots * core::mem::size_of::<i64>());
     sz += maxalign(nslots * core::mem::size_of::<i32>());
-    sz = lwlockalign(sz);
     sz += maxalign(nslots * LWLOCK_PADDED_SIZE);
-    sz = lwlockalign(sz);
     sz += maxalign(nbanks * LWLOCK_PADDED_SIZE);
     sz += maxalign(nbanks * core::mem::size_of::<i32>());
 
@@ -279,7 +271,13 @@ pub fn SimpleLruInit(
     let (base, found) = shmem_seams::shmem_init_struct::call(name, shmem_size)?;
     assert!(base as usize % LWLOCK_PADDED_SIZE == 0);
 
-    let mut off = maxalign(SLRU_SHARED_DATA_SIZE);
+    // C casts 8-aligned offsets to LWLockPadded*; Rust's align(128) slices
+    // reject that, so the lock arrays lead the image from the 128-aligned
+    // base and the header follows (same byte count as C).
+    let buffer_locks_off = 0;
+    let bank_locks_off = maxalign(nslots_u * LWLOCK_PADDED_SIZE);
+    let hdr_off = bank_locks_off + maxalign(nbanks_u * LWLOCK_PADDED_SIZE);
+    let mut off = hdr_off + maxalign(SLRU_SHARED_DATA_SIZE);
     // C's page_buffer[] pointer array, reserved only for offset parity.
     off += maxalign(nslots_u * core::mem::size_of::<*const u8>());
     let page_status_off = off;
@@ -290,12 +288,6 @@ pub fn SimpleLruInit(
     off += maxalign(nslots_u * core::mem::size_of::<i64>());
     let page_lru_count_off = off;
     off += maxalign(nslots_u * core::mem::size_of::<i32>());
-    off = lwlockalign(off);
-    let buffer_locks_off = off;
-    off += maxalign(nslots_u * LWLOCK_PADDED_SIZE);
-    off = lwlockalign(off);
-    let bank_locks_off = off;
-    off += maxalign(nbanks_u * LWLOCK_PADDED_SIZE);
     let bank_cur_lru_count_off = off;
     off += maxalign(nbanks_u * core::mem::size_of::<i32>());
     let group_lsn_off = off;
@@ -305,14 +297,14 @@ pub fn SimpleLruInit(
     let pages_off = bufferalign(off);
 
     // SAFETY: every region lies within the live `shmem_size` bytes at `base`
-    // and is aligned for its element type (locks via lwlockalign'ed offsets
-    // against the asserted 128-aligned base).
+    // and is aligned for its element type (locks at 128-multiples from the
+    // asserted 128-aligned base).
     unsafe {
-        let num_slots_ptr = base.add(8).cast::<i32>();
+        let num_slots_ptr = base.add(hdr_off + 8).cast::<i32>();
         if !found {
-            core::ptr::write_bytes(base, 0, maxalign(SLRU_SHARED_DATA_SIZE));
+            core::ptr::write_bytes(base.add(hdr_off), 0, maxalign(SLRU_SHARED_DATA_SIZE));
             num_slots_ptr.write(nslots);
-            base.add(12).cast::<i32>().write(nlsns);
+            base.add(hdr_off + 12).cast::<i32>().write(nlsns);
 
             let status = base.add(page_status_off).cast::<SlruPageStatus>();
             let dirty = base.add(page_dirty_off).cast::<bool>();
@@ -376,7 +368,7 @@ pub fn SimpleLruInit(
                 nlsn_entries,
             ),
             lsn_groups_per_page: nlsns,
-            latest_page_number: &*(base.cast::<AtomicU64>()),
+            latest_page_number: &*(base.add(hdr_off).cast::<AtomicU64>()),
             slru_stats_idx: pgstat_seams::pgstat_get_slru_index::call(name),
         }
     };
@@ -1509,6 +1501,15 @@ pub fn SlruSyncFileTag(ctl: &SlruCtlData, ftag: &FileTag) -> PgResult<(i32, Slru
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // slru.c:198-221: MAXALIGN per array and one BUFFERALIGN, nothing
+    // else, so the ShmemIndex row (pg_shmem_allocations) is C's byte count.
+    #[test]
+    fn shmem_size_matches_c() {
+        assert_eq!(SimpleLruShmemSize(16, 0), 133_760);
+        assert_eq!(SimpleLruShmemSize(32, 0), 267_424);
+        assert_eq!(SimpleLruShmemSize(32, 1024), 529_568);
+    }
 
     #[test]
     fn reset_after_crash_restores_boot_image() {

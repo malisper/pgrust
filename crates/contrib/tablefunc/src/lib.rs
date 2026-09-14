@@ -1,12 +1,9 @@
 //! `contrib/tablefunc` — normal_rand (SRF), the crosstab family, and the
-//! connectby recursive walk. All run over the house SPI + funcapi SRF seams;
-//! BuildTupleFromCStrings/AttInMetadata (funcapi.c) are ported locally in
-//! `tupbuild` (tablefunc is their only consumer so far).
+//! connectby recursive walk. All run over the house SPI + funcapi SRF seams.
 
 mod connectby;
 mod crosstab;
 mod normal_rand;
-mod tupbuild;
 
 use types_error::{PgError, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_fmgr::PGFunction;

@@ -356,8 +356,14 @@ struct MXactCache<'mcx> {
 // is the page of the last replayed XLOG_MULTIXACT_ZERO_OFF_PAGE record (-1 if
 // none yet); PRE_INITIALIZED_OFFSETS_PAGE is the last page implicitly
 // initialized by a CREATE_ID record before its ZERO_OFF_PAGE was seen.
+struct CacheSlot {
+    cleanup_registered: bool,
+    cache: Option<McxOwned<CacheTy>>,
+}
+
 thread_local! {
-    static MXACT_CACHE: RefCell<Option<McxOwned<CacheTy>>> = const { RefCell::new(None) };
+    static MXACT_CACHE: RefCell<CacheSlot> =
+        const { RefCell::new(CacheSlot { cleanup_registered: false, cache: None }) };
     static PRE_INITIALIZED_OFFSETS_PAGE: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) };
     static LAST_INITIALIZED_OFFSETS_PAGE: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) };
 }
@@ -371,14 +377,14 @@ thread_local! {
 mcx::bind!(CacheTy => MXactCache<'mcx>);
 
 fn with_cache<R>(f: impl for<'mcx> FnOnce(&mut MXactCache<'mcx>) -> R) -> Option<R> {
-    MXACT_CACHE.with(|c| c.borrow_mut().as_mut().map(|cache| cache.with_mut(f)))
+    MXACT_CACHE.with(|c| c.borrow_mut().cache.as_mut().map(|cache| cache.with_mut(f)))
 }
 
 fn with_cache_init<R>(f: impl for<'mcx> FnOnce(&mut MXactCache<'mcx>) -> R) -> PgResult<R> {
     MXACT_CACHE.with(|c| {
         let mut slot = c.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(McxOwned::try_new(
+        if slot.cache.is_none() {
+            slot.cache = Some(McxOwned::try_new(
                 MemoryContext::new("MultiXact cache context"),
                 |cx| {
                     Ok(MXactCache {
@@ -388,11 +394,18 @@ fn with_cache_init<R>(f: impl for<'mcx> FnOnce(&mut MXactCache<'mcx>) -> R) -> P
                     })
                 },
             )?);
-            mcx::register_session_cleanup(Box::new(|| {
-                MXACT_CACHE.with(|c| drop(c.borrow_mut().take()));
-            }));
+            if !slot.cleanup_registered {
+                slot.cleanup_registered = true;
+                mcx::register_session_cleanup(Box::new(|| {
+                    MXACT_CACHE.with(|c| {
+                        let mut slot = c.borrow_mut();
+                        slot.cleanup_registered = false;
+                        drop(slot.cache.take());
+                    });
+                }));
+            }
         }
-        Ok(slot.as_mut().expect("cache initialized").with_mut(f))
+        Ok(slot.cache.as_mut().expect("cache initialized").with_mut(f))
     })
 }
 
@@ -473,12 +486,9 @@ fn mXactCachePut(multi: MultiXactId, members: &[MultiXactMember]) -> PgResult<()
     })
 }
 
+// multixact.c:1988-1989: the cache context dies with the transaction.
 fn cache_clear() {
-    MXACT_CACHE.with(|c| {
-        if let Some(cache) = c.borrow_mut().as_mut() {
-            cache.with_mut(|cache| cache.live = 0);
-        }
-    });
+    MXACT_CACHE.with(|c| drop(c.borrow_mut().cache.take()));
 }
 
 struct MemberBuffer<'mcx> {

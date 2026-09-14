@@ -15,7 +15,7 @@ use types_error::{
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, SFRM_Materialize};
 use types_tuple::TupleDescData;
 
-use crate::tupbuild::AttInMetadata;
+use funcapi::AttInMetadata;
 
 #[track_caller]
 #[cold]

@@ -140,22 +140,30 @@ impl TwoPhaseShared {
     }
 }
 
+// twophase.c:236-247: offsetof(TwoPhaseStateData, prepXacts) + the
+// GlobalTransaction pointer array, MAXALIGN, + the GlobalTransactionData
+// slab (GIDSIZE 200 pads to 256 on LP64).
+const OFFSETOF_TWOPHASE_PREP_XACTS: usize = 16;
+const SIZEOF_GLOBAL_TRANSACTION_DATA: usize = 256;
+
 pub fn TwoPhaseShmemSize() -> usize {
-    let max = twophase_config::max_prepared_xacts() as usize;
-    core::mem::size_of::<TwoPhaseShared>()
-        + max * (core::mem::size_of::<GXact>() + core::mem::size_of::<i32>())
+    two_phase_shmem_size_for(twophase_config::max_prepared_xacts().max(0) as usize)
+}
+
+pub(crate) fn two_phase_shmem_size_for(max: usize) -> usize {
+    let size = OFFSETOF_TWOPHASE_PREP_XACTS + max * core::mem::size_of::<*const u8>();
+    ((size + 7) & !7) + max * SIZEOF_GLOBAL_TRANSACTION_DATA
 }
 
 // TwoPhaseShmemInit (twophase.c:250-296): ShmemInitStruct("Prepared
 // Transaction Table", TwoPhaseShmemSize(), &found) registers the table in
-// the ShmemIndex (so pg_shmem_allocations lists it) and hands back the
-// arena the table header lives in; the per-slot GXact/prepXacts arrays are
-// process-heap slices reached from that header.
+// the ShmemIndex with C's byte count (pg_shmem_allocations parity); the
+// table itself lives on the process heap for the cluster lifetime.
 pub fn TwoPhaseShmemInit() -> PgResult<()> {
     if TWO_PHASE_STATE.get().is_some() {
         return Ok(());
     }
-    let (raw, found) =
+    let (_, found) =
         shmem_seams::shmem_init_struct::call("Prepared Transaction Table", TwoPhaseShmemSize())?;
     debug_assert!(!found, "TwoPhaseShmemInit: segment already initialized");
     let max = twophase_config::max_prepared_xacts().max(0) as usize;
@@ -173,24 +181,13 @@ pub fn TwoPhaseShmemInit() -> PgResult<()> {
         gxacts.push(g);
         prep.push(SyncCell::new(NO_GXACT));
     }
-    const {
-        assert!(core::mem::align_of::<TwoPhaseShared>() <= 64, "PG_CACHE_LINE_SIZE alignment");
-    }
-    let p = raw.cast::<TwoPhaseShared>();
-    // SAFETY: a fresh, zeroed, cache-line-aligned ShmemIndex allocation of
-    // TwoPhaseShmemSize() >= size_of::<TwoPhaseShared>() bytes (the size
-    // sums the header and the per-slot arrays), written once during
-    // single-threaded shmem init and leaked for the cluster lifetime like C
-    // shmem.
-    unsafe {
-        p.write(TwoPhaseShared {
-            free_gxacts: SyncCell::new(free_head),
-            num_prep_xacts: SyncCell::new(0),
-            prep_xacts: prep.into_boxed_slice(),
-            gxacts: gxacts.into_boxed_slice(),
-        });
-        let _ = TWO_PHASE_STATE.set(&*p);
-    }
+    let shared: &'static TwoPhaseShared = Box::leak(Box::new(TwoPhaseShared {
+        free_gxacts: SyncCell::new(free_head),
+        num_prep_xacts: SyncCell::new(0),
+        prep_xacts: prep.into_boxed_slice(),
+        gxacts: gxacts.into_boxed_slice(),
+    }));
+    let _ = TWO_PHASE_STATE.set(shared);
     Ok(())
 }
 

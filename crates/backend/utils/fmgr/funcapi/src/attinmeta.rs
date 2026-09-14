@@ -1,16 +1,14 @@
-//! `funcapi.c` `TupleDescGetAttInMetadata` / `BuildTupleFromCStrings`, the
-//! slice tablefunc needs (no other consumer yet, so it lives here rather than
-//! in the shared funcapi crate). Resolves each column's input function once
-//! into a carrier; `build` produces the `(values, isnull)` pair the
-//! MaterializedSRF tuplestore consumes (C forms a heaptuple + puttuple; the
-//! tuplestore does the forming here).
+//! `funcapi.c` `TupleDescGetAttInMetadata` / `BuildTupleFromCStrings`.
+//! Resolves each column's input function once into a carrier; `build`
+//! produces the `(values, isnull)` pair a tuplestore or heap_form_tuple
+//! consumes (C forms the heaptuple itself).
 
 use core::ffi::CStr;
 
 use datum::Datum;
 use mcx::Mcx;
+use fmgr::FmgrInfo;
 use types_error::PgResult;
-use types_fmgr::FmgrInfo;
 use types_tuple::TupleDescData;
 
 struct AttIn {
@@ -35,7 +33,7 @@ impl AttInMetadata {
             }
             let (typinput, typioparam) = lsyscache::typ::getTypeInputInfo(att.atttypid)?;
             atts.push(AttIn {
-                in_func: Some(fmgr_core::fmgr_info(typinput)?),
+                in_func: Some(fmgr_seams::fmgr_info::call(typinput)?),
                 typ_ioparam: typioparam,
                 atttypmod: att.atttypmod,
             });
@@ -75,7 +73,7 @@ impl AttInMetadata {
                 }
                 None => None,
             };
-            let d = types_fmgr::input_function_call(
+            let d = fmgr::input_function_call(
                 in_func,
                 cstr,
                 att.typ_ioparam,
