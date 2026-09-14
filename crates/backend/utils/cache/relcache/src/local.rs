@@ -107,8 +107,8 @@ pub fn RelationBuildLocalRelation(
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: relkind != RELKIND_MATVIEW,
-        // IsCatalogNamespace || IsToastNamespace (catalog.c): PG_CATALOG(11)/pg_toast(99).
-        relreplident: if !(relnamespace == 11 || relnamespace == 99)
+        // relcache.c:3678 excludes only IsCatalogNamespace (PG_CATALOG, 11).
+        relreplident: if relnamespace != 11
             && matches!(
                 relkind,
                 RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_PARTITIONED_TABLE

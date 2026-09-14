@@ -413,17 +413,8 @@ fn create_cached_plan_flags(
     let qs = mcx::slice_borrow_in(mcx, query_string.as_bytes())?;
     let query_string: &'static str = core::str::from_utf8(qs).expect("query_string is UTF-8");
     // plancache.c:223: MemoryContextSetIdentifier(source_context,
-    // plansource->query_string). set_ident copies; every observer clips the
-    // identifier (mcxtfuncs.c MEMORY_CONTEXT_IDENT_DISPLAY_SIZE = 1024 bytes,
-    // mcxt.c MemoryContextStatsPrint 100 bytes), so store that prefix on a
-    // character boundary rather than a second copy of a long statement.
-    {
-        let mut n = query_string.len().min(1024);
-        while !query_string.is_char_boundary(n) {
-            n -= 1;
-        }
-        ctx_ref(source_ctx).set_ident(Some(&query_string[..n]));
-    }
+    // plansource->query_string).
+    ctx_ref(source_ctx).set_ident(Some(ident_prefix(query_string)));
     let bail = |e| {
         reclaim_ctx(query_ctx);
         reclaim_ctx(source_ctx);
@@ -1232,6 +1223,18 @@ fn CheckCachedPlan(h: CachedPlanSourceHandle) -> PgResult<bool> {
     Ok(false)
 }
 
+/// set_ident copies; every observer clips the identifier (mcxtfuncs.c
+/// MEMORY_CONTEXT_IDENT_DISPLAY_SIZE = 1024 bytes, mcxt.c
+/// MemoryContextStatsPrint 100 bytes), so store that prefix on a character
+/// boundary rather than a second copy of a long statement.
+fn ident_prefix(query_string: &str) -> &str {
+    let mut n = query_string.len().min(1024);
+    while !query_string.is_char_boundary(n) {
+        n -= 1;
+    }
+    &query_string[..n]
+}
+
 fn BuildCachedPlan(
     h: CachedPlanSourceHandle,
     boundParams: ParamListHandle,
@@ -1248,6 +1251,9 @@ fn BuildCachedPlan(
     });
 
     let plan_ctx = leak_ctx("CachedPlan");
+    // plancache.c:1100: MemoryContextCopyAndSetIdentifier(plan_context,
+    // plansource->query_string).
+    ctx_ref(plan_ctx).set_ident(Some(ident_prefix(query_string)));
     let result = build_stmt_list(
         ctx_mcx(plan_ctx),
         query_list,
