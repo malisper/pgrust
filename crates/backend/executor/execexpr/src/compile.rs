@@ -782,6 +782,35 @@ fn build_agg_trans<'mcx>(
 // `keep` = None compiles every spec (all pre-existing callers); Some(mask)
 // compiles only the marked specs, preserving each spec's original index as
 // its transno (indirect pergroup offset).
+// C ExecBuildAggTrans's per-set EEOP_AGG_PLAIN_PERGROUP_NULLCHECK fix-up: the
+// jump lands on the step right AFTER this set's own transition step
+// (state->steps_len at that point), so a set whose cell is null — its row
+// spilled to tape in hashed grouping sets — skips only ITSELF and the
+// remaining sets still advance. Patching every set's check to the end of the
+// set loop instead dropped, for each spilled row, the coarser sets' advances
+// (groupingsets: hash-vs-sort comparison under forced spill returned rows).
+fn push_indirect_nullchecked(
+    state: &mut ExprState<'_>,
+    mcx: Mcx<'_>,
+    nullcheck: bool,
+    cell: NonNull<NonNull<AggPerGroup>>,
+    indirect_step: &dyn Fn(NonNull<NonNull<AggPerGroup>>) -> Step,
+) -> PgResult<()> {
+    let check_ix = state.steps.len();
+    if nullcheck {
+        push_step(state, mcx, Step::AggPergroupNullcheck { cell, jumpnull: u32::MAX })?;
+    }
+    push_step(state, mcx, indirect_step(cell))?;
+    if nullcheck {
+        let after = state.steps.len() as u32;
+        match &mut state.steps[check_ix] {
+            Step::AggPergroupNullcheck { jumpnull, .. } => *jumpnull = after,
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
 fn build_agg_trans_masked<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
@@ -1080,7 +1109,6 @@ fn build_agg_trans_masked<'mcx>(
                 },
             )?;
         }
-        let mut nullchecks: Vec<usize> = Vec::new();
         match &mode {
             PergroupMode::Fixed => push_step(&mut state, mcx, fixed_step(spec.pergroup))?,
             PergroupMode::Sets(bases) => {
@@ -1092,15 +1120,7 @@ fn build_agg_trans_masked<'mcx>(
                 }
             }
             PergroupMode::Indirect(base) => {
-                if nullcheck {
-                    nullchecks.push(state.steps.len());
-                    push_step(
-                        &mut state,
-                        mcx,
-                        Step::AggPergroupNullcheck { cell: *base, jumpnull: u32::MAX },
-                    )?;
-                }
-                push_step(&mut state, mcx, indirect_step(*base))?;
+                push_indirect_nullchecked(&mut state, mcx, nullcheck, *base, &indirect_step)?;
             }
             PergroupMode::Mixed(bases, cells) => {
                 for &base in bases.iter() {
@@ -1109,25 +1129,11 @@ fn build_agg_trans_masked<'mcx>(
                     push_step(&mut state, mcx, fixed_step(pergroup))?;
                 }
                 for &cell in cells.iter() {
-                    if nullcheck {
-                        nullchecks.push(state.steps.len());
-                        push_step(
-                            &mut state,
-                            mcx,
-                            Step::AggPergroupNullcheck { cell, jumpnull: u32::MAX },
-                        )?;
-                    }
-                    push_step(&mut state, mcx, indirect_step(cell))?;
+                    push_indirect_nullchecked(&mut state, mcx, nullcheck, cell, &indirect_step)?;
                 }
             }
         }
         let target = state.steps.len() as u32;
-        for ix in nullchecks {
-            match &mut state.steps[ix] {
-                Step::AggPergroupNullcheck { jumpnull, .. } => *jumpnull = target,
-                _ => unreachable!(),
-            }
-        }
         if let Some(ix) = filter_jump {
             match &mut state.steps[ix] {
                 Step::JumpIfNotTrue { jumpdone, .. } => *jumpdone = target,
