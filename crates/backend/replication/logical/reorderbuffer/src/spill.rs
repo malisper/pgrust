@@ -235,23 +235,11 @@ impl ReorderBuffer {
         Ok(tuple)
     }
 
-    // ReorderBufferLargestTXN (reorderbuffer.c:3789). C keeps a pairing
-    // max-heap (rb->txn_heap) current on every memory-accounting update; this
-    // port selects by scanning the live txn slab, only when the limit trips.
-    // Same selection (max txn->size among accounted txns), no bookkeeping on
-    // the per-change hot path.
-    fn largest_txn(&self) -> Option<TxnId> {
-        let mut largest: Option<TxnId> = None;
-        let mut largest_size = 0usize;
-        for (id, slot) in self.txns.iter().enumerate() {
-            if let Some(txn) = slot {
-                if txn.size > largest_size {
-                    largest_size = txn.size;
-                    largest = Some(id as TxnId);
-                }
-            }
-        }
-        debug_assert!(largest.is_none() || largest_size <= self.size);
+    // ReorderBufferLargestTXN (reorderbuffer.c:3814): the root of rb->txn_heap,
+    // so equal sizes resolve the way C's pairing heap does.
+    pub(crate) fn largest_txn(&self) -> Option<TxnId> {
+        let largest = self.txn_heap.first().map(|&(_, id)| id);
+        debug_assert!(largest.map_or(true, |id| self.txn(id).size <= self.size));
         largest
     }
 

@@ -26,6 +26,7 @@ use std::rc::Rc;
 
 use heaptuple::HeapTuple;
 use mcx::{Mcx, MemoryContext, PgFxHashMap, PgVec};
+use pairingheap::{NodeId, PairingHeap};
 use snapmgr::Snapshot;
 use types_core::{
     CommandId, InvalidCommandId, InvalidTransactionId, InvalidXLogRecPtr, Oid, RepOriginId,
@@ -99,8 +100,9 @@ pub const RBTXN_DISTR_INVAL_OVERFLOWED: u32 = 0x1000;
 pub const RBTXN_PREPARE_STATUS_MASK: u32 =
     RBTXN_IS_PREPARED | RBTXN_SKIPPED_PREPARE | RBTXN_SENT_PREPARE;
 
+// reorderbuffer.c:3619 divides by C's 16-byte union, not this enum's size.
 pub(crate) const MAX_DISTR_INVAL_MSG_PER_TXN: usize =
-    (8 * 1024 * 1024) / std::mem::size_of::<SharedInvalidationMessage>();
+    (8 * 1024 * 1024) / types_storage::SHARED_INVALIDATION_MESSAGE_SIZE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i32)]
@@ -320,6 +322,7 @@ pub struct ReorderBufferTXN {
     pub(crate) catchange_node: Links,
     pub size: usize,
     pub total_size: usize,
+    pub(crate) txn_node: NodeId,
     pub output_plugin_private: usize,
 }
 
@@ -507,6 +510,8 @@ pub struct ReorderBuffer {
     pub output_rewrites: bool,
     pub(crate) current_restart_decoding_lsn: XLogRecPtr,
     pub size: usize,
+    // rb->txn_heap (reorderbuffer.c:384): every sized txn, keyed by txn->size.
+    pub(crate) txn_heap: PairingHeap<(usize, TxnId), fn(&(usize, TxnId), &(usize, TxnId)) -> i32>,
     pub spillTxns: i64,
     pub spillCount: i64,
     pub spillBytes: i64,
@@ -515,6 +520,17 @@ pub struct ReorderBuffer {
     pub streamBytes: i64,
     pub totalTxns: i64,
     pub totalBytes: i64,
+}
+
+// ReorderBufferTXNSizeCompare (reorderbuffer.c:3800).
+fn txn_size_compare(a: &(usize, TxnId), b: &(usize, TxnId)) -> i32 {
+    if a.0 < b.0 {
+        -1
+    } else if a.0 > b.0 {
+        1
+    } else {
+        0
+    }
 }
 
 impl ReorderBuffer {
@@ -541,6 +557,7 @@ impl ReorderBuffer {
             output_rewrites: false,
             current_restart_decoding_lsn: InvalidXLogRecPtr,
             size: 0,
+            txn_heap: PairingHeap::new(txn_size_compare),
             spillTxns: 0,
             spillCount: 0,
             spillBytes: 0,
@@ -624,6 +641,7 @@ impl ReorderBuffer {
             catchange_node: Links::default(),
             size: 0,
             total_size: 0,
+            txn_node: pairingheap::INVALID,
             output_plugin_private: 0,
         };
         match self.txns_free.pop() {

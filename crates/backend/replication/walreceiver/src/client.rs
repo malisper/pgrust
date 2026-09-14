@@ -8,7 +8,7 @@ use types_error::{
     ERRCODE_SYNTAX_ERROR, ERROR,
 };
 
-pub use pgclient::{parse_conninfo, CopyData, ExecStatus, PgConn, QueryResult};
+pub use pgclient::{parse_conninfo, CopyData, ErrorFields, ExecStatus, PgConn, QueryResult};
 use pgclient::{opt, os_user_name, WaitEvents};
 
 const WAIT_EVENT_LIBPQWALRECEIVER_CONNECT: u32 = 0x0600_0000 | 3;

@@ -156,3 +156,19 @@ fn out_buffer_refuses_growth_past_max_alloc_size_like_enlarge_string_info() {
     out.clear();
     assert!(out.check_limit().is_ok());
 }
+
+// FreeDecodingContext -> XLogReaderFree (logical.c:753) closes the WAL segment
+// the reader still holds; dropping the reader alone leaked one pg_wal
+// descriptor per pg_logical_slot_get_changes call. POSIX hands out the lowest
+// free descriptor, so the next open lands on the closed number.
+#[test]
+fn freeing_the_decoding_context_closes_the_readers_wal_segment() {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    let cx = mcx::MemoryContext::new("free_reader test");
+    let mut reader = xlogreader::XLogReaderState::allocate(cx.mcx(), 16 * 1024 * 1024).unwrap();
+    let held = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+    reader.v.seg.ws_file = held;
+    super::free_reader(reader);
+    let next = std::fs::File::open("/dev/null").unwrap();
+    assert_eq!(next.as_raw_fd(), held);
+}

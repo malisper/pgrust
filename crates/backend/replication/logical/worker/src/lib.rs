@@ -22,7 +22,7 @@ use mcx::{Mcx, MemoryContext};
 use types_core::{InvalidTransactionId, InvalidXLogRecPtr, Oid, TimestampTz, TransactionId, XLogRecPtr};
 use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG2, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_CONNECTION_FAILURE,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, LOG, WARNING,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG, WARNING,
 };
 
 use walreceiver::client::{CopyData, PgConn};
@@ -669,7 +669,7 @@ pub(crate) fn send_feedback(
     );
 
     if let Err(e) = conn.put_copy_data(&msg) {
-        return elog::elog(ERROR, format!("could not send feedback message: {e}"));
+        return Err(wal_stream_send_error(&e));
     }
 
     if recvpos > LAST_RECVPOS.get() {
@@ -696,10 +696,37 @@ const NAPTIME_PER_CYCLE: i64 = 1000;
 // duration (worker.c:3616-3622) and popped on every exit (worker.c:3839).
 pub(crate) fn apply_loop(conn: &mut PgConn, last_received: XLogRecPtr) -> PgResult<()> {
     let frame = ApplyErrorContextFrame::push();
-    frame.attach(apply_loop_guts(conn, last_received))
+    let end_of_stream = frame.attach(apply_loop_guts(conn, last_received))?;
+    drop(frame);
+    // walrcv_endstreaming (worker.c:3843) once the publisher's CopyDone arrived.
+    if end_of_stream {
+        walreceiver::client::end_streaming(conn)?;
+    }
+    Ok(())
 }
 
-fn apply_loop_guts(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult<()> {
+// libpqrcv_receive (libpqwalreceiver.c:850, 905): a failed PQconsumeInput is
+// 08006, a stream that ends in anything but CopyDone/CopyIn is 08P01.
+pub(crate) fn wal_stream_receive_error(err: &str, sqlstate: types_error::SqlState) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("could not receive data from WAL stream: {}", pchomp(err)))
+            .with_sqlstate(sqlstate),
+    )
+}
+
+// libpqrcv_send (libpqwalreceiver.c:929).
+pub(crate) fn wal_stream_send_error(err: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("could not send data to WAL stream: {}", pchomp(err)))
+            .with_sqlstate(ERRCODE_CONNECTION_FAILURE),
+    )
+}
+
+fn pchomp(s: &str) -> &str {
+    s.trim_end_matches('\n')
+}
+
+fn apply_loop_guts(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult<bool> {
     // The ApplyMessageContext we clean up after each replication protocol
     // message (worker.c:3597-3602): a bump arena released wholesale at every
     // reset (the tcop MessageContext idiom — handlers palloc into it C-style
@@ -730,14 +757,14 @@ fn apply_loop_guts(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult
         let msg = match conn.get_copy_data() {
             Ok(m) => m,
             Err(e) => {
-                return elog::elog(ERROR, format!("could not receive data from WAL stream: {e}"))
+                return Err(wal_stream_receive_error(&e, ERRCODE_PROTOCOL_VIOLATION));
             }
         };
 
         match msg {
             CopyData::End => {
                 let _ = elog::elog(LOG, "data stream from publisher has ended".to_string());
-                return Ok(());
+                return Ok(true);
             }
             CopyData::Block => {
                 // No data right now (C's walrcv_receive == 0 arm): confirm
@@ -751,12 +778,12 @@ fn apply_loop_guts(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult
                     inval::local::AcceptInvalidationMessages()?;
                     maybe_reread_subscription(mcx)?;
                     if APPLY_WORKER_EXIT.get() {
-                        return Ok(());
+                        return Ok(false);
                     }
                     // Launch/advance tablesync when idle (worker.c:3735).
                     tablesync::process_syncing_tables(mcx, Some(conn), last_received)?;
                     if APPLY_WORKER_EXIT.get() {
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
 
@@ -806,13 +833,10 @@ fn apply_loop_guts(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult
                 }
 
                 if !conn.consume_input() {
-                    return elog::elog(
-                        ERROR,
-                        format!(
-                            "could not receive data from WAL stream: {}",
-                            conn.error_message()
-                        ),
-                    );
+                    return Err(wal_stream_receive_error(
+                        &conn.error_message(),
+                        ERRCODE_CONNECTION_FAILURE,
+                    ));
                 }
             }
             CopyData::Msg(buf) => {
@@ -840,7 +864,7 @@ fn apply_loop_guts(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult
                         launcher::my_worker_update_stats(last_received, send_time, false);
                         apply::apply_dispatch(mcx, Some(conn), payload)?;
                         if APPLY_WORKER_EXIT.get() {
-                            return Ok(());
+                            return Ok(false);
                         }
                     }
                     b'k' => {

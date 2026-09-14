@@ -172,10 +172,8 @@ impl ReorderBuffer {
         let txn = txn.unwrap_or_else(|| self.change(change.expect("change set")).txn);
         let toptxn = self.toptxn_id(txn);
 
-        // C additionally maintains rb->txn_heap here; the max-heap only feeds
-        // eviction, which this port selects by scan at limit-check time
-        // (spill.rs largest_txn).
         if addition {
+            let oldsize = self.txn(txn).size;
             self.txn_mut(txn).size += sz;
             self.size += sz;
             // wrapping_add: total_size can sit wrapped-negative after the
@@ -183,6 +181,12 @@ impl ReorderBuffer {
             // straight through.
             let t = self.txn_mut(toptxn);
             t.total_size = t.total_size.wrapping_add(sz);
+
+            if oldsize != 0 {
+                self.txn_heap.remove(self.txn(txn).txn_node);
+            }
+            let node = self.txn_heap.add((self.txn(txn).size, txn));
+            self.txn_mut(txn).txn_node = node;
         } else {
             debug_assert!(self.size >= sz && self.txn(txn).size >= sz);
             self.txn_mut(txn).size -= sz;
@@ -191,6 +195,14 @@ impl ReorderBuffer {
             // counted on the old top); keep the same arithmetic.
             let t = self.txn_mut(toptxn);
             t.total_size = t.total_size.wrapping_sub(sz);
+
+            self.txn_heap.remove(self.txn(txn).txn_node);
+            if self.txn(txn).size != 0 {
+                let node = self.txn_heap.add((self.txn(txn).size, txn));
+                self.txn_mut(txn).txn_node = node;
+            } else {
+                self.txn_mut(txn).txn_node = pairingheap::INVALID;
+            }
         }
         debug_assert!(self.txn(txn).size <= self.size);
     }

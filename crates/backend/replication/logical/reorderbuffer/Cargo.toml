@@ -38,6 +38,7 @@ fd = { path = "../../../storage/file/fd" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 libc = "0.2"
 relpath_seams = { path = "../../../../common/relpath_seams" }
+pairingheap = { path = "../../../lib/pairingheap" }
 
 [dev-dependencies]
 tupdesc = { path = "../../../access/common/tupdesc" }

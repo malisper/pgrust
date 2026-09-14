@@ -12,7 +12,9 @@ use std::cell::Cell;
 use elog::ereport;
 use mcx::Mcx;
 use types_core::{InvalidOid, InvalidRepOriginId, InvalidXLogRecPtr, Oid, XLogRecPtr};
-use types_error::{PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, LOG};
+use types_error::{
+    PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, LOG, NOTICE,
+};
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
 use launcher::{SUBREL_STATE_CATCHUP, SUBREL_STATE_SYNCWAIT};
@@ -21,7 +23,7 @@ use pg_subscription::{
     SUBREL_STATE_DATASYNC, SUBREL_STATE_FINISHEDCOPY, SUBREL_STATE_INIT, SUBREL_STATE_READY,
     SUBREL_STATE_SYNCDONE, SUBREL_STATE_UNKNOWN,
 };
-use walreceiver::client::{CopyData, ExecStatus, PgConn};
+use walreceiver::client::{CopyData, ExecStatus, PgConn, QueryResult};
 
 use crate::{loc, my_sub};
 
@@ -167,23 +169,13 @@ fn process_syncing_tables_for_sync(
     }
     UpdateSubscriptionRelState(mcx, subid, relid, SUBREL_STATE_SYNCDONE, current_lsn, false)?;
 
-    // End streaming so we can use the connection for the slot drop
-    // (walrcv_endstreaming): CopyDone, then drain results.
-    let _ = conn.put_copy_end();
-    while let Ok(Some(_)) = conn.get_result() {}
+    // End streaming so that the connection can be used to drop the slot
+    // (tablesync.c:326).
+    walreceiver::client::end_streaming(conn)?;
 
-    // Drop the tablesync slot on the publisher.
+    // Cleanup the tablesync slot (tablesync.c:345).
     let slotname = ReplicationSlotNameForTablesync(subid, relid);
-    let res = conn.exec(&format!("DROP_REPLICATION_SLOT \"{}\" WAIT", slotname.replace('"', "\"\"")))?;
-    if res.status == ExecStatus::Error {
-        ereport(ERROR)
-            .errcode(ERRCODE_CONNECTION_FAILURE)
-            .errmsg(format!(
-                "could not drop replication slot \"{slotname}\" on publisher: {}",
-                res.err
-            ))
-            .finish(loc("process_syncing_tables_for_sync"))?;
-    }
+    drop_slot_at_pub_node(conn, &slotname, false)?;
 
     xact::CommitTransactionCommand()?;
 
@@ -312,6 +304,54 @@ pub(crate) fn all_tablesyncs_ready(mcx: Mcx<'_>) -> PgResult<bool> {
         xact::CommitTransactionCommand()?;
     }
     Ok(has_subrels && not_ready == 0)
+}
+
+pub(crate) enum DropSlotOutcome {
+    Dropped,
+    MissingTolerated,
+    Failed,
+}
+
+// ReplicationSlotDropAtPubNode's result triage (subscriptioncmds.c:1959-1980):
+// only WALRCV_OK_COMMAND is success; with missing_ok, only 42704 is tolerated.
+pub(crate) fn drop_slot_outcome(res: &QueryResult, missing_ok: bool) -> DropSlotOutcome {
+    if res.status == ExecStatus::CommandOk {
+        return DropSlotOutcome::Dropped;
+    }
+    let undefined_object = res.diag.as_ref().is_some_and(|d| d.sqlstate == "42704");
+    if res.status == ExecStatus::Error && missing_ok && undefined_object {
+        return DropSlotOutcome::MissingTolerated;
+    }
+    DropSlotOutcome::Failed
+}
+
+// ReplicationSlotDropAtPubNode (subscriptioncmds.c:1938), the tablesync
+// worker's callers.
+pub(crate) fn drop_slot_at_pub_node(
+    conn: &mut PgConn,
+    slotname: &str,
+    missing_ok: bool,
+) -> PgResult<()> {
+    let cmd = format!("DROP_REPLICATION_SLOT \"{}\" WAIT", slotname.replace('"', "\"\""));
+    let res = conn.exec(&cmd)?;
+    match drop_slot_outcome(&res, missing_ok) {
+        DropSlotOutcome::Dropped => ereport(NOTICE)
+            .errmsg(format!("dropped replication slot \"{slotname}\" on publisher"))
+            .finish(loc("ReplicationSlotDropAtPubNode")),
+        DropSlotOutcome::MissingTolerated => ereport(LOG)
+            .errmsg(format!(
+                "could not drop replication slot \"{slotname}\" on publisher: {}",
+                res.err
+            ))
+            .finish(loc("ReplicationSlotDropAtPubNode")),
+        DropSlotOutcome::Failed => ereport(ERROR)
+            .errcode(ERRCODE_CONNECTION_FAILURE)
+            .errmsg(format!(
+                "could not drop replication slot \"{slotname}\" on publisher: {}",
+                res.err
+            ))
+            .finish(loc("ReplicationSlotDropAtPubNode")),
+    }
 }
 
 // make_copy_attnamelist (tablesync.c:726): remote attnames as the COPY FROM
@@ -758,10 +798,8 @@ pub(crate) fn LogicalRepSyncTableStart(
     }
 
     if relstate == SUBREL_STATE_DATASYNC {
-        // Previous attempt crashed mid-copy: drop its slot, missing_ok.
-        let res = conn
-            .exec(&format!("DROP_REPLICATION_SLOT \"{}\" WAIT", slotname.replace('"', "\"\"")))?;
-        let _ = res; // missing slot is fine
+        // Previous attempt crashed mid-copy: drop its slot (tablesync.c:1407).
+        drop_slot_at_pub_node(&mut conn, &slotname, true)?;
     }
 
     launcher::my_worker_set_relstate(SUBREL_STATE_DATASYNC, InvalidXLogRecPtr);

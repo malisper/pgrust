@@ -16089,6 +16089,7 @@ dependencies = [
  "inval",
  "libc",
  "mcx",
+ "pairingheap",
  "postgres_seams",
  "procarray_seams",
  "relcache",

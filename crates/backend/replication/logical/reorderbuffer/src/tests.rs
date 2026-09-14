@@ -1814,3 +1814,30 @@ fn spill_io_reports_reorder_buffer_wait_events() {
     assert_eq!(my_wait_ends(), starts.len());
     rb.cleanup_txn(txn).unwrap();
 }
+
+// ReorderBufferLargestTXN reads rb->txn_heap, whose merge keeps the existing
+// root on equal sizes (pairingheap.c:87): once B has overtaken A and A catches
+// up to a tie, B stays the eviction candidate.
+#[test]
+fn largest_txn_resolves_size_ties_like_the_pairing_heap() {
+    let mut rb = rb();
+    let a = rb.txn_by_xid(10, true, 100, true).0.unwrap();
+    let b = rb.txn_by_xid(11, true, 200, true).0.unwrap();
+    assert!(a < b);
+    rb.change_memory_update(None, Some(a), true, 100);
+    rb.change_memory_update(None, Some(b), true, 100);
+    rb.change_memory_update(None, Some(b), true, 100);
+    rb.change_memory_update(None, Some(a), true, 100);
+    assert_eq!(rb.largest_txn(), Some(b));
+    rb.change_memory_update(None, Some(b), false, 200);
+    assert_eq!(rb.largest_txn(), Some(a));
+    rb.change_memory_update(None, Some(a), false, 200);
+    assert_eq!(rb.largest_txn(), None);
+    assert_eq!(rb.txn(a).txn_node, pairingheap::INVALID);
+}
+
+// reorderbuffer.c:3619: 8MB over C's 16-byte SharedInvalidationMessage union.
+#[test]
+fn distributed_invalidation_overflow_threshold_matches_c() {
+    assert_eq!(MAX_DISTR_INVAL_MSG_PER_TXN, 524288);
+}

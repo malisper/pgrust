@@ -29,7 +29,7 @@ use types_error::{
 };
 use types_rel::RelationData;
 use types_storage::storage::{PROC_ARRAY_LOCK, REPLICATION_SLOT_CONTROL_LOCK};
-use xlogreader::XLogReaderState;
+use xlogreader::{LocalPageRead, XLogReaderState};
 
 const InvalidXLogRecPtr: XLogRecPtr = 0;
 
@@ -740,10 +740,17 @@ impl LogicalDecodingContext {
         } = *self;
         snapbuild::free_snapshot_builder(snapshot_builder);
         reorder.free()?;
-        drop(reader);
+        free_reader(reader);
         drop(raw);
         Ok(())
     }
+}
+
+// XLogReaderFree (logical.c:753): every decoding reader's segment routine
+// closes through xlogutils' wal_segment_close.
+fn free_reader(mut reader: XLogReaderState<'_>) {
+    reader.XLogReaderFree(&mut LocalPageRead { wait_for_wal: false });
+    drop(reader);
 }
 
 pub fn OutputPluginPrepareWrite(opc: &mut OutputPluginContext, last_write: bool) -> PgResult<()> {

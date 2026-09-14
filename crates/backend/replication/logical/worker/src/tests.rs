@@ -659,3 +659,45 @@ fn publication_column_list_parses_as_int2vector() {
     assert_eq!(super::tablesync::parse_int2vector("1 3 4"), vec![1, 3, 4]);
     assert_eq!(super::tablesync::parse_int2vector(""), Vec::<i16>::new());
 }
+
+// libpqrcv_receive / libpqrcv_send (libpqwalreceiver.c:850, 905, 929): the
+// apply loop's transport failures carry C's SQLSTATEs and message text, not
+// elog(ERROR)'s XX000.
+#[test]
+fn wal_stream_transport_errors_carry_c_sqlstates() {
+    let e = super::wal_stream_receive_error("server closed the connection unexpectedly\n", types_error::ERRCODE_PROTOCOL_VIOLATION);
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_PROTOCOL_VIOLATION);
+    assert_eq!(e.message(), "could not receive data from WAL stream: server closed the connection unexpectedly");
+    let e = super::wal_stream_receive_error("boom", types_error::ERRCODE_CONNECTION_FAILURE);
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_CONNECTION_FAILURE);
+    let e = super::wal_stream_send_error("no connection to the server\n");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_CONNECTION_FAILURE);
+    assert_eq!(e.message(), "could not send data to WAL stream: no connection to the server");
+}
+
+// ReplicationSlotDropAtPubNode (subscriptioncmds.c:1959-1980): a tablesync
+// slot drop is a success only on CommandComplete; with missing_ok only a
+// 42704 failure is tolerated, everything else is an error.
+#[test]
+fn tablesync_slot_drop_triages_results_like_c() {
+    use super::tablesync::{drop_slot_outcome, DropSlotOutcome};
+    use walreceiver::client::{ErrorFields, ExecStatus, QueryResult};
+    let ok = QueryResult {
+        status: ExecStatus::CommandOk,
+        nfields: 0,
+        rows: Vec::new(),
+        cmd_tag: "DROP_REPLICATION_SLOT".to_string(),
+        diag: None,
+        err: String::new(),
+    };
+    assert!(matches!(drop_slot_outcome(&ok, false), DropSlotOutcome::Dropped));
+    let mut missing = QueryResult::conn_error("replication slot \"x\" does not exist".to_string());
+    missing.status = ExecStatus::Error;
+    missing.diag = Some(ErrorFields { sqlstate: "42704".to_string(), ..Default::default() });
+    assert!(matches!(drop_slot_outcome(&missing, true), DropSlotOutcome::MissingTolerated));
+    assert!(matches!(drop_slot_outcome(&missing, false), DropSlotOutcome::Failed));
+    let mut cancelled = QueryResult::conn_error("canceling statement due to user request".to_string());
+    cancelled.status = ExecStatus::Error;
+    cancelled.diag = Some(ErrorFields { sqlstate: "57014".to_string(), ..Default::default() });
+    assert!(matches!(drop_slot_outcome(&cancelled, true), DropSlotOutcome::Failed));
+}
