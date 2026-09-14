@@ -243,6 +243,17 @@ fn prepare_key(kind: CipherKind, key: &[u8]) -> Option<Vec<u8>> {
     })
 }
 
+pub(crate) fn pgp_init_key(int_name: &str, key: &[u8]) -> Vec<u8> {
+    let kind = match int_name {
+        "aes-ecb" => CipherKind::Aes,
+        "3des-ecb" => CipherKind::Des3,
+        "bf-ecb" => CipherKind::Bf,
+        "cast5-ecb" => CipherKind::Cast5,
+        _ => return key.to_vec(),
+    };
+    prepare_key(kind, key).unwrap_or_else(|| key.to_vec())
+}
+
 fn prepare_iv(kind: CipherKind, iv: &[u8]) -> Vec<u8> {
     let bs = block_size(kind);
     let mut v = vec![0u8; bs];

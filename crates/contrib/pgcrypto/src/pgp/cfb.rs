@@ -27,8 +27,12 @@ impl PgpCfb {
         iv: Option<&[u8]>,
         ignore_decrypt_cipher_failure: bool,
     ) -> Result<PgpCfb, &'static str> {
-        let int_name = cipher_int_name(algo).ok_or(UNSUPPORTED_CIPHER)?;
-        let ciph = BlockEncryptor::new(int_name, key).ok_or(UNSUPPORTED_CIPHER)?;
+        // pgp.c:163 pgp_load_cipher: an id outside the cipher table is
+        // PXE_PGP_CORRUPT_DATA; the key is padded by the cipher init
+        // (openssl.c:541 ossl_aes_init, :504 ossl_des3_init).
+        let int_name = cipher_int_name(algo).ok_or(CORRUPT_DATA)?;
+        let key = crate::cipher::pgp_init_key(int_name, key);
+        let ciph = BlockEncryptor::new(int_name, &key).ok_or(UNSUPPORTED_CIPHER)?;
         let bs = ciph.block_size();
         let mut fr = vec![0u8; bs];
         if let Some(iv) = iv {

@@ -256,27 +256,44 @@ pub fn armor_decode(src: &[u8]) -> Result<Vec<u8>, ()> {
     }
 }
 
-pub fn extract_armor_headers(src: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ()> {
+#[derive(Debug)]
+pub enum ArmorError {
+    Corrupt,
+    Pg(Box<types_error::PgError>),
+}
+
+impl From<()> for ArmorError {
+    fn from((): ()) -> ArmorError {
+        ArmorError::Corrupt
+    }
+}
+
+pub fn extract_armor_headers(src: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ArmorError> {
     let (start_off, hlen) = find_header(src, false)?;
     if hlen == 0 {
-        return Err(());
+        return Err(ArmorError::Corrupt);
     }
     let armor_start = start_off + hlen;
 
     let (end_rel, ehlen) = find_header(&src[armor_start..], true)?;
     if ehlen == 0 {
-        return Err(());
+        return Err(ArmorError::Corrupt);
     }
     let armor_end = armor_start + end_rel;
 
+    let mut hdrlines = 0usize;
     let mut p = armor_start;
     while p < armor_end && src[p] != b'\n' && src[p] != b'\r' {
         match src[p..armor_end].iter().position(|&b| b == b'\n') {
-            None => return Err(()),
+            None => return Err(ArmorError::Corrupt),
             Some(off) => p = p + off + 1,
         }
+        hdrlines += 1;
     }
     let base64_start = p;
+    // pgp-armor.c:444: the key/value pointer arrays are palloc'd before any
+    // line is validated, so 2^27 lines fail on MaxAllocSize first.
+    mcx::check_alloc_size(hdrlines * core::mem::size_of::<usize>()).map_err(ArmorError::Pg)?;
 
     let buf = &src[armor_start..base64_start];
 
@@ -293,7 +310,7 @@ pub fn extract_armor_headers(src: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ()> 
             line_end -= 1;
         }
         let line = &buf[line_start..line_end];
-        let colon = find_subslice(line, b": ").ok_or(())?;
+        let colon = find_subslice(line, b": ").ok_or(ArmorError::Corrupt)?;
         let key = line[..colon].to_vec();
         let value = line[colon + 2..].to_vec();
         headers.push((key, value));
@@ -307,4 +324,28 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     hay.windows(needle.len()).position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_pointer_arrays_are_bounded_by_max_alloc_size() {
+        let lines = 1usize << 27;
+        let chunk: Vec<u8> = b"x\n".repeat(1 << 20);
+        let mut src = b"-----BEGIN PGP MESSAGE-----\n".to_vec();
+        for _ in 0..(lines >> 20) {
+            src.extend_from_slice(&chunk);
+        }
+        src.extend_from_slice(b"\n-----END PGP MESSAGE-----\n");
+        match extract_armor_headers(&src) {
+            Err(ArmorError::Pg(e)) => {
+                assert_eq!(e.message(), "invalid memory alloc request size 1073741824")
+            }
+            other => panic!("expected the palloc failure, got {other:?}"),
+        }
+        src.drain(28..30);
+        assert!(matches!(extract_armor_headers(&src), Err(ArmorError::Corrupt)));
+    }
 }

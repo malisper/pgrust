@@ -1,5 +1,6 @@
 
 use super::consts::*;
+use super::context::PgpContext;
 use super::mpi::{self, read_mpi, Mpi};
 use super::pubkey::{KeyMaterial, PubKey, PGP_PUB_ELG_ENCRYPT, PGP_PUB_RSA_ENCRYPT,
     PGP_PUB_RSA_ENCRYPT_SIGN};
@@ -26,9 +27,9 @@ fn check_eme_pkcs1_v15(data: &[u8]) -> Option<usize> {
     Some(p + 1)
 }
 
-fn control_cksum(msg: &[u8]) -> Result<(), String> {
+fn control_cksum(msg: &[u8]) -> Result<(), &'static str> {
     if msg.len() < 3 {
-        return Err(WRONG_KEY.to_string());
+        return Err(PUB_WRONG_KEY);
     }
     let mut my: u32 = 0;
     for &b in &msg[1..msg.len() - 2] {
@@ -37,7 +38,7 @@ fn control_cksum(msg: &[u8]) -> Result<(), String> {
     my &= 0xFFFF;
     let got = ((msg[msg.len() - 2] as u32) << 8) + msg[msg.len() - 1] as u32;
     if my != got {
-        return Err(WRONG_KEY.to_string());
+        return Err("pubenc cksum failed");
     }
     Ok(())
 }
@@ -46,17 +47,26 @@ fn padded_bytes(m: &Mpi) -> Vec<u8> {
     m.data.clone()
 }
 
-pub fn parse_pubenc_sesskey(pk: &PubKey, body: &[u8]) -> Result<(i32, Vec<u8>), String> {
+// px.c:70 PXE_PGP_WRONG_KEY, the pubenc session-key failures (pgp-pubdec.c).
+const PUB_WRONG_KEY: &str = "Wrong key";
+
+pub fn parse_pubenc_sesskey(
+    ctx: &mut PgpContext,
+    pk: &PubKey,
+    body: &[u8],
+) -> Result<(i32, Vec<u8>), String> {
     if body.len() < 10 {
         return Err(CORRUPT_DATA.to_string());
     }
     if body[0] != 3 {
+        ctx.dbg(&format!("unknown pubenc_sesskey pkt ver={}", body[0]));
         return Err(CORRUPT_DATA.to_string());
     }
     let key_id = &body[1..9];
     let any_key = [0u8; 8];
     if key_id != any_key && key_id != pk.key_id {
-        return Err("Wrong key".to_string());
+        ctx.dbg("key_id's does not match");
+        return Err(PUB_WRONG_KEY.to_string());
     }
     let algo = body[9] as i32;
     let mut pos = 10usize;
@@ -91,12 +101,24 @@ pub fn parse_pubenc_sesskey(pk: &PubKey, body: &[u8]) -> Result<(i32, Vec<u8>), 
     };
 
     let padded = padded_bytes(&m);
-    let off = check_eme_pkcs1_v15(&padded).ok_or_else(|| WRONG_KEY.to_string())?;
+    let off = match check_eme_pkcs1_v15(&padded) {
+        Some(off) => off,
+        None => {
+            ctx.dbg("check_eme_pkcs1_v15 failed");
+            return Err(PUB_WRONG_KEY.to_string());
+        }
+    };
     let msg = &padded[off..];
-    control_cksum(msg)?;
+    if let Err(why) = control_cksum(msg) {
+        if why != PUB_WRONG_KEY {
+            ctx.dbg(why);
+        }
+        return Err(PUB_WRONG_KEY.to_string());
+    }
 
     let sess_key_len = msg.len() - 3;
     if sess_key_len > PGP_MAX_KEY {
+        ctx.dbg(&format!("incorrect session key length={sess_key_len}"));
         return Err("Session key too big".to_string());
     }
     let cipher_algo = msg[0] as i32;

@@ -20,7 +20,6 @@ pub struct PgpContext {
     pub debug: i32,
     pub debug_notices: Vec<String>,
     pub unexpected_binary: bool,
-    pub pending_bad_mdc: bool,
 
     pub expect: bool,
     pub exp_cipher_algo: i32,
@@ -53,7 +52,6 @@ impl Default for PgpContext {
             debug: 0,
             debug_notices: Vec::new(),
             unexpected_binary: false,
-            pending_bad_mdc: false,
             expect: false,
             exp_cipher_algo: -1,
             exp_s2k_mode: -1,

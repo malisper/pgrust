@@ -292,11 +292,49 @@ fn opt_arg_bytes(fcinfo: &Fcinfo, i: usize) -> PgResult<Option<Vec<u8>>> {
     Ok(Some(img.data().to_vec()))
 }
 
+// pgp-pgsql.c:76 convert_from_utf8 / :92 convert_to_utf8.
+fn recode_utf8(data: Vec<u8>, to_server: bool) -> PgResult<Vec<u8>> {
+    let scratch = mcx::MemoryContext::new("pgcrypto utf8");
+    let out = if to_server {
+        mbutils::pg_any_to_server(scratch.mcx(), &data, wchar::PG_UTF8)?
+    } else {
+        mbutils::pg_server_to_any(scratch.mcx(), &data, wchar::PG_UTF8)?
+    };
+    Ok(out.map_or(data, |v| v.to_vec()))
+}
+
+// pgp-pgsql.c:390 encrypt_internal: text data goes to UTF-8 under
+// unicode-mode=1.
+fn encrypt_input(data: Vec<u8>, args: Option<&[u8]>, is_text: bool) -> PgResult<Vec<u8>> {
+    if is_text && pgp::args_unicode_mode(args).map_err(|e| px_msg(&e))? {
+        recode_utf8(data, false)
+    } else {
+        Ok(data)
+    }
+}
+
+// pgp-pgsql.c:537 decrypt_internal: a 'u' literal comes back from UTF-8
+// before the text wrapper's pg_verifymbstr (pgp-pgsql.c:627).
+fn decrypt_output(fcinfo: &mut Fcinfo, out: pgp::DecryptOutput, need_text: bool) -> PgResult<Datum> {
+    for n in &out.notices {
+        pgp_notice(n);
+    }
+    let mut plaintext = out.plaintext;
+    if need_text {
+        if out.unicode {
+            plaintext = recode_utf8(plaintext, true)?;
+        }
+        mbutils::pg_verifymbstr(&plaintext, false)?;
+    }
+    bytea_result(fcinfo, &plaintext)
+}
+
 fn pgp_sym_encrypt(fcinfo: &mut Fcinfo, is_text: bool) -> PgResult<Datum> {
     // SAFETY: strict on arg0/arg1 (data, key); arg2 (args) optional/nullable.
     let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let (data, key) = (data.data().to_vec(), key.data().to_vec());
     let args = opt_arg_bytes(fcinfo, 2)?;
+    let data = encrypt_input(data, args.as_deref(), is_text)?;
     let out = pgp::sym_encrypt(&data, &key, args.as_deref(), is_text).map_err(|e| px_msg(&e))?;
     bytea_result(fcinfo, &out)
 }
@@ -307,15 +345,7 @@ fn pgp_sym_decrypt(fcinfo: &mut Fcinfo, need_text: bool) -> PgResult<Datum> {
     let (data, key) = (data.data().to_vec(), key.data().to_vec());
     let args = opt_arg_bytes(fcinfo, 2)?;
     match pgp::sym_decrypt(&data, &key, args.as_deref(), need_text) {
-        Ok(out) => {
-            for n in &out.notices {
-                pgp_notice(n);
-            }
-            if need_text {
-                mbutils::pg_verifymbstr(&out.plaintext, false)?;
-            }
-            bytea_result(fcinfo, &out.plaintext)
-        }
+        Ok(out) => decrypt_output(fcinfo, out, need_text),
         Err(e) => {
             for n in &e.notices {
                 pgp_notice(n);
@@ -330,6 +360,7 @@ fn pgp_pub_encrypt(fcinfo: &mut Fcinfo, is_text: bool) -> PgResult<Datum> {
     let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let (data, key) = (data.data().to_vec(), key.data().to_vec());
     let args = opt_arg_bytes(fcinfo, 2)?;
+    let data = encrypt_input(data, args.as_deref(), is_text)?;
     let out = pgp::pub_encrypt(&data, &key, args.as_deref(), is_text).map_err(|e| px_msg(&e))?;
     bytea_result(fcinfo, &out)
 }
@@ -341,15 +372,7 @@ fn pgp_pub_decrypt(fcinfo: &mut Fcinfo, need_text: bool) -> PgResult<Datum> {
     let psw = opt_arg_bytes(fcinfo, 2)?;
     let args = opt_arg_bytes(fcinfo, 3)?;
     match pgp::pub_decrypt(&data, &key, psw.as_deref(), args.as_deref(), need_text) {
-        Ok(out) => {
-            for n in &out.notices {
-                pgp_notice(n);
-            }
-            if need_text {
-                mbutils::pg_verifymbstr(&out.plaintext, false)?;
-            }
-            bytea_result(fcinfo, &out.plaintext)
-        }
+        Ok(out) => decrypt_output(fcinfo, out, need_text),
         Err(e) => {
             for n in &e.notices {
                 pgp_notice(n);
@@ -418,8 +441,10 @@ fn fc_pg_dearmor(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Dat
 fn fc_pgp_armor_headers(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg0 text.
     let data = unsafe { fcinfo.arg_varlena_packed(0)? }.data().to_vec();
-    let headers =
-        pgp::armor::extract_armor_headers(&data).map_err(|()| px_msg(pgp::armor::CORRUPT_ARMOR))?;
+    let headers = pgp::armor::extract_armor_headers(&data).map_err(|e| match e {
+        pgp::armor::ArmorError::Corrupt => px_msg(pgp::armor::CORRUPT_ARMOR),
+        pgp::armor::ArmorError::Pg(e) => e,
+    })?;
     let flinfo = flinfo.expect("pgp_armor_headers: resolved FmgrInfo required");
     // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
     let mcx = unsafe { fcinfo.result_mcx_detached() };

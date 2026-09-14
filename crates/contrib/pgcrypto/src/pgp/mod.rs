@@ -16,9 +16,12 @@ pub mod s2k;
 
 use context::PgpContext;
 
+#[derive(Debug)]
 pub struct DecryptOutput {
     pub plaintext: Vec<u8>,
     pub notices: Vec<String>,
+    /// pgp-pgsql.c:517 got_unicode: the literal packet was type 'u'.
+    pub unicode: bool,
 }
 
 #[derive(Debug)]
@@ -51,6 +54,37 @@ fn set_symkey(key: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// pgp-pgsql.c:390 encrypt_internal reads unicode-mode from the parsed args
+/// before the data is converted to UTF-8.
+pub fn args_unicode_mode(args: Option<&[u8]>) -> Result<bool, String> {
+    let mut ctx = PgpContext::default();
+    if let Some(a) = args {
+        ctx.parse_args(a)?;
+    }
+    Ok(ctx.unicode_mode != 0)
+}
+
+// pgp-pgsql.c:511 decrypt_internal: check_expect runs on the decrypted
+// context whether or not pgp_decrypt failed; the NOTICEs precede the ERROR.
+fn finish_decrypt(
+    exp: &PgpContext,
+    ctx: &PgpContext,
+    result: Result<Vec<u8>, String>,
+) -> Result<DecryptOutput, DecryptError> {
+    let mut notices = ctx.debug_notices.clone();
+    if exp.expect {
+        notices.extend(build_expect_notices(exp, ctx));
+    }
+    match result {
+        Ok(plaintext) => Ok(DecryptOutput {
+            plaintext,
+            notices,
+            unicode: ctx.unicode_mode != 0,
+        }),
+        Err(message) => Err(DecryptError { message, notices }),
+    }
+}
+
 pub fn sym_decrypt(
     data: &[u8],
     key: &[u8],
@@ -67,24 +101,7 @@ pub fn sym_decrypt(
 
     let exp = ctx.clone();
     let result = decrypt::decrypt_symmetric(&mut ctx, data, key);
-
-    let debug_notices = ctx.debug_notices.clone();
-
-    let plaintext = match result {
-        Ok(p) => p,
-        Err(message) => {
-            return Err(DecryptError {
-                message,
-                notices: debug_notices,
-            })
-        }
-    };
-
-    let mut notices = debug_notices;
-    if exp.expect {
-        notices.extend(build_expect_notices(&exp, &ctx));
-    }
-    Ok(DecryptOutput { plaintext, notices })
+    finish_decrypt(&exp, &ctx, result)
 }
 
 fn build_expect_notices(exp: &PgpContext, ctx: &PgpContext) -> Vec<String> {
@@ -152,27 +169,11 @@ pub fn pub_decrypt(
         .map_err(|e| DecryptError { message: e, notices: Vec::new() })?;
 
     let exp = ctx.clone();
-    let result = decrypt::decrypt_pubkey(&mut ctx, data, &mut |body| {
-        let (cipher, key) = pubdec::parse_pubenc_sesskey(&pk, body)?;
+    let result = decrypt::decrypt_pubkey(&mut ctx, data, &mut |ctx, body| {
+        let (cipher, key) = pubdec::parse_pubenc_sesskey(ctx, &pk, body)?;
         Ok(decrypt::SessKey { cipher, key })
     });
-
-    let debug_notices = ctx.debug_notices.clone();
-    let plaintext = match result {
-        Ok(p) => p,
-        Err(message) => {
-            return Err(DecryptError {
-                message,
-                notices: debug_notices,
-            })
-        }
-    };
-
-    let mut notices = debug_notices;
-    if exp.expect {
-        notices.extend(build_expect_notices(&exp, &ctx));
-    }
-    Ok(DecryptOutput { plaintext, notices })
+    finish_decrypt(&exp, &ctx, result)
 }
 
 pub fn key_id(data: &[u8]) -> Result<String, String> {
@@ -281,6 +282,87 @@ mod tests {
         let ct = pub_encrypt(b"Secret msg", &pubkey, None, true).expect("pub encrypt");
         let out = pub_decrypt(&ct, &seckey, None, None, true).expect("pub decrypt");
         assert_eq!(out.plaintext, b"Secret msg");
+    }
+
+    // pgp-pgsql.c:514: expect-* NOTICEs are reported even when pgp_decrypt
+    // failed (wrong key, or a stream that ends after the session key).
+    #[test]
+    fn expect_notices_survive_decrypt_errors() {
+        let ct = sym_encrypt(b"x", b"key", None, true).expect("encrypt");
+        let err = sym_decrypt(&ct, b"wrong", Some(b"expect-cipher-algo=aes256,expect-s2k-mode=1"), true)
+            .unwrap_err();
+        assert_eq!(err.message, "Wrong key or corrupt data");
+        assert_eq!(
+            err.notices,
+            [
+                "pgp_decrypt: unexpected cipher_algo: expected 9 got 7",
+                "pgp_decrypt: unexpected s2k_mode: expected 1 got 3",
+            ]
+        );
+        let ct = sym_encrypt(b"x", b"key", Some(b"s2k-mode=0"), true).expect("encrypt");
+        let err = sym_decrypt(&ct[..6], b"key", Some(b"expect-cipher-algo=aes256"), true).unwrap_err();
+        assert_eq!(err.message, "Wrong key or corrupt data");
+        assert_eq!(err.notices, ["pgp_decrypt: unexpected cipher_algo: expected 9 got 7"]);
+    }
+
+    // pgp-pgsql.c:537: the SQL wrapper converts from UTF-8 only for a 'u'
+    // literal, which unicode-mode=1 writes.
+    #[test]
+    fn unicode_literal_is_reported() {
+        let ct = sym_encrypt(b"x", b"key", Some(b"unicode-mode=1"), true).expect("encrypt");
+        assert!(sym_decrypt(&ct, b"key", None, true).expect("decrypt").unicode);
+        let ct = sym_encrypt(b"x", b"key", None, true).expect("encrypt");
+        assert!(!sym_decrypt(&ct, b"key", None, true).expect("decrypt").unicode);
+        assert!(args_unicode_mode(Some(b"unicode-mode=1")).unwrap());
+        assert!(!args_unicode_mode(None).unwrap());
+    }
+
+    // pgp-decrypt.c:388 mdc_finish / :144 pgp_parse_pkt_hdr: the MDC trailer
+    // is walked as packets after the literal data parsed.
+    #[test]
+    fn mdc_trailer_debug_follows_the_packet_walk() {
+        let ct = sym_encrypt(b"hello world", b"key", Some(b"s2k-mode=0"), true).expect("encrypt");
+        let flip = |at: usize| {
+            let mut c = ct.clone();
+            c[at] ^= 0xff;
+            sym_decrypt(&c, b"key", Some(b"debug=1"), true).unwrap_err()
+        };
+        let err = flip(ct.len() - 1);
+        assert_eq!((err.message.as_str(), &err.notices[..]),
+            ("Wrong key or corrupt data", &["dbg: mdc_finish: mdc failed".to_string()][..]));
+        let err = flip(ct.len() - 22);
+        assert_eq!(err.notices, ["dbg: pgp_parse_pkt_hdr: not pkt hdr"]);
+        let mut c = ct.clone();
+        c[ct.len() - 22] ^= 0x01;
+        let err = sym_decrypt(&c, b"key", Some(b"debug=1"), true).unwrap_err();
+        assert_eq!(err.notices, ["dbg: process_data_packets: unexpected pkt tag=18"]);
+    }
+
+    // pgp-pubdec.c:212 + openssl.c:541: a session key shorter than the AES
+    // key size is zero-padded by the cipher init; pgp.c:163: an id outside
+    // the cipher table is corrupt data; pgp-pubdec.c:196 + px.c:70: a bad
+    // EME block is "Wrong key". Messages built against RSA_SECKEY's subkey
+    // (the third against the primary key, so RSA yields garbage).
+    const PUB_SHORT_KEY: &str = "c1c04c0300000000000000000107ff6aaf0020462daaf8ce0d7bb9845fa8dde4ab5bbac7aa79fae163a41b0c41eb43202faaff5a2726f96c89530c9e9c4a5e45f62472979b2e3c81f939ed5ff0f2cc734653dc3c989e089bc28ce425f0f8dee84efed0f11504014fda5e10548155b45ff248bb76b09be218a6cb8d0f48ae7c25327e8f124fbe8c3356f1a3f2ffb5a97436ef96481ab1b2132bde28455d69f3ec6a8020837b8f8c85576cadbf3bcf0fdaf7af9bcf37e3a5da023b71d9b35edb4fa378640cbbba38ea1eb68a6d6ad3eb9e0d95ae36e7a84090b9553628c5ae47e30b1262d1e4f6a819762527086bbc198f93e62d7f6f595b2fc1737475af8b5903760207d4e3348acfc5064390a8b4d4d23f012eff0656570042c4e3d6020b1379c7e71d30a537a7dfaec37312368c340dbdb8c8b4d9cc64a6df8983593552c3d677541b31e2ffc783b7a77c8a7d49c5ee";
+    const PUB_UNKNOWN_CIPHER: &str = "c1c04c0300000000000000000107fd14f0e30f5463e8dca10f82abed8cf0cd4fe4a389ddbd6e36bae8e23b86376016f1d808671ce21c81b406811cd6ea23c7264aa9dcfd46dc06c520294c64e01e30f3b68ebc8dbadbd6ef101069bd72414a9e003f21d8c33816dda11178249423973a22e0b25af443fb73e4d8a5c38537009e069bffe6fc8cf61e40e6ba2169f34966e3e8aff831e10dbc4b15eeb11e98ebb4c31b051af1296244dad220cdadcba84440dc14bbd1f3625d2cb40ef89b2ef67341bf081164eea8bbec37b2afdea81b18fec183deb0290f6e96f42744c856a33b03cb389122a76aa735f1c1c39bbb689fad1f61129ea1c840fba5393350b07a113906acb42f7f95674c5f5bfb867037d23f0131ca0b3f3fc13b5c46dc5429fc020b3dac226331d4ce8b9ca15a964f804feddb2332dd8d85da4cc74203c82461d995c84c6abe82c1da09140dc5d8696030";
+    const PUB_WRONG_KEY: &str = "c1c04c030000000000000000010800b5ec3f8251c8604106669724207eabdae25b849c45da7bd9675a1f3ebc4bc48e4684414b730bff8215501d67de2eb3c491279ced14f138b102215ca61e65495ae2ae3e02d1c63676d894af9e4b961f44d2657c6a0212bd2505a887733ffff086efe6122502641c817daff9c70fd3a1098141db6d6644b618a8ba0bb15904065a25db5c86e2ccf0e15b46df9652b2e0d6f9173a237a89cceb9fd77436897d6ff98cdcb49ed7fac3f1f3a836edd26dfd29d68f3a8afaa1acddf5c87cc05ed8a4adabd1d669a36d93eac2e08331f919e1de05698525381b580c4241223c7b1872a4ede5bc6170ffb732969d509cd7d1afacdc1dea7b844f1bb8b1efe8ba99f557f3d23a01ef1af3bf93c7b2d69442a7abd64857d0f412fde07955a0e69bdcd42c84c8b30ac6cad5c19332abb5641f6b4bbbc63f701f03a475684c4e2c78";
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn pubenc_session_key_follows_c() {
+        let seckey = armor::armor_decode(RSA_SECKEY.as_bytes()).expect("dearmor seckey");
+        let out = pub_decrypt(&unhex(PUB_SHORT_KEY), &seckey, None, None, false).expect("short key");
+        assert_eq!(out.plaintext, b"short key text");
+        let err = pub_decrypt(&unhex(PUB_UNKNOWN_CIPHER), &seckey, None, Some(b"debug=1"), false)
+            .unwrap_err();
+        assert_eq!((err.message.as_str(), err.notices.len()), ("Wrong key or corrupt data", 0));
+        let err = pub_decrypt(&unhex(PUB_WRONG_KEY), &seckey, None, Some(b"debug=1"), false)
+            .unwrap_err();
+        assert_eq!(err.message, "Wrong key");
+        assert_eq!(err.notices, ["dbg: check_eme_pkcs1_v15 failed"]);
     }
 
     #[test]
