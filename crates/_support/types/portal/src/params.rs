@@ -213,6 +213,10 @@ pub fn free(h: ParamListHandle) {
     });
 }
 
+pub fn live_count() -> usize {
+    ENTRIES.with(|e| e.borrow().iter().filter(|s| s.is_some()).count())
+}
+
 pub fn is_live(h: ParamListHandle) -> bool {
     if h.is_null() {
         return false;

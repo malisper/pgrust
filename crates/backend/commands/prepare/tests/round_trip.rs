@@ -17,9 +17,12 @@ use types_storage::lock::LOCKACQUIRE_OK;
 use types_portal::CMDTAG_SELECT;
 
 use prepare::*;
-use types_error::{PgResult, ERRCODE_DUPLICATE_PSTATEMENT, ERRCODE_INVALID_PSTATEMENT_DEFINITION, ERRCODE_UNDEFINED_PSTATEMENT};
+use types_error::{
+    PgResult, ERRCODE_DUPLICATE_PSTATEMENT, ERRCODE_INVALID_PSTATEMENT_DEFINITION,
+    ERRCODE_UNDEFINED_PSTATEMENT, ERRCODE_WRONG_OBJECT_TYPE,
+};
 use types_nodes::parsenodes::{DeallocateStmt, ExecuteStmt, NotifyStmt, PrepareStmt};
-use types_nodes::rawnodes::RawStmt;
+use types_nodes::rawnodes::{A_Const, IntoClause, RawStmt, ValUnion};
 use types_portal::{ParamListHandle, QueryCompletion, QueryEnvHandle, CURSOR_OPT_PARALLEL_OK};
 
 const TEST_RELID: Oid = 60001;
@@ -439,6 +442,54 @@ fn execute_with_wrong_parameter_count_is_42601() {
     .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
     assert!(err.message().contains("wrong number of parameters"));
+}
+
+// An error between EvaluateParams and PortalStart (here CREATE TABLE AS
+// EXECUTE of a non-SELECT, prepare.c 208) has no portal-owned params yet:
+// the registry slot must still be released.
+#[test]
+fn failing_parameterized_execute_frees_the_params_slot() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let raw_notify = node_mk(&ctx, NotifyStmt { conditionname: Some("d57"), payload: None });
+    let raw = RawStmt { stmt: Some(raw_notify), stmt_location: 0, stmt_len: 0 };
+    let plansource =
+        plancache::CreateCachedPlan(Some(&raw), "NOTIFY d57", CommandTag::SELECT).unwrap();
+    let qmcx = plancache::SourceQueryMcx(plansource);
+    let notify = Node::mk(qmcx, NotifyStmt { conditionname: Some("d57"), payload: None }).unwrap();
+    let mut qlist = mcx::PgVec::new_in(qmcx);
+    qlist.push(Query {
+        commandType: CmdType::CMD_UTILITY,
+        canSetTag: true,
+        utilityStmt: Some(notify),
+        ..Query::default()
+    });
+    plancache::CompleteCachedPlan(plansource, qlist, &[INT4OID], CURSOR_OPT_PARALLEL_OK, true)
+        .unwrap();
+    StorePreparedStatement("pleak", plansource, true).unwrap();
+
+    let arg = node_mk(
+        &ctx,
+        A_Const { val: Some(ValUnion::Integer(types_nodes::Integer { ival: 1 })), location: 13 },
+    );
+    let mut params = NodeList::nil();
+    params.lappend(ctx.mcx(), arg).unwrap();
+    let exec = ExecuteStmt { name: Some("pleak"), params };
+    let into = IntoClause::default();
+    let live = types_portal::params::live_count();
+    let mut dest = tcop_dest::CreateDestReceiver(CommandDest::None);
+    let err = ExecuteQuery(
+        ctx.mcx(),
+        &exec,
+        "EXECUTE pleak(1)",
+        ParamListHandle::NULL,
+        Some(&into),
+        &mut dest,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_WRONG_OBJECT_TYPE);
+    assert_eq!(types_portal::params::live_count(), live);
 }
 
 // C ExplainExecuteQuery calls ExplainOneUtility for CMD_UTILITY (prepare.c

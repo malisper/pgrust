@@ -186,53 +186,58 @@ pub fn ExecuteQuery<'mcx>(
         ParamListHandle::NULL
     };
 
-    let portal = portalmem::CreateNewPortal()?;
-    portal.borrow_mut().visible = false;
+    // C's paramLI dies with the transaction's memory context; the registry
+    // slot has no abort hook, so every exit below must reach the free.
+    let res = (move || -> PgResult<()> {
+        let portal = portalmem::CreateNewPortal()?;
+        portal.borrow_mut().visible = false;
 
-    let cplan = plancache::GetCachedPlan(entry.plansource, param_li, None, QueryEnvHandle::NULL)?;
-    let stmt_slice = plancache::CachedPlanStmtList(cplan);
-    // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
-    // PortalDrop releases it; the handle is freed right after.
-    let stmts = unsafe { pquery::stmt_list::register(stmt_slice) };
-    // No fallible call between GetCachedPlan and PortalDefineQuery (C's
-    // refcount-leak rule).
-    portalmem::PortalDefineQuery(
-        &portal,
-        None,
-        info.query_string,
-        info.commandTag,
-        stmts,
-        cplan,
-    )?;
+        let cplan =
+            plancache::GetCachedPlan(entry.plansource, param_li, None, QueryEnvHandle::NULL)?;
+        let stmt_slice = plancache::CachedPlanStmtList(cplan);
+        // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
+        // PortalDrop releases it; the handle is freed right after.
+        let stmts = unsafe { pquery::stmt_list::register(stmt_slice) };
+        // No fallible call between GetCachedPlan and PortalDefineQuery (C's
+        // refcount-leak rule).
+        portalmem::PortalDefineQuery(
+            &portal,
+            None,
+            info.query_string,
+            info.commandTag,
+            stmts,
+            cplan,
+        )?;
 
-    // CREATE TABLE AS EXECUTE: C insists the prepared statement is a plain
-    // SELECT (INSERT ... RETURNING etc. stay unsupported upstream too).
-    let (eflags, count) = match into_clause {
-        Some(into) => {
-            let is_select = stmt_slice.len() == 1
-                && stmt_slice[0].commandType == types_nodes::nodes_enums::CmdType::CMD_SELECT;
-            if !is_select {
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_WRONG_OBJECT_TYPE)
-                    .errmsg("prepared statement is not a SELECT")
-                    .into_error()
-                    .into());
+        // CREATE TABLE AS EXECUTE: C insists the prepared statement is a plain
+        // SELECT (INSERT ... RETURNING etc. stay unsupported upstream too).
+        let (eflags, count) = match into_clause {
+            Some(into) => {
+                let is_select = stmt_slice.len() == 1
+                    && stmt_slice[0].commandType == types_nodes::nodes_enums::CmdType::CMD_SELECT;
+                if !is_select {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                        .errmsg("prepared statement is not a SELECT")
+                        .into_error()
+                        .into());
+                }
+                let eflags = createas_seams::get_into_rel_eflags::call(into.skipData);
+                (eflags, if into.skipData { 0 } else { FETCH_ALL })
             }
-            let eflags = createas_seams::get_into_rel_eflags::call(into.skipData);
-            (eflags, if into.skipData { 0 } else { FETCH_ALL })
-        }
-        None => (0, FETCH_ALL),
-    };
+            None => (0, FETCH_ALL),
+        };
 
-    pquery::PortalStart(&portal, param_li, eflags, Some(snapmgr::GetActiveSnapshot()))?;
+        pquery::PortalStart(&portal, param_li, eflags, Some(snapmgr::GetActiveSnapshot()))?;
 
-    let _ = pquery::PortalRun(&portal, count, false, dest, None, qc)?;
+        let _ = pquery::PortalRun(&portal, count, false, dest, None, qc)?;
 
-    portalmem::PortalDrop(&portal, false)?;
-    pquery::stmt_list::free(stmts);
+        portalmem::PortalDrop(&portal, false)?;
+        pquery::stmt_list::free(stmts);
+        Ok(())
+    })();
     types_portal::params::free(param_li);
-
-    Ok(())
+    res
 }
 
 // EvaluateParams (prepare.c). Expression evaluation rides
@@ -509,7 +514,13 @@ pub fn ExplainExecuteQuery<'mcx>(
         ParamListHandle::NULL
     };
 
-    let cplan = plancache::GetCachedPlan(entry.plansource, param_li, None, query_env)?;
+    let cplan = match plancache::GetCachedPlan(entry.plansource, param_li, None, query_env) {
+        Ok(cplan) => cplan,
+        Err(e) => {
+            types_portal::params::free(param_li);
+            return Err(e);
+        }
+    };
     let planduration = planstart.elapsed();
 
     let stmts = plancache::CachedPlanStmtList(cplan);
