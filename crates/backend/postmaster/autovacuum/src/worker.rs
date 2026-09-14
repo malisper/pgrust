@@ -448,12 +448,18 @@ pub fn do_autovacuum() -> PgResult<()> {
         genam::systable_endscan(smcx, scan)?;
 
         // Pass 2: toast tables, falling back to the main rel's reloptions.
-        let mut scan = genam::systable_beginscan(smcx, &rd, InvalidOid, false, None, &[])?;
+        #[allow(non_upper_case_globals)] // C-parity name
+        const Anum_pg_class_relkind: types_core::AttrNumber = 18;
+        let mut key = ScanKeyData::empty();
+        key.sk_attno = Anum_pg_class_relkind;
+        key.sk_strategy = BTEqualStrategyNumber;
+        key.sk_collation = 0;
+        key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_CHAREQ)
+            .unwrap_or_else(|e| panic!("fmgr_info(F_CHAREQ) failed: {e:?}"));
+        key.sk_argument = datum::Datum::from_char(RELKIND_TOASTVALUE as i8);
+        let mut scan = genam::systable_beginscan(smcx, &rd, InvalidOid, false, None, &[key])?;
         while let Some(tup) = genam::systable_getnext(smcx, &mut scan)? {
             let row = decode_av_class_row(smcx, desc, tup)?;
-            if row.relkind != RELKIND_TOASTVALUE {
-                continue;
-            }
             if row.relpersistence == types_core::RELPERSISTENCE_TEMP {
                 continue;
             }

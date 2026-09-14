@@ -853,11 +853,12 @@ fn logfile_getname(timestamp: pg_time_t, suffix: Option<&str>) -> String {
 }
 
 fn set_next_rotation_time(st: &mut SysLoggerState) {
-    if Log_RotationAge() <= 0 {
+    let rotation_age = Log_RotationAge();
+    if rotation_age <= 0 {
         return;
     }
 
-    let rotinterval = Log_RotationAge() as i64 * SECS_PER_MINUTE;
+    let rotinterval = rotation_age as i64 * SECS_PER_MINUTE;
     let mut now = time_now();
     let tz = pgtz::log_timezone().expect("log_timezone not initialized");
     let gmtoff = localtime::pg_localtime(now, tz).map_or(0, |tm| tm.tm_gmtoff);

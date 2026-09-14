@@ -926,6 +926,7 @@ pub fn postmaster_child_launch(
             #[cfg(pgrust_sim)]
             pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
             procsignal::PreIdentitySignalDiscard(child_pid);
+            release_reserved_pid(child_pid);
             // The -1 contract is fork()'s: leave the failure's errno for the
             // caller's "%m" (postmaster.c:3968 / :3608 / :4162).
             vfs::set_errno(e.raw_os_error().unwrap_or(libc::EAGAIN));
@@ -1856,6 +1857,7 @@ pub mod rtpool {
     fn pooldb_thread_main(ordinal: usize, child_pid: pid_t, body: Box<dyn FnOnce() + Send>) {
         // Thread-scoped local latch slot (returned on thread exit).
         let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
+        let _wait_event_sets_release = waiteventset::WaitEventSetReleaseGuard::new();
         let Some(boot) = POOL_BOOT.get() else {
             POOL_IDENT.with(|c| c.set(PoolIdent::Poisoned));
             body();
@@ -2533,6 +2535,7 @@ pub mod rtgang {
         let _live = LiveGuard;
         // Thread-scoped local latch slot (returned on thread exit).
         let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
+        let _wait_event_sets_release = waiteventset::WaitEventSetReleaseGuard::new();
         boot.inherited.apply();
         let _ = stack_depth::set_stack_base();
         stack_depth::set_thread_stack_ceiling(super::child_thread_stack_size());

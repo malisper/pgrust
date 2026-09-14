@@ -1311,3 +1311,43 @@ fn inherited_custom_definitions_survive_child_registry_rebuild() {
     .join()
     .unwrap();
 }
+
+// guc.c: GUC_PENDING_RESTART set in the postmaster is inherited by every
+// later fork, so a fresh session reports pg_settings.pending_restart = true
+// for a PGC_POSTMASTER variable ALTER SYSTEM changed since boot.
+#[test]
+fn pending_restart_status_crosses_the_child_bind() {
+    setup();
+    let changed = set_config_option_ext(
+        "shared_buffers",
+        Some("32768"),
+        PGC_SIGHUP,
+        PGC_S_FILE,
+        BOOTSTRAP_SUPERUSERID,
+        GUC_ACTION_SET,
+        true,
+        ErrorLevel(0),
+        false,
+    )
+    .unwrap();
+    assert_eq!(changed, 0);
+    let caps = crate::store::capture_session_gucs();
+    let cap = caps.iter().find(|c| c.name() == "shared_buffers").expect("captured");
+    assert!(cap.pending_restart());
+    assert_eq!(cap.source(), PGC_S_DEFAULT);
+    let base = crate::layers::GucBaseSnapshot::for_tests(crate::store::capture_session_gucs());
+    assert!(!base.contains("shared_buffers"));
+    std::thread::spawn(move || {
+        setup();
+        let _binding = crate::store::bind_session_gucs(&caps).unwrap();
+        let (status, source) = with_store(|reg| {
+            let v = reg.find_option("shared_buffers").unwrap();
+            (v.gen().status, v.gen().source)
+        })
+        .unwrap();
+        assert!(status & crate::model::GUC_PENDING_RESTART != 0);
+        assert_eq!(source, PGC_S_DEFAULT);
+    })
+    .join()
+    .unwrap();
+}

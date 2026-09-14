@@ -35,6 +35,7 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use types_error::PgResult;
+use types_guc::GucSource::PGC_S_DEFAULT;
 
 use crate::registry::CapturedGuc;
 use crate::store;
@@ -58,8 +59,13 @@ impl GucBaseSnapshot {
         &self.vars
     }
 
+    #[doc(hidden)]
+    pub fn for_tests(vars: Vec<CapturedGuc>) -> Self {
+        GucBaseSnapshot { epoch: 0, vars }
+    }
+
     pub fn contains(&self, name: &str) -> bool {
-        self.vars.iter().any(|v| v.name() == name)
+        self.vars.iter().any(|v| v.name() == name && v.source() != PGC_S_DEFAULT)
     }
 
     /// Lookup for reload-diff consumers (started-with vs new-base compares).

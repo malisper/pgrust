@@ -1323,11 +1323,22 @@ pub struct CapturedGuc {
     // pgrust's fork, so it travels with the value.
     sourcefile: Option<String>,
     sourceline: i32,
+    // GUC_PENDING_RESTART is fork-inherited status (guc.c set_config_option
+    // sets it in the postmaster; every later child reports it).
+    pending_restart: bool,
 }
 
 impl CapturedGuc {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn source(&self) -> GucSource {
+        self.source
+    }
+
+    pub fn pending_restart(&self) -> bool {
+        self.pending_restart
     }
 
     /// The captured (leader-validated) value. Snapshot consumers diff on this
@@ -1419,7 +1430,9 @@ pub(crate) fn activate_current_values(
 // nondefault-only transfers the whole leader/worker difference).
 pub(crate) fn capture_session_gucs(reg: &GucRegistry) -> Vec<CapturedGuc> {
     reg.iter()
-        .filter(|v| v.gen().source != PGC_S_DEFAULT)
+        .filter(|v| {
+            v.gen().source != PGC_S_DEFAULT || v.gen().status & GUC_PENDING_RESTART != 0
+        })
         .map(|v| CapturedGuc {
             name: v.name().to_string(),
             val: current_value(v),
@@ -1429,6 +1442,7 @@ pub(crate) fn capture_session_gucs(reg: &GucRegistry) -> Vec<CapturedGuc> {
             srole: v.gen().srole,
             sourcefile: v.gen().sourcefile.clone(),
             sourceline: v.gen().sourceline,
+            pending_restart: v.gen().status & GUC_PENDING_RESTART != 0,
         })
         .collect()
 }
@@ -1457,6 +1471,13 @@ pub(crate) fn bind_captured_guc(
             Err(e) => return reject(elevel, *e).map(drop),
         },
     };
+
+    if cap.pending_restart {
+        reg.vars[idx].gen_mut().status |= GUC_PENDING_RESTART;
+    }
+    if cap.source == PGC_S_DEFAULT {
+        return Ok(());
+    }
 
     match check_can_set(
         reg.vars[idx].gen(),
