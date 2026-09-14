@@ -733,3 +733,69 @@ fn release_callbacks_skipped_when_phase_action_errors() {
     ResourceOwnerForgetLock(o, tag).unwrap();
     ResourceOwnerDelete(parent);
 }
+
+// resowner.c:816-819: `next` is saved before each call and the live list is
+// followed afterwards, so a callback may unregister itself, and an entry a
+// callback unregisters further down the list is not invoked.
+#[cfg_attr(miri, ignore)]
+#[test]
+fn release_callbacks_follow_the_live_list() {
+    setup();
+    fn cb_a(phase: ResourceReleasePhase, _c: bool, _t: bool, arg: Datum) {
+        RELEASED.with(|r| r.borrow_mut().push(("a", arg.as_usize() + phase as usize)));
+    }
+    fn cb_b(phase: ResourceReleasePhase, _c: bool, _t: bool, arg: Datum) {
+        RELEASED.with(|r| r.borrow_mut().push(("b", arg.as_usize() + phase as usize)));
+        UnregisterResourceReleaseCallback(cb_b, arg);
+    }
+    fn cb_c(phase: ResourceReleasePhase, _c: bool, _t: bool, arg: Datum) {
+        RELEASED.with(|r| r.borrow_mut().push(("c", arg.as_usize() + phase as usize)));
+        UnregisterResourceReleaseCallback(cb_a, Datum::from_usize(10));
+    }
+    RegisterResourceReleaseCallback(cb_a, Datum::from_usize(10)).unwrap();
+    RegisterResourceReleaseCallback(cb_b, Datum::from_usize(20)).unwrap();
+    RegisterResourceReleaseCallback(cb_c, Datum::from_usize(30)).unwrap();
+
+    let o = owner("t");
+    ResourceOwnerRelease(o, RESOURCE_RELEASE_BEFORE_LOCKS, false, false).unwrap();
+    assert_eq!(released(), vec![("c", 31), ("b", 21)]);
+
+    ResourceOwnerRelease(o, RESOURCE_RELEASE_LOCKS, false, true).unwrap();
+    assert_eq!(released(), vec![("c", 32)]);
+    UnregisterResourceReleaseCallback(cb_c, Datum::from_usize(30));
+    ResourceOwnerRelease(o, RESOURCE_RELEASE_AFTER_LOCKS, false, false).unwrap();
+    assert_eq!(released(), vec![]);
+    ResourceOwnerDelete(o);
+}
+
+// resowner.c:814: the callback list is read after the phase's resources are
+// released, so a ReleaseResource that registers the first callback has it
+// invoked in the same phase.
+#[cfg_attr(miri, ignore)]
+#[test]
+fn release_callback_registered_by_resource_release_runs_in_same_phase() {
+    setup();
+    fn cb(phase: ResourceReleasePhase, _c: bool, _t: bool, arg: Datum) {
+        RELEASED.with(|r| r.borrow_mut().push(("cb", arg.as_usize() + phase as usize)));
+    }
+    fn release_registering(res: Datum) {
+        RELEASED.with(|r| r.borrow_mut().push(("reg", res.as_usize())));
+        RegisterResourceReleaseCallback(cb, Datum::from_usize(40)).unwrap();
+    }
+    static REGISTERING_DESC: ResourceOwnerDesc = ResourceOwnerDesc {
+        name: "registering",
+        release_phase: RESOURCE_RELEASE_BEFORE_LOCKS,
+        release_priority: 1,
+        ReleaseResource: release_registering,
+        DebugPrint: None,
+    };
+    let o = owner("t");
+    remember(o, 7, &REGISTERING_DESC);
+    ResourceOwnerRelease(o, RESOURCE_RELEASE_BEFORE_LOCKS, false, false).unwrap();
+    assert_eq!(released(), vec![("reg", 7), ("cb", 40 + RESOURCE_RELEASE_BEFORE_LOCKS as usize)]);
+    UnregisterResourceReleaseCallback(cb, Datum::from_usize(40));
+    ResourceOwnerRelease(o, RESOURCE_RELEASE_LOCKS, false, true).unwrap();
+    ResourceOwnerRelease(o, RESOURCE_RELEASE_AFTER_LOCKS, false, false).unwrap();
+    assert_eq!(released(), vec![]);
+    ResourceOwnerDelete(o);
+}

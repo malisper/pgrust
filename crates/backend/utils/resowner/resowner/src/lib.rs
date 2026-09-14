@@ -634,11 +634,9 @@ struct PhasePrep {
     nlocks: u8,
     parent_is_null: bool,
     aio_nonempty: bool,
-    has_callbacks: bool,
 }
 
 fn prep_phase(a: &mut Arena, owner: ResourceOwner, phase: ResourceReleasePhase) -> PhasePrep {
-    let has_callbacks = !a.callbacks.is_empty();
     let d = a.data_mut(owner);
     if !d.releasing {
         debug_assert_eq!(phase, RESOURCE_RELEASE_BEFORE_LOCKS);
@@ -654,8 +652,27 @@ fn prep_phase(a: &mut Arena, owner: ResourceOwner, phase: ResourceReleasePhase) 
         nlocks: d.nlocks,
         parent_is_null: d.parent.is_null(),
         aio_nonempty: !d.aio_handles.is_empty(),
-        has_callbacks,
     }
+}
+
+// resowner.c:814-821 walks the prepend list head-first (most recently
+// registered first), saving only `next` before each call and following the
+// live list afterwards: a callback may unregister itself, and an entry
+// unregistered mid-dispatch is not invoked. Removals only shift entries
+// down, so the saved neighbour, if still registered, sits at or below its
+// old index.
+type CallbackEntry = (ResourceReleaseCallback, Datum);
+
+fn callback_dispatch_next(a: &Arena, idx: usize) -> Option<(usize, CallbackEntry)> {
+    let idx = idx.checked_sub(1)?;
+    Some((idx, *a.callbacks.get(idx)?))
+}
+
+fn callback_dispatch_locate(a: &Arena, hint: usize, want: CallbackEntry) -> Option<usize> {
+    let end = hint.saturating_add(1).min(a.callbacks.len());
+    a.callbacks[..end]
+        .iter()
+        .rposition(|&(cb, arg)| core::ptr::fn_addr_eq(cb, want.0) && arg == want.1)
 }
 
 fn resource_owner_release_internal(
@@ -767,12 +784,19 @@ fn resource_owner_release_internal(
 
     // resowner.c:814-821: the callbacks run only after the phase's own
     // actions returned; an error thrown by them longjmps past the callbacks.
-    if result.is_ok() && prep.has_callbacks {
-        // C iterates head-first over a prepend list = most recently registered
-        // first; callbacks may unregister themselves, so snapshot.
-        let callbacks = with_arena(|a| a.callbacks.clone());
-        for (callback, arg) in callbacks.into_iter().rev() {
+    // The list is read here, not in prep_phase: a ReleaseResource that
+    // registers the first callback gets it invoked in this same phase.
+    if result.is_ok() {
+        let mut item = with_arena(|a| {
+            let idx = a.callbacks.len().checked_sub(1)?;
+            Some((idx, a.callbacks[idx]))
+        });
+        while let Some((idx, (callback, arg))) = item {
+            let next = with_arena(|a| callback_dispatch_next(a, idx));
             callback(phase, is_commit, is_top_level, arg);
+            item = next.and_then(|(hint, want)| {
+                with_arena(|a| callback_dispatch_locate(a, hint, want)).map(|idx| (idx, want))
+            });
         }
     }
 
