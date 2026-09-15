@@ -672,6 +672,12 @@ fn pgoutput_commit_txn(
     OutputPluginUpdateProgress(opc, !sent_begin_txn)?;
 
     if !sent_begin_txn {
+        // pgoutput.c:649 — the subscription TAP suite reads this line.
+        let xid = rb.txn(txn).xid;
+        let _ = elog(
+            types_error::DEBUG1,
+            format!("skipped replication of an empty transaction with XID: {xid}"),
+        );
         return Ok(());
     }
 

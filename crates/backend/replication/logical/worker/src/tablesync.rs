@@ -279,8 +279,35 @@ fn process_syncing_tables_for_apply(mcx: Mcx<'static>, current_lsn: XLogRecPtr) 
         }
     }
 
+    // tablesync.c:663: the subscription's two_phase is still PENDING and every
+    // relation just became READY — the apply worker has to restart so that it
+    // re-requests streaming with two_phase enabled (run_apply_worker enables
+    // it only at start). Without this the state stayed PENDING for the life
+    // of the worker: subtwophasestate never reached 'e', prepared transactions
+    // kept arriving as ordinary ones at COMMIT PREPARED time.
+    let mut should_exit = false;
     if started_tx {
+        if my_sub(|s| s.twophasestate) == pg_subscription::LOGICALREP_TWOPHASE_STATE_PENDING {
+            xact::CommandCounterIncrement()?; // make updates visible
+            if all_tablesyncs_ready(mcx)? {
+                let name = my_sub(|s| s.name.clone());
+                let _ = elog::elog(
+                    LOG,
+                    format!(
+                        "logical replication apply worker for subscription \"{name}\" will restart so that two_phase can be enabled"
+                    ),
+                );
+                should_exit = true;
+            }
+        }
         xact::CommitTransactionCommand()?;
+    }
+
+    if should_exit {
+        // C: ApplyLauncherForgetWorkerStartTime + proc_exit(0); the apply loop
+        // checks the exit request right after every process_syncing_tables.
+        launcher::ApplyLauncherForgetWorkerStartTime(subid);
+        crate::request_apply_worker_exit();
     }
     Ok(())
 }
@@ -409,7 +436,7 @@ fn fetch_remote_table_info(
     conn: &mut PgConn,
     nspname: &str,
     relname: &str,
-) -> PgResult<(logicalproto::LogicalRepRelation, Vec<String>)> {
+) -> PgResult<(logicalproto::LogicalRepRelation, Vec<String>, bool)> {
     fn text(r: &[Option<Vec<u8>>], i: usize) -> String {
         r.get(i).and_then(|c| c.as_ref()).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
     }
@@ -501,13 +528,21 @@ fn fetch_remote_table_info(
         }
     }
 
-    // Columns (attgenerated = '' excludes generated; gencol publication is
-    // therefore refused implicitly — C's gencol arm is phase-2 here).
+    // Columns (tablesync.c:969-995). Generated columns can be replicated
+    // since 18: a 5th column reports attgenerated != '' and the query no
+    // longer filters them out; 12..17 publishers still exclude them.
+    let server_version = conn.server_version();
+    let gencol_col = if server_version >= 180000 { ", a.attgenerated != ''" } else { "" };
+    let gencol_filter = if (120000..180000).contains(&server_version) {
+        "AND a.attgenerated = '' "
+    } else {
+        ""
+    };
     let cmd = format!(
-        "SELECT a.attnum, a.attname, a.atttypid, a.attnum = ANY(i.indkey) FROM \
+        "SELECT a.attnum, a.attname, a.atttypid, a.attnum = ANY(i.indkey){gencol_col} FROM \
          pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_index i ON (i.indexrelid = \
          pg_get_replica_identity_index({remoteid})) WHERE a.attnum > 0::pg_catalog.int2 AND NOT \
-         a.attisdropped AND a.attgenerated = '' AND a.attrelid = {remoteid} ORDER BY a.attnum"
+         a.attisdropped {gencol_filter}AND a.attrelid = {remoteid} ORDER BY a.attnum"
     );
     let res = conn.exec(&cmd)?;
     if res.status != ExecStatus::TuplesOk {
@@ -523,6 +558,7 @@ fn fetch_remote_table_info(
     let mut attnames = Vec::new();
     let mut atttyps = Vec::new();
     let mut attkeys = Vec::new();
+    let mut gencol_published = false;
     for row in &res.rows {
         // tablesync.c:1023: not in the column list, skip it.
         let attnum: i16 = text(row, 0).parse().unwrap_or(0);
@@ -532,6 +568,11 @@ fn fetch_remote_table_info(
         attnames.push(text(row, 1));
         atttyps.push(text(row, 2).parse().unwrap_or(InvalidOid));
         attkeys.push(text(row, 3) == "t");
+        // tablesync.c:1040: remember if the remote table has published any
+        // generated column.
+        if server_version >= 180000 && !gencol_published {
+            gencol_published = text(row, 4) == "t";
+        }
     }
 
     Ok((
@@ -547,6 +588,7 @@ fn fetch_remote_table_info(
             attkeys,
         },
         quals,
+        gencol_published,
     ))
 }
 
@@ -554,19 +596,37 @@ fn fetch_remote_table_info(
 // no row filter COPY directly; other relkinds (views, partitioned tables
 // published via root) and filtered tables go through COPY (SELECT ...), with
 // C's ONLY for RELKIND_RELATION (children are copied separately) and the
-// filters OR'ed. Published generated columns stay refused upstream
-// (fetch_remote_table_info excludes them), so C's gencol SELECT arm is
-// unreachable here.
+// filters OR'ed. A table with a published generated column (18+) also goes
+// through COPY (SELECT ...): plain COPY refuses generated columns in its
+// column list (tablesync.c:1204-1211). With binary = true against a 16+
+// publisher the copy runs WITH (FORMAT binary) on both ends (tablesync.c:1252).
 fn copy_table_cmd(
     relkind: u8,
     nspname: &str,
     relname: &str,
     attnames: &[String],
     quals: &[String],
+    gencol_published: bool,
+    binary: bool,
+) -> String {
+    let mut cmd = copy_table_select(relkind, nspname, relname, attnames, quals, gencol_published);
+    if binary {
+        cmd.push_str(" WITH (FORMAT binary)");
+    }
+    cmd
+}
+
+fn copy_table_select(
+    relkind: u8,
+    nspname: &str,
+    relname: &str,
+    attnames: &[String],
+    quals: &[String],
+    gencol_published: bool,
 ) -> String {
     let collist =
         attnames.iter().map(|a| quote_ident(a)).collect::<Vec<_>>().join(", ");
-    if relkind == b'r' && quals.is_empty() {
+    if relkind == b'r' && quals.is_empty() && !gencol_published {
         let mut cmd = format!("COPY {}.{}", quote_ident(nspname), quote_ident(relname));
         if !attnames.is_empty() {
             cmd.push_str(" (");
@@ -593,7 +653,7 @@ fn copy_table_cmd(
 
 // copy_table (tablesync.c:1143).
 fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str) -> PgResult<()> {
-    let (lrel, quals) = fetch_remote_table_info(conn, nspname, relname)?;
+    let (lrel, quals, gencol_published) = fetch_remote_table_info(conn, nspname, relname)?;
 
     logicalrelation::logicalrep_relmap_update(&lrel);
     let subid = my_sub(|s| s.oid);
@@ -601,7 +661,18 @@ fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str
         logicalrelation::logicalrep_rel_open(mcx, lrel.remoteid, types_rel::NoLock, subid)?;
     let _ = &entry;
 
-    let cmd = copy_table_cmd(lrel.relkind, nspname, relname, &lrel.attnames, &quals);
+    // tablesync.c:1252: binary COPY needs a 16+ publisher (binary COPY of a
+    // column list arrived with COPY's binary support for logical rep there).
+    let binary = conn.server_version() >= 160000 && my_sub(|s| s.binary);
+    let cmd = copy_table_cmd(
+        lrel.relkind,
+        nspname,
+        relname,
+        &lrel.attnames,
+        &quals,
+        gencol_published,
+        binary,
+    );
 
     let res = conn.exec(&cmd)?;
     if res.status != ExecStatus::CopyOut {
@@ -614,7 +685,21 @@ fn copy_table(mcx: Mcx<'static>, conn: &mut PgConn, nspname: &str, relname: &str
     // Local COPY FROM fed by the publisher's COPY OUT stream. C's
     // copy_read_data: block for at least one byte, hand over what's buffered.
     let attnamelist = make_copy_attnamelist(mcx, &lrel.attnames)?;
-    let options = types_nodes::NodeList::nil();
+    let mut options = types_nodes::NodeList::nil();
+    if binary {
+        // list_make1(makeDefElem("format", makeString("binary"), -1))
+        let arg = types_nodes::Node::mk(mcx, types_nodes::String { sval: "binary" })?;
+        let def = types_nodes::Node::mk(
+            mcx,
+            types_nodes::parsenodes::DefElem {
+                defname: Some("format"),
+                arg: Some(arg),
+                location: -1,
+                ..Default::default()
+            },
+        )?;
+        options.lappend(mcx, def)?;
+    }
     let conn_cell = std::cell::RefCell::new(conn);
     let pending: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::new());
     let cb: Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + '_> =
@@ -858,13 +943,18 @@ pub(crate) fn LogicalRepSyncTableStart(
         )?;
     }
 
-    // RLS-enabled targets refuse (recorded divergence: C refuses only when
-    // the acting user does not bypass RLS, check_enable_rls).
-    if rel.rd_rel.relrowsecurity {
+    // tablesync.c:1538: refuse only when RLS actually applies to the acting
+    // user (check_enable_rls — the table owner without FORCE, a superuser or
+    // a BYPASSRLS role are exempt), with C's message. Testing relrowsecurity
+    // alone refused the owner's own table after NO FORCE ROW LEVEL SECURITY
+    // and looped the sync forever (src/test/subscription 027_nosuperuser).
+    if rls::check_enable_rls(rel.rd_id, InvalidOid, false)? == rls::CheckEnableRls::RlsEnabled {
+        let username = miscinit::GetUserNameFromId(mcx, miscinit::GetUserId(), true)?;
         ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
-                "cannot replicate into relation with row-level security enabled: \"{relname}\""
+                "user \"{}\" cannot replicate into relation with row-level security enabled: \"{relname}\"",
+                username.as_ref().map(|s| s.as_str()).unwrap_or("")
             ))
             .finish(loc("LogicalRepSyncTableStart"))?;
     }
@@ -956,19 +1046,19 @@ mod tests {
         let cols = ["a".to_string(), "b".to_string()];
         // Plain table, no row filter: direct COPY with a column list.
         assert_eq!(
-            super::copy_table_cmd(b'r', "public", "t", &cols, &[]),
+            super::copy_table_cmd(b'r', "public", "t", &cols, &[], false, false),
             "COPY \"public\".\"t\" (\"a\", \"b\") TO STDOUT"
         );
         // Non-plain publisher relkind (partitioned via root, views): the
         // COPY (SELECT ...) arm, without C's ONLY (that is table-only).
         assert_eq!(
-            super::copy_table_cmd(b'p', "public", "t", &cols, &[]),
+            super::copy_table_cmd(b'p', "public", "t", &cols, &[], false, false),
             "COPY (SELECT \"a\", \"b\" FROM \"public\".\"t\") TO STDOUT"
         );
         // Single row filter on a plain table: SELECT arm with ONLY + WHERE
         // (tablesync.c:1199-1240).
         assert_eq!(
-            super::copy_table_cmd(b'r', "public", "t", &cols, &["(a > 5)".to_string()]),
+            super::copy_table_cmd(b'r', "public", "t", &cols, &["(a > 5)".to_string()], false, false),
             "COPY (SELECT \"a\", \"b\" FROM ONLY \"public\".\"t\" WHERE (a > 5)) TO STDOUT"
         );
         // Multiple publications' filters are OR'ed.
@@ -978,10 +1068,32 @@ mod tests {
                 "public",
                 "t",
                 &cols,
-                &["(a > 5)".to_string(), "(b IS NULL)".to_string()]
+                &["(a > 5)".to_string(), "(b IS NULL)".to_string()],
+                false,
+                false
             ),
             "COPY (SELECT \"a\", \"b\" FROM ONLY \"public\".\"t\" \
              WHERE (a > 5) OR (b IS NULL)) TO STDOUT"
+        );
+    }
+
+    // tablesync.c:1172/1204: a published generated column forces the SELECT
+    // arm (plain COPY refuses generated columns in its column list); binary
+    // appends WITH (FORMAT binary) to either shape (tablesync.c:1255).
+    #[test]
+    fn copy_table_cmd_gencol_and_binary_shapes() {
+        let cols = vec!["a".to_string(), "gen1".to_string()];
+        assert_eq!(
+            super::copy_table_cmd(b'r', "public", "t", &cols, &[], true, false),
+            "COPY (SELECT \"a\", \"gen1\" FROM ONLY \"public\".\"t\") TO STDOUT"
+        );
+        assert_eq!(
+            super::copy_table_cmd(b'r', "public", "t", &cols, &[], false, true),
+            "COPY \"public\".\"t\" (\"a\", \"gen1\") TO STDOUT WITH (FORMAT binary)"
+        );
+        assert_eq!(
+            super::copy_table_cmd(b'r', "public", "t", &cols, &[], true, true),
+            "COPY (SELECT \"a\", \"gen1\" FROM ONLY \"public\".\"t\") TO STDOUT WITH (FORMAT binary)"
         );
     }
 
