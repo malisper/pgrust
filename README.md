@@ -44,13 +44,25 @@ Rust makes it easy to re-architect several core Postgres pieces. pgrust has:
 and many other really awesome pieces. The scheduler and the OOM killer go
 after two of
 [the four horsemen behind thousands of Postgres outages](https://malisper.me/the-four-horsemen-behind-thousands-of-postgres-outages/).
-See [What's new in v0.2](#whats-new-in-v02) for more.
-<!-- TODO(v0.3): add a "What's new in v0.3" section (Michael to author) and
-     repoint the line above before the v0.3 release ships. -->
+See [What's new in v0.3](#whats-new-in-v03) for more.
+
+## What's new in v0.3
+
+This release is mostly about making pgrust more reliable.
+
+- We're now on PostgreSQL 18.6, including its bug and security fixes.
+- Test mode (`--profile test`) gives you disposable test databases. It turns
+  off durability, so use it only for data you can throw away.
+- Connections can now wait for a slot when the server is full. Set
+  `connection_queue_size` to enable it; the queue is off by default.
+- `cbstore` is now `pgrcolumnar`. Update SQL that uses `USING cbstore` to
+  `USING pgrcolumnar`; the old name no longer works.
 
 ## Status
 
-pgrust is not production ready. Do not put data you care about in it.
+We don't recommend running pgrust in production (yet), but we are
+successfully running it ourselves internally. Keep Postgres as the source
+of truth for data you can't afford to lose.
 
 pgrust currently passes the Postgres regression suite. It's faster than
 Postgres and ClickHouse, but it still has a lot of bugs. Our #1 priority right
@@ -326,7 +338,7 @@ To build the image from source instead, the repo's
 docker buildx build --load -t pgrust .
 ```
 
-## What's new in v0.2
+## Under the hood
 
 **Executor**
 
@@ -363,7 +375,7 @@ docker buildx build --load -t pgrust .
 
 ## Roadmap
 
-v0.2 proves we can achieve better performance than Postgres and ClickHouse
+pgrust proves we can achieve better performance than Postgres and ClickHouse
 while maintaining identical behavior to Postgres. Next we're working on
 testing and battle testing pgrust and making it so people can trust pgrust
 with their data.
