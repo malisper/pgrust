@@ -160,6 +160,12 @@ fn set_config_argv(name: &str, value: &str) -> PgResult<()> {
 /// the regression suite died with "no unpinned buffers available".
 /// Shared memory is not a constraint here (buffers live on the heap), so a
 /// successful parse + data directory is the whole check.
+/// The one PGDATA read (determinism lint: raw env sites are a ratchet budget
+/// per file; both the postmaster and the --check probe go through here).
+fn pgdata_from_env() -> Option<String> {
+    std::env::var("PGDATA").ok()
+}
+
 pub fn CheckMain(argv: &[String]) -> PgResult<()> {
     guc_seams::initialize_guc_options::call()?;
     let mut datadir: Option<String> = None;
@@ -208,7 +214,7 @@ pub fn CheckMain(argv: &[String]) -> PgResult<()> {
             _ => fail(format!("invalid argument: \"{arg}\"")),
         }
     }
-    let datadir = datadir.or_else(|| std::env::var("PGDATA").ok()).unwrap_or_else(|| {
+    let datadir = datadir.or_else(pgdata_from_env).unwrap_or_else(|| {
         fail("no data directory specified".to_string())
     });
     if !std::path::Path::new(&datadir).is_dir() {
@@ -394,7 +400,7 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     {
         match user_d_option
             .clone()
-            .or_else(|| std::env::var("PGDATA").ok())
+            .or_else(pgdata_from_env)
             .map(|d| miscinit::make_absolute_path(&d))
             .transpose()?
         {
