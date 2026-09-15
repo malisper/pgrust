@@ -21,6 +21,14 @@ fn walker_arms_lint_passes() {
         .expect("repo root");
     let script = repo.join("crates/_support/seams_init/tests/lint-walker-arms.sh");
     assert!(script.is_file(), "missing {}", script.display());
+    // The lint drives tools/walker-arms/walker_arms.py, an internal tree the
+    // public release tree does not carry; there the census cannot run at all,
+    // so skip loudly instead of failing `cargo test --workspace` for users.
+    let tool = repo.join("tools/walker-arms/walker_arms.py");
+    if !tool.is_file() {
+        eprintln!("walker_arms_lint_passes: SKIP — {} not present (public tree)", tool.display());
+        return;
+    }
 
     let out = Command::new("bash")
         .arg(&script)
