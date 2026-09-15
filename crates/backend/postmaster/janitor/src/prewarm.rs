@@ -2,7 +2,7 @@
 //! after any successful janitor mint — warm-pool spare replenish AND cold
 //! batch/serial mints — a one-shot internal worker connects to the new
 //! database once and exits, so the fresh clone's relcache init file
-//! (`pgrust_internal.init`, relcache::initfile) gets written and its
+//! (`pg_internal.init.pgrust`, relcache::initfile) gets written and its
 //! catalog pages land in shared buffers BEFORE the first client session
 //! pays the fresh-database catalog bootstrap (~4.5-9ms server-side vs ~1ms
 //! warm, the mint-profile finding).
@@ -111,7 +111,7 @@ pub(crate) fn dispatch_pass() -> PgResult<()> {
     Ok(())
 }
 
-/// Does `base/<oid>/pgrust_internal.init` exist? vfs-routed stat (fd), the
+/// Does `base/<oid>/pg_internal.init.pgrust` exist? vfs-routed stat (fd), the
 /// initfile.rs convention: datadir-domain paths must ride the vfs.
 fn init_file_present(oid: Oid) -> bool {
     let path = format!("base/{oid}/{}", relcache::initfile::RELCACHE_INIT_FILENAME);

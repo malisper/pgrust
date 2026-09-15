@@ -37,7 +37,13 @@ use types_rel::AccessShareLock;
 // a different name; C 18.3 writes/reads its own pg_internal.init in the same
 // datadir and neither binary ever opens the other's file. Our unlink paths
 // remove BOTH names so a later C boot cannot trust a file our DDL made stale.
-pub const RELCACHE_INIT_FILENAME: &str = "pgrust_internal.init";
+// The name keeps C's `pg_internal.init` as its PREFIX on purpose: every C
+// tool that walks a data directory skips that prefix (pg_checksums,
+// pg_basebackup, pg_rewind, pg_combinebackup, pg_verifybackup — all
+// match_prefix entries), so our cache file is skipped exactly like C's own.
+// The old `pgrust_internal.init` name made `pg_checksums --check` fail with
+// "invalid segment number 0 in file name" (src/bin/pg_checksums 002_actions).
+pub const RELCACHE_INIT_FILENAME: &str = "pg_internal.init.pgrust";
 pub const C_RELCACHE_INIT_FILENAME: &str = "pg_internal.init";
 pub const RELCACHE_INIT_FILEMAGIC: i32 = 0x573266;
 // Bump whenever the entry codec below changes shape; a mismatch rejects the file.
