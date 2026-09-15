@@ -1061,6 +1061,20 @@ impl PgConn {
     // index and a panic. Once framing is lost there is no way to find the
     // next message boundary, so the connection is marked dead (libpq's
     // handleSyncLoss discipline).
+    // The type byte of the next complete message, without consuming it.
+    fn peek_message_type(&self) -> Option<u8> {
+        let avail = self.inbuf.len() - self.inpos;
+        if avail < 5 {
+            return None;
+        }
+        let p = self.inpos;
+        let wire_len = be_i32(&self.inbuf[p + 1..p + 5]);
+        if !(4..=MAX_MESSAGE_LEN).contains(&wire_len) || avail < 1 + wire_len as usize {
+            return None;
+        }
+        Some(self.inbuf[p])
+    }
+
     pub(crate) fn next_message(&mut self) -> Result<Option<(u8, Vec<u8>)>, String> {
         let avail = self.inbuf.len() - self.inpos;
         if avail < 5 {
@@ -1554,6 +1568,21 @@ impl PgConn {
     // PQgetCopyData(async=true).
     pub fn get_copy_data(&mut self) -> Result<CopyData, String> {
         loop {
+            // fe-protocol3.c getCopyDataMessage's default arm: any message
+            // that is not copy data, CopyDone, an error or an async notice
+            // "means the server is done with the copy" — it is left in the
+            // buffer for the next get_result and the copy reports its end.
+            // The walsender's shutdown path is exactly this: CommandComplete
+            // ("COPY 0") with no CopyDone first (WalSndDone). Consuming it
+            // here as "unexpected message type during COPY" killed the
+            // connection and the walreceiver with it.
+            if let Some(t) = self.peek_message_type() {
+                if !matches!(t, b'd' | b'c' | b'E' | b'S' | b'N' | b'A') {
+                    self.copy_server_done = true;
+                    self.copy_client_done = true;
+                    return Ok(CopyData::End);
+                }
+            }
             let (t, body) = match self.next_message() {
                 Ok(Some(m)) => m,
                 Ok(None) => return Ok(CopyData::Block),
@@ -2531,6 +2560,25 @@ mod tests {
         conn.inbuf = frame(b'd', -5, b"");
         assert!(conn.get_copy_data().is_err());
         assert!(conn.connection_bad());
+    }
+
+    // getCopyDataMessage's default arm: a CommandComplete arriving inside a
+    // COPY with no CopyDone first (the walsender's shutdown "COPY 0") ends
+    // the copy, is NOT consumed, and the next get_result reads it.
+    #[test]
+    fn get_copy_data_foreign_message_ends_the_copy_and_stays_readable() {
+        let (mut conn, _srv) = test_conn();
+        conn.in_copy = true;
+        conn.pending_results = true;
+        let mut buf = frame(b'd', 5, b"x");
+        buf.extend_from_slice(&frame(b'C', 11, b"COPY 0\0"));
+        conn.inbuf = buf;
+        assert!(matches!(conn.get_copy_data(), Ok(CopyData::Msg(m)) if m == b"x"));
+        assert!(matches!(conn.get_copy_data(), Ok(CopyData::End)));
+        assert!(!conn.connection_bad());
+        let r = conn.get_result().unwrap().expect("the CommandComplete is still there");
+        assert_eq!(r.status, ExecStatus::CommandOk);
+        assert_eq!(r.cmd_tag, "COPY 0");
     }
 
     #[test]
