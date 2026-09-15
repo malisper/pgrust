@@ -887,3 +887,44 @@
 #------------------------------------------------------------------------------
 
 # Add settings for extensions here
+
+
+#------------------------------------------------------------------------------
+# PGRUST
+#------------------------------------------------------------------------------
+
+# Settings specific to pgrust (not present in PostgreSQL).
+
+# - Connection Admission -
+
+#connection_queue_size = 0		# over-limit connections that wait for a slot
+					# instead of failing (0 = fail immediately)
+					# (change requires restart)
+#connection_queue_timeout = 5000	# max time in the admission queue, in ms
+					# (0 = wait forever)
+#pgrust.admission_bypass = off		# a client claims a reserved slot instead of
+					# waiting in the queue (verified at login:
+					# non-superusers get the reserved-slots error)
+#pgrust.admission_bypass_applications = 'psql, pgcli, pgAdmin 4, HeidiSQL, TablePlus, dbvis, azdata, OmniDB, SQL Workbench/J, DataGrip, IntelliJ IDEA, DBeaver, Postico'
+					# application_name prefixes that claim a
+					# reserved slot (interactive tools)
+#max_active_queries = 0			# concurrently admitted transactions
+					# (0 = unlimited)
+
+# - Per-Session Caches -
+
+#shared_catalog_cache = on		# sessions adopt catalog and relation cache
+					# entries from a shared cache
+					# (change requires restart)
+#catcache_size_limit = 2048		# catalog cache tuples kept per session
+					# (0 = unlimited)
+#relcache_size_limit = 512		# relation cache entries kept per session
+					# (0 = unlimited)
+#idle_passivate_timeout = 60		# idle time after which a session releases
+					# its caches, in s (0 = never)
+#idle_passivate_stack = on		# also release idle stack memory
+
+# - Modules -
+
+#preload_contrib = ''			# compiled-in contrib modules to preload
+					# (change requires restart)
