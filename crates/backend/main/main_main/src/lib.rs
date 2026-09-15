@@ -321,10 +321,12 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
         // does not implement bootstrap mode; clusters are initialized with
         // stock PostgreSQL's initdb. Refuse cleanly on stderr — initdb
         // pointed at this binary must see a message, not a Rust backtrace.
-        DispatchOption::Check | DispatchOption::Boot => {
-            eprintln!(
-                "{progname}: bootstrap mode (--boot/--check) is not supported by pgrust"
-            );
+        // main.c:206: `--check` is initdb's configuration probe — it must
+        // answer like C (exit 0 for an acceptable -c set) or initdb pointed at
+        // this binary sizes the cluster at its minimum (postmaster::CheckMain).
+        DispatchOption::Check => postmaster::CheckMain(argv),
+        DispatchOption::Boot => {
+            eprintln!("{progname}: bootstrap mode (--boot) is not supported by pgrust");
             eprintln!(
                 "{progname}: initialize the data directory with stock PostgreSQL's \
                  initdb, then start pgrust on it (see docs/design/carve-ratifications.md)"

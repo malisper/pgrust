@@ -148,6 +148,75 @@ fn set_config_argv(name: &str, value: &str) -> PgResult<()> {
     guc::SetConfigOption(name, Some(value), GucContext::PGC_POSTMASTER, GucSource::PGC_S_ARGV)
 }
 
+/// `postgres --check` (main.c:206 -> BootstrapModeMain(check_only=true)):
+/// the probe initdb's test_config_settings runs for every candidate
+/// `max_connections` / `shared_buffers` pair, keeping the largest pair whose
+/// probe exits 0. C parses bootstrap's option set ("B:c:d:D:Fkr:X:-:"), sets
+/// each GUC at PGC_POSTMASTER / PGC_S_ARGV (a bad value is a hard error),
+/// checks the data directory, sizes shared memory and exits 0. Refusing the
+/// probe outright (the v0.3-beta behaviour) made initdb pointed at pgrust
+/// fall back to its minimum trial — shared_buffers = 400kB, max_connections
+/// = 20 — so every cluster initialized that way ran on 50 shared buffers and
+/// the regression suite died with "no unpinned buffers available".
+/// Shared memory is not a constraint here (buffers live on the heap), so a
+/// successful parse + data directory is the whole check.
+pub fn CheckMain(argv: &[String]) -> PgResult<()> {
+    guc_seams::initialize_guc_options::call()?;
+    let mut datadir: Option<String> = None;
+    let mut args = argv.iter().skip(2).peekable();
+    let mut fail = |msg: String| -> ! {
+        write_stderr(format!("{PROGNAME}: {msg}\n"));
+        std::process::exit(1)
+    };
+    while let Some(arg) = args.next() {
+        let Some(rest) = arg.strip_prefix('-') else {
+            fail(format!("invalid argument: \"{arg}\""));
+        };
+        let (opt, inline_val) = if let Some(long) = rest.strip_prefix('-') {
+            ('-', Some(long.to_string()))
+        } else {
+            let mut cs = rest.chars();
+            let o = cs.next().unwrap_or('\0');
+            let tail: String = cs.collect();
+            (o, if tail.is_empty() { None } else { Some(tail) })
+        };
+        let mut val = || -> String {
+            inline_val.clone().or_else(|| args.next().cloned()).unwrap_or_else(|| {
+                fail(format!("option requires an argument -- {opt}"))
+            })
+        };
+        match opt {
+            'B' => set_config_argv("shared_buffers", &val())?,
+            'c' | '-' => {
+                let optarg = val();
+                let (name, value) = parse_long_option(&optarg);
+                let Some(value) = value else {
+                    fail(if opt == '-' {
+                        format!("--{optarg} requires a value")
+                    } else {
+                        format!("-c {optarg} requires a value")
+                    });
+                };
+                set_config_argv(&name, &value)?;
+            }
+            'D' => datadir = Some(val()),
+            'd' | 'r' | 'X' => {
+                let _ = val();
+            }
+            'F' => set_config_argv("fsync", "false")?,
+            'k' => {}
+            _ => fail(format!("invalid argument: \"{arg}\"")),
+        }
+    }
+    let datadir = datadir.or_else(|| std::env::var("PGDATA").ok()).unwrap_or_else(|| {
+        fail("no data directory specified".to_string())
+    });
+    if !std::path::Path::new(&datadir).is_dir() {
+        fail(format!("data directory \"{datadir}\" does not exist"));
+    }
+    std::process::exit(0)
+}
+
 pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     let mut user_d_option: Option<String> = None;
     let mut output_config_variable: Option<String> = None;

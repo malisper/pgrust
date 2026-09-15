@@ -34,7 +34,7 @@ pub mod statemachine;
 #[cfg(test)]
 mod tests;
 
-pub use main_entry::PostmasterMain;
+pub use main_entry::{CheckMain, PostmasterMain};
 
 pub(crate) const SRC: &str = "src/backend/postmaster/postmaster.c";
 
