@@ -350,10 +350,6 @@ docker buildx build --load -t pgrust .
 This release is mostly about making pgrust more reliable.
 
 - We're now on PostgreSQL 18.6, including its bug and security fixes.
-- Test mode (`--profile test`) gives you disposable test databases. It turns
-  off durability, so use it only for data you can throw away.
-- Connections can now wait for a slot when the server is full. Set
-  `connection_queue_size` to enable it; the queue is off by default.
 - `cbstore` is now `pgrcolumnar`. Update SQL that uses `USING cbstore` to
   `USING pgrcolumnar`; the old name no longer works.
 
