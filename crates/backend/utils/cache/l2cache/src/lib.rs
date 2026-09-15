@@ -310,6 +310,21 @@ pub fn rel_stripe_of(relid: Oid) -> usize {
     rel_stripe(relid)
 }
 
+/// Syscaches whose rows feed the SHARED relcache core without any relcache
+/// invalidation of their own: an index entry's `rd_support` / `rd_opfamily` /
+/// `rd_opcintype` (and the operator arrays) come from pg_amproc, pg_amop,
+/// pg_opclass and pg_opfamily at build time. C keeps that material per
+/// backend, so a change to those catalogs (ALTER OPERATOR FAMILY, a direct
+/// `UPDATE pg_amproc` — amcheck's 005_opclass_damage) is seen by every NEW
+/// backend, and its per-backend OpClassCache is dropped on the CLAOID /
+/// AMPROCNUM syscache callbacks. Here a new session would mirror the shared
+/// core built before the change and keep the old support function forever;
+/// a catcache bump on one of these ids therefore also moves every relcache
+/// stripe. Ids are C's fixed syscache identifiers (cache_syscache::cacheinfo:
+/// AMOPOPID 3, AMOPSTRATEGY 4, AMPROCNUM 5, CLAAMNAMENSP 13, CLAOID 14,
+/// OPFAMILYAMNAMENSP 41, OPFAMILYOID 42), pinned by a test there.
+pub const RELCORE_DEPENDENT_CAT_IDS: [i32; 7] = [3, 4, 5, 13, 14, 41, 42];
+
 /// Bump `domain`'s global generation (sender side, BEFORE the corresponding
 /// sinval message enters the shared queue) and adopt it as this thread's own
 /// view (the sender's caches already reflect the new state).
@@ -317,11 +332,16 @@ pub fn bump(domain: Domain) {
     ensure_view();
     let new = gen_slot(domain).fetch_add(1, Ordering::SeqCst) + 1;
     match domain {
-        Domain::Cat(id) => CAT_VIEW.with(|a| {
-            if let Some(c) = a.get(id as usize) {
-                c.set(new);
+        Domain::Cat(id) => {
+            CAT_VIEW.with(|a| {
+                if let Some(c) = a.get(id as usize) {
+                    c.set(new);
+                }
+            });
+            if RELCORE_DEPENDENT_CAT_IDS.contains(&id) {
+                bump_all_rel();
             }
-        }),
+        }
         Domain::Rel(relid) => REL_VIEW.with(|a| a[rel_stripe(relid)].set(new)),
     }
 }
@@ -878,5 +898,18 @@ mod tests {
         let (waited, dur) = t.join().unwrap();
         assert!(waited);
         assert!(dur >= Duration::from_secs(2));
+    }
+
+    // A catcache bump on an opclass-family syscache moves every relcache
+    // stripe (the shared core's index-access arrays come from those rows).
+    #[test]
+    fn opclass_catcache_bump_moves_every_rel_stripe() {
+        let before = rel_gen_snapshot();
+        bump(Domain::Cat(5)); // AMPROCNUM
+        let after = rel_gen_snapshot();
+        assert!(before.iter().zip(&after).all(|(b, a)| a > b));
+        let before = rel_gen_snapshot();
+        bump(Domain::Cat(0)); // an unrelated cache: rel stripes untouched
+        assert_eq!(before, rel_gen_snapshot());
     }
 }

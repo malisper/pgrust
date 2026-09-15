@@ -188,3 +188,16 @@ pub const CACHEINFO: [CacheDesc; SYS_CACHE_SIZE] = [
     CacheDesc { reloid: 1418, indoid: 174, nkeys: 1, key: [1, 0, 0, 0], nbuckets: 2 },
     CacheDesc { reloid: 1418, indoid: 175, nkeys: 2, key: [2, 3, 0, 0], nbuckets: 2 },
 ];
+
+#[cfg(test)]
+mod relcore_dependent_ids {
+    // l2cache::RELCORE_DEPENDENT_CAT_IDS hardcodes these ids (it cannot depend
+    // on this crate); keep the two lists in step.
+    #[test]
+    fn opclass_family_syscache_ids_are_pinned() {
+        assert_eq!(
+            [super::AMOPOPID, super::AMOPSTRATEGY, super::AMPROCNUM, super::CLAAMNAMENSP, super::CLAOID, super::OPFAMILYAMNAMENSP, super::OPFAMILYOID],
+            [3, 4, 5, 13, 14, 41, 42]
+        );
+    }
+}
