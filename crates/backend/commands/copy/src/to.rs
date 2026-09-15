@@ -449,6 +449,16 @@ pub fn DoCopyTo<'mcx>(
         None => query_tupdesc.as_deref().expect("query COPY carries the executor tupDesc"),
     };
 
+    // copyto.c:1035: CopyOutResponse goes out BEFORE the per-column output
+    // function lookup, so a type without a binary send function fails inside
+    // the copy (CopyOutResponse, then ErrorResponse). libpq-side readers
+    // depend on that order: the logical tablesync worker sees COPY_OUT, starts
+    // its own BeginCopyFrom, and reports "no binary input function" (its
+    // side) first — src/test/subscription 014_binary waits for that line.
+    if matches!(cstate.dest, CopyDest::Frontend) {
+        send_copy_begin(mcx, cstate.attnumlist.len(), cstate.opts.binary)?;
+    }
+
     // FmgrInfo carries droppy fn_extra, so PgVec::new_in (printtup precedent);
     // resolve-once, never per row (rule 4).
     let mut out_functions: PgVec<'mcx, FmgrInfo> = PgVec::new_in(mcx);
@@ -463,10 +473,6 @@ pub fn DoCopyTo<'mcx>(
             lsyscache::typ::getTypeOutputInfo(attr.atttypid)?
         };
         out_functions.push(fmgr_core::fmgr_info(func_oid)?);
-    }
-
-    if matches!(cstate.dest, CopyDest::Frontend) {
-        send_copy_begin(mcx, cstate.attnumlist.len(), cstate.opts.binary)?;
     }
 
     if cstate.opts.binary {
