@@ -650,16 +650,29 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
     let queue_eligible =
         backend_type == BackendType::Backend && list_id == FreeListId::Regular && connqueue::enabled();
 
+    // The reserved band (superuser_reserved_connections +
+    // reserved_connections) is kept OUT of the queue's reach, so that a
+    // superuser can still get in while non-superusers are parked (Michael's
+    // ruling 2026-09-14: superusers jump the queue). Identity is unknown
+    // before authentication, so the rule is on slot counts: queue waiters
+    // are admitted only while more than `reserved` regular slots are free,
+    // and an arrival that finds the pool inside the band takes a slot at
+    // once and proceeds to authentication, where the stock reserved-slot
+    // check (InitPostgres) admits a superuser / pg_use_reserved_connections
+    // member and refuses anyone else with the usual 53300 — exactly C's
+    // behavior in that band. With both settings 0 nothing changes.
+    let reserved = if queue_eligible { reserved_band() } else { 0 };
+
     // Read the waiter count BEFORE the spinlock (never block on a mutex
     // under ProcStructLock); the race is benign — a spurious divert just
     // joins the queue and pops on its first-iteration stall guard.
-    let divert = queue_eligible && connqueue::queued_count() > 0;
+    let waiters = queue_eligible && connqueue::queued_count() > 0;
 
     spin_acquire(&ProcStructLock);
     // SAFETY: [PSL] spins_per_delay read under ProcStructLock.
     s_lock_seams::set_spins_per_delay::call(unsafe { hdr.spins_per_delay.get() });
-    let popped = if divert {
-        None
+    let popped = if waiters && regular_free_exceeds(hdr, reserved) {
+        None // FIFO: join the tail behind the waiters
     } else {
         plist_pop_head(hdr, freelist(hdr, list_id), links_of)
     };
@@ -686,7 +699,12 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
         // never returns (client hangup → silent proc_exit inside).
         None if queue_eligible => connqueue::queue_for_slot(|| {
             spin_acquire(&ProcStructLock);
-            let popped = plist_pop_head(hdr, freelist(hdr, list_id), links_of);
+            // Waiters never dip into the reserved band (see above).
+            let popped = if regular_free_exceeds(hdr, reserved) {
+                plist_pop_head(hdr, freelist(hdr, list_id), links_of)
+            } else {
+                None
+            };
             ProcStructLock.unlock();
             popped
         })?,
@@ -876,6 +894,31 @@ pub fn SetStartupBufferPinWaitBufId(bufid: i32) {
 
 pub fn GetStartupBufferPinWaitBufId() -> i32 {
     ProcGlobal().startupBufferPinWaitBufId.load(Acquire)
+}
+
+/// superuser_reserved_connections + reserved_connections: the regular slots
+/// InitPostgres keeps for privileged roles (both PGC_POSTMASTER).
+fn reserved_band() -> usize {
+    let su = guc_tables::vars::SuperuserReservedConnections.read().max(0) as usize;
+    let r = guc_tables::vars::ReservedConnections.read().max(0) as usize;
+    su + r
+}
+
+/// More than `n` PGPROCs on the Regular freelist? Walks at most n+1 links.
+/// Caller holds ProcStructLock.
+fn regular_free_exceeds(hdr: &PROC_HDR, n: usize) -> bool {
+    let mut count = 0usize;
+    // SAFETY: [PSL] freeProcs traversed under ProcStructLock.
+    let mut cur = unsafe { hdr.freeProcs.get() }.head;
+    while cur != INVALID_PROC_NUMBER {
+        count += 1;
+        if count > n {
+            return true;
+        }
+        // SAFETY: [PSL] freelist links traversed under ProcStructLock.
+        cur = unsafe { hdr.allProcs[cur as usize].links.get() }.next;
+    }
+    false
 }
 
 pub fn HaveNFreeProcs(n: i32) -> (bool, i32) {

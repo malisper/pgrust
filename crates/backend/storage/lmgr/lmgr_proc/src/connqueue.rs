@@ -29,13 +29,16 @@
 //!   raises the exact 53300 error it would have gotten unqueued.
 //!
 //! Exemptions are structural: walsenders/autovacuum/bgworkers pop their own
-//! freelists and never reach this module; the reserved-connections check
-//! (postinit, after authentication) is untouched and still runs after a
-//! queued connection is admitted, so `superuser_reserved_connections`
-//! semantics are exactly today's. Superusers cannot be identified pre-auth
-//! (no catalog access without a PGPROC), so when the pool is truly
-//! exhausted they queue like everyone else — stock behavior gives them an
-//! immediate 53300 there, so queueing is a strict improvement.
+//! freelists and never reach this module. Superusers jump the queue
+//! (ruling 2026-09-14) through the reserved band: waiters are admitted only
+//! while more than `superuser_reserved_connections + reserved_connections`
+//! regular slots are free (InitProcess's pop closure), so the band is never
+//! consumed by queued clients; an arrival that finds the pool inside the
+//! band bypasses the queue, takes a slot and authenticates, where the stock
+//! reserved-slot check (postinit) admits a superuser / reserved-role member
+//! and refuses anyone else with C's 53300. Identity cannot be known
+//! pre-auth (no catalog access without a PGPROC), which is why the rule is
+//! on counts rather than on roles.
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
