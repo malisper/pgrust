@@ -261,6 +261,11 @@ pub static max_active_queries: GucIntVar = GucSlot::new("max_active_queries");
 // pgrust-only (docs/design/connection-scaling.md D6): connection admission queue.
 pub static connection_queue_size: GucIntVar = GucSlot::new("connection_queue_size");
 pub static connection_queue_timeout: GucIntVar = GucSlot::new("connection_queue_timeout");
+// pgrust-only (connection-scaling.md §D6 admission bypass, no C symbol):
+// the startup-packet claim flag and the interactive-client application_name
+// prefix list that implies it.
+pub static pgrust_admission_bypass: GucBoolVar = GucSlot::new("pgrust_admission_bypass");
+pub static pgrust_admission_bypass_applications: GucStringVar = GucSlot::new("pgrust_admission_bypass_applications");
 // pgrust-only (docs/design/connection-scaling.md D3.4): idle passivation.
 pub static idle_passivate_timeout: GucIntVar = GucSlot::new("idle_passivate_timeout");
 // pgrust-only (connection-scaling wave 4): stack release at passivation.

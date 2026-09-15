@@ -730,6 +730,17 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // tcop/postgres/src/stack_mem.rs). No effect while
     // idle_passivate_timeout = 0.
     GucBoolSetting { name: "idle_passivate_stack", context: PGC_SIGHUP, group: CONN_AUTH_SETTINGS, short_desc: Some("Releases idle stack memory when a session passivates."), long_desc: Some("At idle passivation, dirty thread-stack pages below the parked frame are returned to the operating system. No effect when idle_passivate_timeout is 0."), flags: 0, variable: &vars::idle_passivate_stack, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.admission_bypass (pgrust-only, connection-scaling.md §D6
+    // admission bypass, ruling 2026-09-14): the startup-packet CLAIM that
+    // this connection may take a reserved-band slot instead of queueing at
+    // the ordinary ceiling. PGC_BACKEND so any client can send it in the
+    // startup packet (`options='-c pgrust.admission_bypass=on'` or as a
+    // startup parameter); InitProcess reads it off the Port before the
+    // PGPROC pop. A false claim is refused by the reserved-slot check after
+    // login (53300), so the flag only decides who waits, never who gets in.
+    // GUC_NOT_IN_SAMPLE: pgrust keeps no postgresql.conf.sample of its own
+    // (the C reference file is shipped), and this is a per-connection knob.
+    GucBoolSetting { name: "pgrust.admission_bypass", context: PGC_BACKEND, group: CUSTOM_OPTIONS, short_desc: Some("Claims a reserved connection slot instead of waiting in the connection admission queue."), long_desc: Some("Sent in the startup packet by superusers and pg_use_reserved_connections members who must not wait behind queued connections. The claim is verified after authentication: a connection that claims it without the privilege is refused with the reserved-slots error. No effect when connection_queue_size is 0."), flags: GUC_NOT_IN_SAMPLE, variable: &vars::pgrust_admission_bypass, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "shared_catalog_cache", context: PGC_POSTMASTER, group: RESOURCES_MEM, short_desc: Some("Enables the shared catalog cache from which sessions adopt relation and catalog cache entries."), long_desc: Some("When off, every session builds all cache entries privately from the system catalogs, as stock PostgreSQL does."), flags: 0, variable: &vars::shared_catalog_cache, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.memory_watchdog_dump (pgrust-only, GL-MEMWATCH-1): on a threshold
     // breach, additionally signal every live backend to log its memory-context
@@ -1229,6 +1240,14 @@ pub static ConfigureNamesString: &[GucStringSetting] = &[
     // (janitor crate, installed via janitor::init_seams) validates SYNTAX
     // only — roles resolve at mint time, missing roles never match (the
     // pg_hba convention).
+    // pgrust.admission_bypass_applications (pgrust-only, connection-scaling.md
+    // §D6 admission bypass): startup-packet application_name prefixes
+    // (case-insensitive) that imply pgrust.admission_bypass=on — interactive
+    // and admin tools a human drives, never drivers/ORMs/poolers. Default
+    // list + provenance: backing::ADMISSION_BYPASS_APPLICATIONS_DEFAULT.
+    // Plain comma-separated (entries may contain spaces; surrounding
+    // whitespace and double quotes are stripped), no check hook needed.
+    GucStringSetting { name: "pgrust.admission_bypass_applications", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Application names (prefixes) whose connections claim a reserved slot instead of waiting in the connection admission queue."), long_desc: Some("A comma-separated list matched case-insensitively as prefixes against the startup packet's application_name. Matching connections behave as if pgrust.admission_bypass were on; the claim is still verified after authentication. An empty string disables name-based claims."), flags: GUC_LIST_INPUT | GUC_NOT_IN_SAMPLE, variable: &vars::pgrust_admission_bypass_applications, boot_val: GucDefaultValue::String(Some(crate::backing::ADMISSION_BYPASS_APPLICATIONS_DEFAULT)), check_hook: None, assign_hook: None, show_hook: None },
     GucStringSetting { name: "pgrust.ephemeral_db_mint_roles", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Roles allowed to mint ephemeral databases by connecting to them (empty disables minting)."), long_desc: Some("A comma-separated list of role names; the entry $createdb admits any role with the CREATEDB attribute and is reserved (quoting does not demote it, so a role literally named $createdb cannot be listed by name). The minted database is owned by the connecting role; if two listed roles race a connect to the same not-yet-minted name, it is created once, owned by the first requester."), flags: GUC_LIST_INPUT, variable: &vars::pgrust_ephemeral_db_mint_roles, boot_val: GucDefaultValue::String(Some("")), check_hook: Some(&hooks::check_pgrust_ephemeral_db_mint_roles), assign_hook: None, show_hook: None },
     // upstream 2a29b607dbbb (18.6): Add an output_plugin_libraries GUC to bless trusted output plugins
     GucStringSetting { name: "output_plugin_libraries", context: PGC_SUSET, group: REPLICATION_SENDING, short_desc: Some("Lists libraries that may be named as logical decoding output plugins."), long_desc: Some("Users with REPLICATION privileges may only use plugins in this list when creating logical replication slots."), flags: GUC_LIST_INPUT | GUC_LIST_QUOTE | GUC_SUPERUSER_ONLY, variable: &vars::output_plugin_libraries_string, boot_val: GucDefaultValue::String(Some("pgoutput, test_decoding")), check_hook: None, assign_hook: None, show_hook: None },

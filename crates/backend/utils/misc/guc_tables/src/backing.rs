@@ -293,6 +293,61 @@ int_var!(
     set_connection_queue_timeout,
     5000
 );
+// D6 admission bypass (pgrust-only, docs/design/connection-scaling.md §D6,
+// ruling 2026-09-14): a pre-authentication CLAIM that the connection is a
+// privileged/interactive one and may take a reserved-band slot instead of
+// queueing at the ordinary ceiling. pgrust.admission_bypass is PGC_BACKEND
+// (a startup-packet option; its value is read straight off the Port in
+// InitProcess, before the GUC machinery applies it, so this cell only
+// mirrors it for SHOW). pgrust.admission_bypass_applications is PGC_SIGHUP,
+// read on every regular-backend InitProcess.
+/// Default `pgrust.admission_bypass_applications`: the startup-packet
+/// application_name each interactive/admin client sends when the user has
+/// not set one. Prefix-matched case-insensitively (many tools append a
+/// version or a connection id). Drivers, ORMs, poolers and the libpq batch
+/// utilities (pg_dump/pg_restore/pgbench/pg_basebackup) are deliberately
+/// absent: those are application connections and must queue. Provenance
+/// per entry (verified 2026-09-14) is in the block below.
+//
+// Entry            | client                 | what it sends (startup packet unless noted) | source
+// -----------------+------------------------+---------------------------------------------+-------
+// psql             | psql                   | "psql" (fallback_application_name = progname; a renamed binary changes it) | postgres/src/bin/psql/startup.c
+// pgcli            | pgcli                  | "pgcli" (--application-name default, PGAPPNAME) | github.com/dbcli/pgcli/blob/main/pgcli/main.py
+// pgAdmin 4        | pgAdmin 4              | "pgAdmin 4 - DB:<db>" / "pgAdmin 4 - CONN:<n>" via PGAPPNAME | pgadmin4/web/pgadmin/utils/driver/psycopg3/connection.py, web/branding.py (APP_NAME)
+// HeidiSQL         | HeidiSQL               | "HeidiSQL" (libpq conninfo application_name) | HeidiSQL/source/dbconnection.pas, apphelpers.pas (APPNAME)
+// TablePlus        | TablePlus              | "TablePlus" (pg_stat_activity evidence; closed source) | github.com/TablePlus/TablePlus/issues/1881
+// dbvis            | DbVisualizer >= 10.0   | "dbvis" (JDBC ApplicationName property)     | dbvis.com/releasenotes/10.0/
+// azdata           | Azure Data Studio (PG) | "azdata" (applicationName -> application_name in pgtoolsservice) | github.com/microsoft/azuredatastudio-postgresql/issues/274
+// OmniDB           | OmniDB                 | "OmniDB" (psycopg2 conninfo)                | OmniDB/OmniDB_app/include/OmniDatabase/PostgreSQL.py
+// SQL Workbench/J  | SQL Workbench/J        | "SQL Workbench/J <build> (<conn id>)" (JDBC ApplicationName, on by default) | sql-workbench src/main/java/workbench/db/DbDriver.java (getProgramName)
+// DataGrip         | JetBrains DataGrip     | "DataGrip <version>" ("Send application info", on by default; JetBrains-confirmed, may be applied post-connect) | youtrack.jetbrains.com/issue/DBE-15847, DBE-5185
+// IntelliJ IDEA    | JetBrains IDEs (DB tool)| "IntelliJ IDEA <version>" (same mechanism as DataGrip) | youtrack.jetbrains.com/issue/DBE-5185
+// DBeaver          | DBeaver                | "DBeaver <ver> - Main|Metadata|SQLEditor <script>" — set POST-connect via setClientInfo/SET; the startup packet carries pgjdbc's "PostgreSQL JDBC Driver" unless the user sets the ApplicationName driver property, so this entry only helps then | dbeaver/plugins/org.jkiss.dbeaver.model/.../DBUtils.java (getClientApplicationName), ext.postgresql/model/PostgreDataSource.java
+// Postico          | Postico                | the developer states it sets application_name; the exact string is unpublished, "Postico" assumed (UNVERIFIED) | github.com/jakob/Postico/issues/818
+//
+// Deliberately NOT listed (verified defaults): "PostgreSQL JDBC Driver"
+// (pgjdbc, always sent — an application/driver connection), Npgsql /
+// psycopg / node-postgres / pgx / lib/pq / SQLAlchemy / tokio-postgres
+// (send nothing by default), PgBouncer / Pgpool-II (none of their own),
+// the libpq utilities pg_dump / pg_dumpall / pg_restore / pgbench /
+// pg_basebackup / pg_receivewal / pg_recvlogical / vacuumdb & friends /
+// pg_isready (their own progname), Adminer (SET after connect only),
+// Beekeeper Studio / phpPgAdmin / pg_top / pgcenter (none). Navicat and
+// Valentina Studio: unknown, not listed.
+pub const ADMISSION_BYPASS_APPLICATIONS_DEFAULT: &str = "psql, pgcli, pgAdmin 4, HeidiSQL, TablePlus, dbvis, azdata, OmniDB, SQL Workbench/J, DataGrip, IntelliJ IDEA, DBeaver, Postico";
+
+bool_var!(
+    B_pgrust_admission_bypass,
+    pgrust_admission_bypass,
+    set_pgrust_admission_bypass,
+    false
+);
+string_var!(
+    CELL_pgrust_admission_bypass_applications,
+    pgrust_admission_bypass_applications,
+    set_pgrust_admission_bypass_applications,
+    Some(ADMISSION_BYPASS_APPLICATIONS_DEFAULT)
+);
 // D3.1 bounded L1 caches: both PGC_SIGHUP — the enforcement points
 // (catcache/relcache evict-on-insert) read the cell on every cap check, so
 // a reload applies to the next insertion. Defaults sized from the D3.0

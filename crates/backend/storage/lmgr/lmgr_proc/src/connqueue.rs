@@ -29,16 +29,37 @@
 //!   raises the exact 53300 error it would have gotten unqueued.
 //!
 //! Exemptions are structural: walsenders/autovacuum/bgworkers pop their own
-//! freelists and never reach this module. Superusers jump the queue
-//! (ruling 2026-09-14) through the reserved band: waiters are admitted only
-//! while more than `superuser_reserved_connections + reserved_connections`
-//! regular slots are free (InitProcess's pop closure), so the band is never
-//! consumed by queued clients; an arrival that finds the pool inside the
-//! band bypasses the queue, takes a slot and authenticates, where the stock
-//! reserved-slot check (postinit) admits a superuser / reserved-role member
-//! and refuses anyone else with C's 53300. Identity cannot be known
-//! pre-auth (no catalog access without a PGPROC), which is why the rule is
-//! on counts rather than on roles.
+//! freelists and never reach this module.
+//!
+//! Admission bypass (ruling 2026-09-14, Michael): (1) at the ordinary
+//! ceiling a user goes to the BACK of the queue until a slot is available;
+//! (2) a superuser skips the queue and gets a slot at once. Identity cannot
+//! be known pre-auth (no catalog access without a PGPROC), so the split is
+//! on a pre-auth CLAIM read off the startup packet, verified after login by
+//! the stock reserved-slot check (postinit). Let `band` =
+//! `superuser_reserved_connections + reserved_connections`:
+//! - Non-claimers pop a Regular PGPROC only while MORE than `band` slots
+//!   are free (arrivals and waiters alike); otherwise they queue, FIFO. So
+//!   an ordinary user is never refused at its real ceiling
+//!   (`max_connections - band`) — it waits — and never consumes the band.
+//! - Claimers never divert into the queue while waiters exist and pop ANY
+//!   free slot, band included; postinit then keeps a superuser /
+//!   pg_use_reserved_connections member and refuses anyone else with C's
+//!   53300 ("remaining connection slots are reserved ..."). A false claim
+//!   therefore buys nothing but a faster refusal: the claim decides who
+//!   waits, the reserved check decides who gets in. A claimer that finds NO
+//!   free slot queues like everyone else (the band is full of superusers).
+//! - Claim sources, any one suffices, both read BEFORE the pop: the
+//!   startup-packet GUC `pgrust.admission_bypass=on` (as a startup
+//!   parameter or inside `options='-c pgrust.admission_bypass=on'`), or a
+//!   startup-packet `application_name` that case-insensitively PREFIX-
+//!   matches an entry of `pgrust.admission_bypass_applications` (default:
+//!   interactive/admin tools — psql, pgcli, pgAdmin 4, HeidiSQL, ...; never
+//!   drivers/ORMs/poolers, whose connections must queue).
+//! - Trade-off: a superuser that sends neither (e.g. a driver connection
+//!   with a custom application_name) is ordinary at the ceiling and waits.
+//! - `connection_queue_size = 0` (queue off) and `band = 0` keep today's
+//!   behavior exactly, claim or not.
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
@@ -80,6 +101,152 @@ pub fn queued_count() -> usize {
 
 pub fn enabled() -> bool {
     guc_tables::backing::connection_queue_size() > 0
+}
+
+/// The pre-auth admission-bypass claim for THIS backend, read off the
+/// startup packet (Port) — see the module doc. False without a Port
+/// (single-user, stdio/sim harnesses) or when neither source claims.
+/// Lock-cheap: one thread-local borrow plus a GUC cell read; no catalog.
+pub fn bypass_claimed() -> bool {
+    init_small::globals::TryWithMyProcPort(|port| {
+        if options_claim_bypass(port.cmdline_options.as_deref(), &port.guc_options) {
+            return true;
+        }
+        match (&port.application_name, guc_tables::backing::pgrust_admission_bypass_applications()) {
+            (Some(app), Some(list)) => application_matches(&list, app),
+            _ => false,
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// The claim GUC's name; compared ASCII-case-insensitively like every GUC
+/// name (guc.c's guc_name_compare).
+pub const BYPASS_GUC: &str = "pgrust.admission_bypass";
+
+/// Does the startup packet claim `pgrust.admission_bypass=on`? Looks at
+/// both places a client can put a GUC: the name/value pairs of the packet
+/// (`guc_options`, applied later by process_startup_options) and the
+/// `options` string (`cmdline_options`: `-c name=value`, `-cname=value`,
+/// `--name=value`, split like pg_split_opts). The last spelling wins, in
+/// the order the GUC machinery will apply them later
+/// (process_startup_options: the options switches first, then the packet
+/// pairs — so a packet pair beats the options string).
+pub fn options_claim_bypass(cmdline_options: Option<&str>, guc_options: &[String]) -> bool {
+    let mut claim: Option<bool> = None;
+    if let Some(opts) = cmdline_options {
+        let argv = split_opts(opts);
+        let mut i = 0;
+        while i < argv.len() {
+            let arg = &argv[i];
+            let assignment: Option<&str> = if arg == "-c" {
+                i += 1;
+                argv.get(i).map(String::as_str)
+            } else if let Some(rest) = arg.strip_prefix("--") {
+                Some(rest)
+            } else if let Some(rest) = arg.strip_prefix("-c") {
+                Some(rest)
+            } else {
+                None
+            };
+            if let Some(a) = assignment {
+                if let Some((name, value)) = a.split_once('=') {
+                    if guc_name_eq(&name.replace('-', "_"), BYPASS_GUC) {
+                        claim = Some(parse_bool_lite(value).unwrap_or(false));
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    let mut it = guc_options.iter();
+    while let (Some(name), Some(value)) = (it.next(), it.next()) {
+        if guc_name_eq(name, BYPASS_GUC) {
+            claim = Some(parse_bool_lite(value).unwrap_or(false));
+        }
+    }
+    claim.unwrap_or(false)
+}
+
+fn guc_name_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// bool GUC input, C's parse_bool spellings: any non-empty prefix of
+/// true/false/yes/no, on/off (off needs two chars), 1/0; case-insensitive.
+fn parse_bool_lite(value: &str) -> Option<bool> {
+    let v = value.trim().to_ascii_lowercase();
+    if v.is_empty() {
+        return None;
+    }
+    let prefix_of = |word: &str| word.starts_with(v.as_str());
+    if prefix_of("true") || prefix_of("yes") || v == "on" || v == "1" {
+        Some(true)
+    } else if prefix_of("false") || prefix_of("no") || (v.len() >= 2 && prefix_of("off")) || v == "0" {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// pg_split_opts's tokenization (postinit): split on ASCII whitespace,
+/// backslash escapes the next byte. Duplicated here because postinit
+/// depends on this crate, not the reverse.
+fn split_opts(optstr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    let mut escape = false;
+    for &c in optstr.as_bytes() {
+        if escape {
+            cur.push(c);
+            escape = false;
+        } else if c == b'\\' {
+            escape = true;
+        } else if c.is_ascii_whitespace() {
+            if !cur.is_empty() {
+                out.push(String::from_utf8_lossy(&cur).into_owned());
+                cur.clear();
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(String::from_utf8_lossy(&cur).into_owned());
+    }
+    out
+}
+
+/// Split `pgrust.admission_bypass_applications`: comma-separated entries,
+/// surrounding whitespace and one pair of double quotes stripped, empties
+/// dropped. Entries may contain spaces ("pgAdmin 4").
+pub fn parse_application_list(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(|e| {
+            let e = e.trim();
+            e.strip_prefix('"')
+                .and_then(|e| e.strip_suffix('"'))
+                .unwrap_or(e)
+                .trim()
+        })
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Does `app_name` (the startup packet's application_name) claim the
+/// bypass under `list`? Case-insensitive PREFIX match against each entry:
+/// tools append versions and connection ids ("pgAdmin 4 - CONN:123",
+/// "DBeaver 24.1.0 - Main <db>"). Empty list or empty name: no.
+pub fn application_matches(list: &str, app_name: &str) -> bool {
+    let app = app_name.trim();
+    if app.is_empty() {
+        return false;
+    }
+    let app_lc = app.to_lowercase();
+    parse_application_list(list)
+        .iter()
+        .any(|entry| app_lc.starts_with(&entry.to_lowercase()))
 }
 
 /// (queued_now, total_queued, total_served, total_timeouts, total_hangups)
@@ -277,5 +444,112 @@ pub(crate) fn queue_for_slot(
                 q.waiters.push_front(Arc::clone(&me));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn application_prefix_match_is_case_insensitive() {
+        let list = "psql, pgAdmin 4, DBeaver";
+        assert!(application_matches(list, "psql"));
+        assert!(application_matches(list, "PSQL"));
+        assert!(application_matches(list, "pgadmin 4 - CONN:123"));
+        assert!(application_matches(list, "DBeaver 24.1.0 - Main postgres"));
+        assert!(!application_matches(list, "PostgreSQL JDBC Driver"));
+        assert!(!application_matches(list, "my-psql-wrapper")); // prefix, not substring
+        assert!(!application_matches(list, ""));
+        assert!(!application_matches(list, "   "));
+    }
+
+    #[test]
+    fn application_list_parsing() {
+        assert_eq!(parse_application_list(""), Vec::<String>::new());
+        assert_eq!(parse_application_list(" , ,"), Vec::<String>::new());
+        assert_eq!(
+            parse_application_list(" psql ,\"pgAdmin 4\", DBeaver ,"),
+            vec!["psql", "pgAdmin 4", "DBeaver"]
+        );
+        assert!(!application_matches("", "psql"));
+        assert!(!application_matches("  ", "psql"));
+        // A quoted entry with spaces matches the spaced name.
+        assert!(application_matches("\"pgAdmin 4\"", "pgAdmin 4 - DB:postgres"));
+    }
+
+    #[test]
+    fn default_list_admits_interactive_tools_not_drivers() {
+        let d = guc_tables::backing::ADMISSION_BYPASS_APPLICATIONS_DEFAULT;
+        for app in ["psql", "pgcli", "pgAdmin 4 - CONN:42", "DBeaver 24.3.0 - SQLEditor <x>", "DataGrip 2024.2"] {
+            assert!(application_matches(d, app), "{app} should claim");
+        }
+        for app in [
+            "PostgreSQL JDBC Driver",
+            "Npgsql",
+            "pg_dump",
+            "pg_restore",
+            "pgbench",
+            "pg_basebackup",
+            "psycopg",
+            "pgbouncer",
+            "",
+        ] {
+            assert!(!application_matches(d, app), "{app:?} must not claim");
+        }
+    }
+
+    fn sv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn startup_packet_pairs_claim() {
+        assert!(options_claim_bypass(None, &sv(&["pgrust.admission_bypass", "on"])));
+        assert!(options_claim_bypass(None, &sv(&["PGRUST.Admission_Bypass", "true"])));
+        assert!(options_claim_bypass(None, &sv(&["application_name", "x", "pgrust.admission_bypass", "1"])));
+        assert!(!options_claim_bypass(None, &sv(&["pgrust.admission_bypass", "off"])));
+        assert!(!options_claim_bypass(None, &sv(&["pgrust.admission_bypass", "garbage"])));
+        assert!(!options_claim_bypass(None, &sv(&["pgrust.admission_bypass_applications", "on"])));
+        assert!(!options_claim_bypass(None, &[]));
+        // Last spelling wins.
+        assert!(!options_claim_bypass(None, &sv(&["pgrust.admission_bypass", "on", "pgrust.admission_bypass", "off"])));
+    }
+
+    #[test]
+    fn options_string_claims() {
+        assert!(options_claim_bypass(Some("-c pgrust.admission_bypass=on"), &[]));
+        assert!(options_claim_bypass(Some("-cpgrust.admission_bypass=yes"), &[]));
+        assert!(options_claim_bypass(Some("--pgrust.admission_bypass=on"), &[]));
+        assert!(options_claim_bypass(Some("-c work_mem=4MB -c pgrust.admission-bypass=t"), &[]));
+        assert!(!options_claim_bypass(Some("-c pgrust.admission_bypass=off"), &[]));
+        assert!(!options_claim_bypass(Some("-c work_mem=4MB"), &[]));
+        assert!(!options_claim_bypass(Some("-c pgrust.admission_bypass"), &[]));
+        assert!(!options_claim_bypass(Some(""), &[]));
+        // Escaped space inside a value does not break tokenization.
+        assert!(options_claim_bypass(Some("-c application_name=a\\ b -c pgrust.admission_bypass=on"), &[]));
+        // Packet pairs are applied after the options switches, so they win.
+        assert!(!options_claim_bypass(
+            Some("-c pgrust.admission_bypass=on"),
+            &sv(&["pgrust.admission_bypass", "off"])
+        ));
+    }
+
+    #[test]
+    fn bool_spellings() {
+        for t in ["on", "ON", "true", "t", "yes", "y", "1", " on "] {
+            assert_eq!(parse_bool_lite(t), Some(true), "{t}");
+        }
+        for f in ["off", "of", "false", "f", "no", "n", "0"] {
+            assert_eq!(parse_bool_lite(f), Some(false), "{f}");
+        }
+        for bad in ["", "o", "2", "maybe", "onn"] {
+            assert_eq!(parse_bool_lite(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn no_port_means_no_claim() {
+        assert!(!bypass_claimed());
     }
 }

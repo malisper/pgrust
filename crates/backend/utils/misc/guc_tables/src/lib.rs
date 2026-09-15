@@ -281,6 +281,14 @@ fn install_guc_tables_owned_vars() {
         get: backing::connection_queue_timeout,
         set: backing::set_connection_queue_timeout,
     });
+    vars::pgrust_admission_bypass.install(GucVarAccessors {
+        get: backing::pgrust_admission_bypass,
+        set: backing::set_pgrust_admission_bypass,
+    });
+    vars::pgrust_admission_bypass_applications.install(GucVarAccessors {
+        get: backing::pgrust_admission_bypass_applications,
+        set: backing::set_pgrust_admission_bypass_applications,
+    });
     vars::idle_passivate_timeout.install(GucVarAccessors {
         get: backing::idle_passivate_timeout,
         set: backing::set_idle_passivate_timeout,

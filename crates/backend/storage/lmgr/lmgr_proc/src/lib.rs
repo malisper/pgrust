@@ -653,26 +653,39 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
     // The reserved band (superuser_reserved_connections +
     // reserved_connections) is kept OUT of the queue's reach, so that a
     // superuser can still get in while non-superusers are parked (Michael's
-    // ruling 2026-09-14: superusers jump the queue). Identity is unknown
-    // before authentication, so the rule is on slot counts: queue waiters
-    // are admitted only while more than `reserved` regular slots are free,
-    // and an arrival that finds the pool inside the band takes a slot at
-    // once and proceeds to authentication, where the stock reserved-slot
-    // check (InitPostgres) admits a superuser / pg_use_reserved_connections
-    // member and refuses anyone else with the usual 53300 — exactly C's
-    // behavior in that band. With both settings 0 nothing changes.
+    // ruling 2026-09-14: superusers jump the queue; everyone else waits at
+    // the ceiling). Identity is unknown before authentication, so the split
+    // is a pre-auth CLAIM read off the startup packet
+    // (connqueue::bypass_claimed: `pgrust.admission_bypass=on` or an
+    // application_name in pgrust.admission_bypass_applications):
+    // - non-claimers pop only while MORE than `reserved` regular slots are
+    //   free — arrivals and waiters alike — else they queue (FIFO), so an
+    //   ordinary user is never refused at its ceiling and never consumes
+    //   the band;
+    // - claimers never divert behind waiters and pop ANY free slot, band
+    //   included; the stock reserved-slot check (InitPostgres) then admits
+    //   a superuser / pg_use_reserved_connections member and refuses anyone
+    //   else with the usual 53300 — a false claim only buys a faster
+    //   refusal. With nothing free at all a claimer queues too.
+    // With the band 0 (or the queue off) nothing changes, claim or not.
     let reserved = if queue_eligible { reserved_band() } else { 0 };
+    let claimer = reserved > 0 && connqueue::bypass_claimed();
 
     // Read the waiter count BEFORE the spinlock (never block on a mutex
     // under ProcStructLock); the race is benign — a spurious divert just
     // joins the queue and pops on its first-iteration stall guard.
-    let waiters = queue_eligible && connqueue::queued_count() > 0;
+    let waiters = queue_eligible && !claimer && connqueue::queued_count() > 0;
 
     spin_acquire(&ProcStructLock);
     // SAFETY: [PSL] spins_per_delay read under ProcStructLock.
     s_lock_seams::set_spins_per_delay::call(unsafe { hdr.spins_per_delay.get() });
-    let popped = if waiters && regular_free_exceeds(hdr, reserved) {
-        None // FIFO: join the tail behind the waiters
+    let popped = if waiters
+        || (queue_eligible && !claimer && !regular_free_exceeds(hdr, reserved))
+    {
+        // FIFO: join the tail behind the waiters; or inside the band
+        // without a claim: wait for an ordinary slot (never the band).
+        // Non-queued backend types (own freelists) pop as before.
+        None
     } else {
         plist_pop_head(hdr, freelist(hdr, list_id), links_of)
     };
@@ -699,8 +712,10 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
         // never returns (client hangup → silent proc_exit inside).
         None if queue_eligible => connqueue::queue_for_slot(|| {
             spin_acquire(&ProcStructLock);
-            // Waiters never dip into the reserved band (see above).
-            let popped = if regular_free_exceeds(hdr, reserved) {
+            // Waiters never dip into the reserved band (see above) — except
+            // a claimer, which only got here because nothing was free and
+            // may take the first slot back, band or not.
+            let popped = if claimer || regular_free_exceeds(hdr, reserved) {
                 plist_pop_head(hdr, freelist(hdr, list_id), links_of)
             } else {
                 None

@@ -120,13 +120,16 @@ fn table_counts_match_compiled_backend_shape() {
     //   passwordcheck.min_password_length (-> 182) = 497.
     // bug-inventory 2026-09-13 batch-46 (contrib/isn/isn.c:939 _PG_init
     //   DefineCustomBoolVariable): Bool +1 isn.weak (-> 146) = 498.
+    // connection-scaling D6 admission bypass (pgrust-only, same doc, ruling
+    //   2026-09-14): Bool +1 pgrust.admission_bypass (-> 147), String +1
+    //   pgrust.admission_bypass_applications (-> 90) = 500.
     let test_validator = usize::from(cfg!(feature = "oauth-test-validator"));
-    assert_eq!(ConfigureNamesBool.len(), 146 + test_validator);
+    assert_eq!(ConfigureNamesBool.len(), 147 + test_validator);
     assert_eq!(ConfigureNamesInt.len(), 182);
     assert_eq!(ConfigureNamesReal.len(), 31);
-    assert_eq!(ConfigureNamesString.len(), 89 + test_validator);
+    assert_eq!(ConfigureNamesString.len(), 90 + test_validator);
     assert_eq!(ConfigureNamesEnum.len(), 50);
-    assert_eq!(all_settings().count(), 498 + 2 * test_validator);
+    assert_eq!(all_settings().count(), 500 + 2 * test_validator);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
