@@ -23,6 +23,12 @@
 
 <br />
 
+> **New:** [Video of Michael's talk at PlanetScale on pgrust](https://www.youtube.com/watch?v=7L_nG3EBjck) — and the [slides](https://drive.google.com/file/d/1_wDk4HPE9-MuiPBo_X-QdJUmFtVV0p8p/view).
+>
+> [How AI Changes the Economics of JIT Compilers](https://malisper.me/how-ai-changes-the-economics-of-jit-compilers/)
+>
+> [What's new in v0.3](#whats-new-in-v03).
+
 pgrust is a re-implementation of Postgres meant to show what Postgres would
 look like if it was built in 2026. It is wire compatible and even SQL dialect
 compatible with Postgres. It passes
@@ -44,19 +50,6 @@ Rust makes it easy to re-architect several core Postgres pieces. pgrust has:
 and many other really awesome pieces. The scheduler and the OOM killer go
 after two of
 [the four horsemen behind thousands of Postgres outages](https://malisper.me/the-four-horsemen-behind-thousands-of-postgres-outages/).
-See [What's new in v0.3](#whats-new-in-v03) for more.
-
-## What's new in v0.3
-
-This release is mostly about making pgrust more reliable.
-
-- We're now on PostgreSQL 18.6, including its bug and security fixes.
-- Test mode (`--profile test`) gives you disposable test databases. It turns
-  off durability, so use it only for data you can throw away.
-- Connections can now wait for a slot when the server is full. Set
-  `connection_queue_size` to enable it; the queue is off by default.
-- `cbstore` is now `pgrcolumnar`. Update SQL that uses `USING cbstore` to
-  `USING pgrcolumnar`; the old name no longer works.
 
 ## Status
 
@@ -89,6 +82,9 @@ pgrust's builtin columnar layout.
 On sysbench-oltp, pgrust achieved 30% higher throughput than Postgres 18.3 on
 read-only workloads at 300GB scale.
 
+For a code-level walkthrough of one part of that speedup, read
+[Rebuilding Postgres for 300x faster analytics: batching, operator fusion, and SIMD](https://malisper.me/how-we-made-postgres-hundreds-of-times-faster-the-query-engine/).
+
 These runs were reviewed independently by **Greg Smith**, author of
 *PostgreSQL 9.0 High Performance*.
 
@@ -103,6 +99,17 @@ will not reproduce them exactly from a download.
 Benchmarks and durability settings are unchanged from a default install:
 `fsync` is on. The harnesses are in [`benchmarks/`](benchmarks/) so you can
 run them yourself.
+
+## Writing
+
+- [How AI Changes the Economics of JIT Compilers](https://malisper.me/how-ai-changes-the-economics-of-jit-compilers/):
+  building a copy-and-patch ARM64 JIT in Rust.
+- [Rebuilding Postgres for 300x faster analytics: batching, operator fusion, and SIMD](https://malisper.me/how-we-made-postgres-hundreds-of-times-faster-the-query-engine/):
+  how pgrust makes analytical queries faster.
+- [Postgres in Rust: three dead ends before we passed 100% of the regression suite](https://malisper.me/postgres-in-rust-regression-suite/): what failed
+  before pgrust reached full regression-suite compatibility.
+- [pgrust: Rebuilding Postgres in Rust with AI](https://malisper.me/pgrust-rebuilding-postgres-in-rust-with-ai/):
+  why we started the project.
 
 ## Testing
 
@@ -338,7 +345,19 @@ To build the image from source instead, the repo's
 docker buildx build --load -t pgrust .
 ```
 
-## Under the hood
+## What's new in v0.3
+
+This release is mostly about making pgrust more reliable.
+
+- We're now on PostgreSQL 18.6, including its bug and security fixes.
+- Test mode (`--profile test`) gives you disposable test databases. It turns
+  off durability, so use it only for data you can throw away.
+- Connections can now wait for a slot when the server is full. Set
+  `connection_queue_size` to enable it; the queue is off by default.
+- `cbstore` is now `pgrcolumnar`. Update SQL that uses `USING cbstore` to
+  `USING pgrcolumnar`; the old name no longer works.
+
+## Implementation
 
 **Executor**
 
@@ -406,4 +425,5 @@ PostgreSQL remain under the PostgreSQL License; see [`NOTICE`](NOTICE).
 
 - Discord: <https://discord.gg/FZZ4dbdvwU>
 - Email: maintainers@pgrust.com
+- Twitter/X: [@pgrustdb](https://x.com/pgrustdb)
 - Updates: <https://pgrust.com/#updates>
