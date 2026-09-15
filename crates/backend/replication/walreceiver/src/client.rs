@@ -401,6 +401,26 @@ pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
                 }
             }
             // CommandComplete should follow
+            // PQendcopy (pqEndcopy3): after the copy-out drains it "waits for
+            // the completion response" and consumes it — the COPY's own
+            // CommandComplete ("COPY 0"). The walsender then sends a SECOND
+            // CommandComplete for the START_REPLICATION command ("dupe, but
+            // necessary per libpqrcv_endstreaming"), which is the one the
+            // read below must see; without this consume the final
+            // no-more-results check tripped on it ("unexpected result after
+            // CommandComplete") and every tablesync catch-up looped.
+            match conn.get_result()? {
+                Some(r) if r.status == ExecStatus::CommandOk => {}
+                _ => {
+                    return throw(ereport(ERROR)
+                        .errcode(ERRCODE_CONNECTION_FAILURE)
+                        .errmsg(format!(
+                            "error while shutting down streaming COPY: {}",
+                            pchomp(&conn.error_message())
+                        ))
+                        .finish(loc("libpqrcv_endstreaming")));
+                }
+            }
             res = conn.get_result()?;
         }
     }
@@ -892,34 +912,85 @@ mod tests {
     // pg_strtoint32(PQgetvalue(res, 0, 0)) — garbage ereports 22P02 instead
     // of silently reading as "no timeline reported" (0)
     // (audit-18.6 b064 row d4ddc322).
+    // The walsender reaching the end of a historic timeline: CopyDone goes
+    // out with the CopyBothResponse's stream (walsender.c XLogSendPhysical,
+    // streamingDoneSending), before the client has said anything.
+    fn copy_both_then_server_copy_done() -> Vec<u8> {
+        let mut reply = copy_both();
+        reply.extend_from_slice(&wire(b'c', &[]));
+        reply
+    }
+
+    // What answers the client's CopyDone once the walsender has already
+    // sent its own: the next-timeline result set closed by StartReplication's
+    // "START_STREAMING" CommandComplete (walsender.c:1029), then exec_replication_command's
+    // "START_REPLICATION" one ("dupe, but necessary per libpqrcv_endstreaming",
+    // walsender.c:2202), then ReadyForQuery. Two CommandCompletes on the wire.
     fn end_of_streaming_reply(next_tli: &str) -> Vec<u8> {
-        // walsender after CopyDone: the result set, then the COPY's own
-        // CommandComplete, then ReadyForQuery.
-        let mut reply = wire(b'c', &[]);
-        reply.extend_from_slice(&tuples_no_ready(
+        let mut reply = tuples_no_ready(
             &["next_tli", "next_tli_startpos"],
             &[&[next_tli, "0/3000000"]],
-        ));
-        reply.extend_from_slice(&wire(b'C', b"START_STREAMING\0"));
+        );
+        reply.extend_from_slice(&wire(b'C', b"START_REPLICATION\0"));
+        reply.extend_from_slice(&wire(b'Z', b"I"));
+        reply
+    }
+
+    // The client ending the stream first (tablesync catch-up, walsender still
+    // in COPY): the walsender answers our CopyDone with any data still in
+    // flight, its own CopyDone, the COPY's CommandComplete ("COPY 0" for
+    // logical, "START_STREAMING" for physical) and the START_REPLICATION one.
+    fn end_of_streaming_reply_client_first() -> Vec<u8> {
+        let mut reply = wire(b'd', b"k\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+        reply.extend_from_slice(&wire(b'c', &[]));
+        reply.extend_from_slice(&wire(b'C', b"COPY 0\0"));
+        reply.extend_from_slice(&wire(b'C', b"START_REPLICATION\0"));
         reply.extend_from_slice(&wire(b'Z', b"I"));
         reply
     }
 
     #[test]
     fn end_streaming_reads_the_next_timeline() {
-        let (port, server) = scripted_server(vec![copy_both(), end_of_streaming_reply("7")]);
+        let (port, server) =
+            scripted_server(vec![copy_both_then_server_copy_done(), end_of_streaming_reply("7")]);
         let mut conn = connect_scripted(port);
         assert!(start_streaming(&mut conn, None, 0x3000000, 1).unwrap());
+        // The walsender ends the COPY first (CopyDone): the receive loop sees
+        // it as end-of-stream (libpq: COPY_BOTH -> COPY_IN, PGRES_COPY_IN),
+        // and only then does the caller end streaming — the walreceiver order.
+        assert_eq!(receive(&mut conn).unwrap().0, -1);
         assert_eq!(end_streaming(&mut conn).unwrap(), 7);
+        drop(conn);
+        assert_eq!(server.join().unwrap(), vec!["START_REPLICATION 0/3000000 TIMELINE 1"]);
+    }
+
+    // libpqrcv_endstreaming's PGRES_COPY_OUT arm (libpqwalreceiver.c:693-701):
+    // the client ends the stream while the walsender is still in COPY.
+    // PQputCopyEnd leaves a COPY_BOTH connection in COPY_OUT, PQgetResult
+    // reports it, PQendcopy drains the copy and consumes the COPY's own
+    // CommandComplete, and only the START_REPLICATION completion remains for
+    // the caller. Before this was honoured every tablesync catch-up failed with
+    // "unexpected result after CommandComplete" and looped forever.
+    #[test]
+    fn end_streaming_client_first_drains_the_copy_and_both_completions() {
+        let (port, server) =
+            scripted_server(vec![copy_both(), end_of_streaming_reply_client_first()]);
+        let mut conn = connect_scripted(port);
+        assert!(start_streaming(&mut conn, None, 0x3000000, 1).unwrap());
+        assert_eq!(end_streaming(&mut conn).unwrap(), 0);
+        // The connection is back to idle: nothing pending.
+        assert!(conn.get_result().unwrap().is_none());
         drop(conn);
         assert_eq!(server.join().unwrap(), vec!["START_REPLICATION 0/3000000 TIMELINE 1"]);
     }
 
     #[test]
     fn end_streaming_rejects_a_non_integer_next_timeline_like_pg_strtoint32() {
-        let (port, server) = scripted_server(vec![copy_both(), end_of_streaming_reply("abc")]);
+        let (port, server) =
+            scripted_server(vec![copy_both_then_server_copy_done(), end_of_streaming_reply("abc")]);
         let mut conn = connect_scripted(port);
         assert!(start_streaming(&mut conn, None, 0x3000000, 1).unwrap());
+        assert_eq!(receive(&mut conn).unwrap().0, -1);
         let err = end_streaming(&mut conn).unwrap_err();
         assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
         assert_eq!(err.message(), "invalid input syntax for type integer: \"abc\"");

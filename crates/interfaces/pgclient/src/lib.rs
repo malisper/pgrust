@@ -1590,6 +1590,14 @@ impl PgConn {
         if self.in_copy && self.copy_server_done && !self.copy_client_done {
             return Ok(Some(QueryResult::status_only(ExecStatus::CopyIn)));
         }
+        // The other half-closed shape: our CopyDone sent (PQputCopyEnd moves a
+        // COPY_BOTH connection to COPY_OUT), the server's not yet seen — or a
+        // plain COPY OUT still streaming. libpq's PQgetResult answers
+        // PGRES_COPY_OUT from getCopyResult without reading; the caller drains
+        // with get_copy_data (PQendcopy) and then reads the completion(s).
+        if self.in_copy && self.copy_client_done && !self.copy_server_done {
+            return Ok(Some(QueryResult::status_only(ExecStatus::CopyOut)));
+        }
         if !self.pending_results && !self.in_copy {
             return Ok(None);
         }
