@@ -391,10 +391,15 @@ pub fn LockHeldByMe(locktag: &LOCKTAG, lockmode: LOCKMODE, orstronger: bool) -> 
 }
 
 /// Warning-path helper: LockRelease/LockHasWaiters "you don't own a lock".
-pub(crate) fn warn_not_owned(mode_name: &str) -> PgResult<()> {
-    elog_seams::ereport_msg::call(
-        types_error::WARNING,
-        format!("you don't own a lock of type {mode_name}"),
-        None,
+// C's elog(WARNING, ...) carries file/line/routine (the F/L/R fields on the
+// wire); libpq_pipeline's trace test diffs them, so the warning is built with
+// its C location rather than through the location-less ereport_msg seam.
+pub(crate) fn warn_not_owned(mode_name: &str, lineno: i32, funcname: &str) -> PgResult<()> {
+    elog_seams::ereport::call(
+        types_error::PgError::new(
+            types_error::WARNING,
+            format!("you don't own a lock of type {mode_name}"),
+        )
+        .with_location("lock.c", lineno, funcname),
     )
 }

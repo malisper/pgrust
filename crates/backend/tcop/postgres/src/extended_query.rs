@@ -194,11 +194,12 @@ pub fn exec_parse_message<'mcx>(
     let parsetree_list = pg_parse_query(mcx, query_string)?;
 
     if parsetree_list.len() > 1 {
-        return Err(ereport(ERROR)
+        // With C's location: libpq_pipeline's pipeline_abort trace diffs the
+        // ErrorResponse's R (routine) field.
+        ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)
             .errmsg("cannot insert multiple commands into a prepared statement")
-            .into_error()
-            .into());
+            .finish(loc(1475, "exec_parse_message"))?;
     }
 
     let psrc = if let Some(raw) = parsetree_list.first() {

@@ -367,7 +367,7 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
         resowner::ResourceOwnerForgetLock(o, localtag)?;
     }
     if !owned {
-        warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize])?;
+        warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize], 2110, "LockRelease")?;
         return Ok(false);
     }
     if still_held {
@@ -428,7 +428,7 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
 
         if (*proclock).holdMask & LOCKBIT_ON(lockmode) == 0 {
             lwlock::LWLockRelease(partition_lock)?;
-            warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize])?;
+            warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize], 2149, "LockRelease")?;
             RemoveLocalLock(&localtag)?;
             return Ok(false);
         }
@@ -733,7 +733,7 @@ pub fn LockHasWaiters(
             .map(|ll| (ll.hashcode, ll.lock, ll.proclock))
     });
     let Some((hashcode, lock, proclock)) = found else {
-        warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize])?;
+        warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize], 735, "LockHasWaiters")?;
         return Ok(false);
     };
 
@@ -744,7 +744,7 @@ pub fn LockHasWaiters(
     let has_waiters = unsafe {
         if (*proclock).holdMask & LOCKBIT_ON(lockmode) == 0 {
             lwlock::LWLockRelease(partition_lock)?;
-            warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize])?;
+            warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize], 765, "LockHasWaiters")?;
             RemoveLocalLock(&localtag)?;
             return Ok(false);
         }

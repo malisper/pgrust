@@ -564,13 +564,10 @@ pub(crate) fn LockRefindAndRelease(
 
         if (*proclock).holdMask & LOCKBIT_ON(lockmode) == 0 {
             lwlock::LWLockRelease(partition_lock)?;
-            elog_seams::ereport_msg::call(
-                types_error::WARNING,
-                format!(
-                    "you don't own a lock of type {}",
-                    lockMethodTable.lockModeNames[lockmode as usize]
-                ),
-                None,
+            crate::locallock::warn_not_owned(
+                lockMethodTable.lockModeNames[lockmode as usize],
+                3306,
+                "LockRefindAndRelease",
             )?;
             return Ok(());
         }

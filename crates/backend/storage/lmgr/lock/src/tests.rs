@@ -180,6 +180,16 @@ fn setup() {
             logged().lock().unwrap_or_else(|e| e.into_inner()).push((level, msg, detail));
             Ok(())
         });
+        // warn_not_owned goes through the full-PgError seam (it carries C's
+        // file/line/routine); record it in the same log the tests read.
+        elog_seams::ereport::set(|err| {
+            logged().lock().unwrap_or_else(|e| e.into_inner()).push((
+                err.level(),
+                err.message().to_string(),
+                err.detail().map(|d| d.to_string()),
+            ));
+            Ok(())
+        });
         lmgr_seams::describe_lock_tag::set(|tag| format!("{tag:?}"));
         procsignal_seams::send_thread_signal::set(|_, _| SIGNAL_ERRNO.load(SeqCst));
 
