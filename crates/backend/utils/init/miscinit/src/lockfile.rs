@@ -20,10 +20,8 @@ use types_error::{PgResult, ERRCODE_LOCK_FILE_EXISTS, FATAL, LOG, NOTICE};
 use crate::process::{leading_i64, loc};
 
 pub(crate) const DIRECTORY_LOCK_FILE: &str = "postmaster.pid";
-// pg_file_create_mode default; the 0640 group variant lands with file_perm.c.
-// wasm32: WASI files carry no unix mode bits — the constant has no consumer.
-#[cfg(not(target_family = "wasm"))]
-const PG_FILE_CREATE_MODE: u32 = 0o600;
+// The create mode is fd::vfd::pg_file_create_mode (SetDataDirectoryCreatePerm);
+// wasm32: WASI files carry no unix mode bits, so no mode is applied there.
 const LOCK_FILE_LINE_SHMEM_KEY: usize = 7;
 
 thread_local! {
@@ -122,7 +120,10 @@ pub(crate) fn CreateLockFile(
         open_opts.read(true).write(true).create_new(true);
         // wasm32: WASI has no file modes; create_new keeps the interlock.
         #[cfg(not(target_family = "wasm"))]
-        open_opts.mode(PG_FILE_CREATE_MODE);
+        // C: pg_file_create_mode — 0640 when the data directory is group-
+        // readable (initdb -g / SetDataDirectoryCreatePerm), 0600 otherwise.
+        // pg_rewind/pg_ctl TAP "check PGDATA permissions" reads it back.
+        open_opts.mode(fd::vfd::pg_file_create_mode());
         match open_opts.open(filename) {
             Ok(f) => {
                 file = f;
