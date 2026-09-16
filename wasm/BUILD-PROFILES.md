@@ -125,3 +125,32 @@ guard budget (`max_stack_depth` x `STACK_DEPTH_SCALE` + 8 MiB = 16 MiB at `max_s
 which dominates the 4 MiB wasm `UNLIMITED_STACK_RESERVE` floor, so the floor no longer decides what a
 child thread reserves — and the browser peak fell anyway, 656.9 MiB to 263.5 MiB on the bench's
 one-machine A/B of the two modules.
+
+## A Binaryen pass after the link (2026-09-16)
+
+`lto = false` with `codegen-units = 16` leaves duplicate function bodies in the module, which is
+what the bench's `2026-09-08-wasm-size-map.md` §5/§9 measured. `wasm/wasm-build.sh` now runs
+`wasm-opt -Oz` over `postgres.wasm` in place, but ONLY under `PGRUST_WASM_PROFILE=wasm-release`
+(dev builds are untouched) and only when `PGRUST_WASM_OPT` is not `0`. If Binaryen is missing under
+the release profile the build fails loudly rather than shipping an unoptimised module quietly.
+
+The feature list is spelled out in the script and must stay that way. The release profile strips the
+module's `target_features` section, so wasm-opt cannot detect what the module uses; and
+`--all-features` makes a *smaller* module that V8 then refuses to compile (`unknown import kind
+0x7e`). Only `--enable-threads` differs between the two targets.
+
+Both modules at `d87d883e` (Binaryen 132, i7-1165G7, 8 threads):
+
+| Module | raw before | raw after | gzip -9 before | gzip -9 after | pass wall |
+| --- | --- | --- | --- | --- | --- |
+| `wasm32-wasip1-threads` | 53 414 445 | **39 040 753** (−26.9%) | 15 097 262 | **13 434 230** (−11.0%) | 306 s |
+| `wasm32-wasip1` | 53 265 180 | **38 410 184** (−27.9%) | 15 089 981 | **13 519 294** (−10.4%) | 299 s |
+
+sha256 after the pass: threads
+`737762791ff9b34a6339ceb0ae2ad323856ebb03c4ea6f73c10fffa8ec87d0a0`, single-session
+`6ef8c4459bec38d12db1ff45e9108f9f52d93168c727f71ba9548ba5ad5d7be6`.
+
+Fourteen megabytes off each module for five minutes of wall time on top of a build that already
+takes five. The pass is the duplicate-elimination `lto = "fat"` would have done in the compiler, at
+a third of fat LTO's build cost, and it does not touch the Cargo profile. What it costs in speed is
+the bench's measurement, not this file's: `pglite-v-pgrust` `docs/results/2026-09-16-wasm-opt-pass.md`.

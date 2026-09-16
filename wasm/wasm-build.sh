@@ -134,6 +134,47 @@ if [ "${PGRUST_WASM_SKIP_LINK:-0}" != "1" ]; then
     BIN_WASM="$ROOT/target/${TARGET}/${PROFILE_DIR}/postgres.wasm"
     [ -f "$BIN_WASM" ] || { echo "wasm-build: FAIL — postgres.wasm not produced" >&2; exit 1; }
     echo "wasm-build: postgres.wasm linked ($(du -h "$BIN_WASM" | cut -f1), profile $PROFILE)"
+
+    # Binaryen pass — release profile only (dev builds are untouched), opt out
+    # with PGRUST_WASM_OPT=0. `[profile.wasm-release]` is `lto = false` with
+    # `codegen-units = 16`, so the link leaves duplicate function bodies
+    # behind; `wasm-opt -Oz` finds them and takes ~27% off the raw bytes
+    # (measured in pglite-v-pgrust docs/results/2026-09-08-wasm-size-map.md §9).
+    if [ "$PROFILE" = "wasm-release" ] && [ "${PGRUST_WASM_OPT:-1}" != "0" ]; then
+        # The feature list is spelled out ONCE, here, and is deliberately NOT
+        # `--all-features`: the release profile strips the module's
+        # `target_features` section so wasm-opt cannot detect what the module
+        # uses, and `--all-features` re-encodes the import section into
+        # something V8 refuses to compile ("unknown import kind 0x7e"). The
+        # list is the names build's `target_features`; only threads differs
+        # between the two targets.
+        WASM_OPT_FEATURES=()
+        if [ "$TARGET" = "wasm32-wasip1-threads" ]; then
+            WASM_OPT_FEATURES+=(--enable-threads)
+        fi
+        WASM_OPT_FEATURES+=(
+            --enable-bulk-memory
+            --enable-bulk-memory-opt
+            --enable-call-indirect-overlong
+            --enable-exception-handling
+            --enable-extended-const
+            --enable-multivalue
+            --enable-mutable-globals
+            --enable-nontrapping-float-to-int
+            --enable-reference-types
+            --enable-sign-ext
+        )
+        if ! command -v wasm-opt >/dev/null; then
+            echo "wasm-build: FAIL — profile $PROFILE runs wasm-opt but Binaryen is not on PATH (install it, or set PGRUST_WASM_OPT=0 to ship the unoptimised module)" >&2
+            exit 1
+        fi
+        WASM_OPT_BEFORE=$(wc -c < "$BIN_WASM")
+        WASM_OPT_T0=$SECONDS
+        wasm-opt -Oz "${WASM_OPT_FEATURES[@]}" "$BIN_WASM" -o "$BIN_WASM.opt"
+        mv "$BIN_WASM.opt" "$BIN_WASM"
+        WASM_OPT_AFTER=$(wc -c < "$BIN_WASM")
+        echo "wasm-build: wasm-opt -Oz ${WASM_OPT_BEFORE} -> ${WASM_OPT_AFTER} bytes (-$(( (WASM_OPT_BEFORE - WASM_OPT_AFTER) * 100 / WASM_OPT_BEFORE ))%) in $((SECONDS - WASM_OPT_T0))s ($(wasm-opt --version))"
+    fi
 else
     echo "wasm-build: bin link SKIPPED (PGRUST_WASM_SKIP_LINK=1)"
 fi
