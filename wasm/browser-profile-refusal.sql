@@ -1,0 +1,23 @@
+-- browser-profile-refusal.sql — what the `browser` feature profile LEFT OUT.
+--
+-- The other half of browser-profile-proof.sql (read its header for why this is
+-- `LOAD` and not `CREATE EXTENSION`), and a separate file because the runner
+-- turns every ErrorResponse into a lane failure: this lane is EXPECTED to end in
+-- `VERDICT: threads-node FAIL`, and the decisive evidence is the error text, not
+-- the verdict.
+--
+--   node run-node-wire-threads.mjs --dispatch stdio-wire-threaded --fs broker \
+--        --sql browser-profile-refusal.sql
+--
+-- The `dblink` crate is one of the 40 the `browser` profile drops, so the named
+-- builtin library it would have registered with dfmgr is not there, and the
+-- refusal is PostgreSQL's own missing-module error rather than anything
+-- pgrust-specific:
+--
+--   ERROR: could not access file "dblink": No such file or directory   (58P01)
+--
+-- The control that makes this mean something is the SAME statement on a
+-- full-profile module, where it answers `LOAD` and no error at all.
+--
+-- One statement per line; '--' comment lines are skipped by the runner.
+LOAD 'dblink'

@@ -154,3 +154,100 @@ Fourteen megabytes off each module for five minutes of wall time on top of a bui
 takes five. The pass is the duplicate-elimination `lto = "fat"` would have done in the compiler, at
 a third of fat LTO's build cost, and it does not touch the Cargo profile. What it costs in speed is
 the bench's measurement, not this file's: `pglite-v-pgrust` `docs/results/2026-09-16-wasm-opt-pass.md`.
+
+## What the module links is a feature list (2026-09-16)
+
+`[profile.wasm-release]` decides how the code is compiled; this section is about **which code there
+is**. Up to here every wasm module carried the whole engine — 47 contribs, logical replication,
+parallel query, base backup, four non-btree access methods — because `seams_init` is a flat list of
+353 path dependencies and 311 `init_seams()` calls with no way to say "not that one".
+
+The mechanism is Cargo's, and it is the whole of it: a `seams_init` dependency becomes
+`optional = true`, a feature turns it on, and the `init_seams()` call gets a `cfg`. Feature off ⇒
+the crate is **not in the link graph at all** ⇒ its seams are never installed. 90 dependencies are
+gated this way behind **47 `contrib-*` features and 12 group features** (`replication`, `parallel`,
+`backup`, `index-gin`, `index-gist`, `index-spgist`, `index-brin`, `tsearch`, `geo`, `jsonpath`,
+`pgrcolumnar`, `plpgsql`), over 92 `cfg`-ed lines in `seams_init/src/lib.rs`. `main_main` takes
+`seams_init` with `default-features = false` and forwards its own `full` / `browser` features; it is
+the only crate in the graph that depends on `seams_init`, so nothing re-enables the defaults through
+feature unification. `default = ["full"]` is exactly the dependency set and the init order that
+existed before, so the native build and the default wasm build are unchanged.
+
+`wasm/wasm-build.sh` takes **`PGRUST_WASM_FEATURES`** (default `full`) and always links with
+`--no-default-features --features "$PGRUST_WASM_FEATURES"`, so that variable is the only thing that
+decides the set.
+
+### `browser`: the first profile that leaves something out
+
+Every group feature is still ON — the Tier A groups (`replication`, `parallel`, `backup`) are
+declared but untested off, because the postmaster touches them at BOOT and a seam called with
+nothing installed panics `seam not installed`; the Tier B groups are reached only through fmgr/pg_am
+dispatch and are safe by construction, but neither is switched off in this profile. What `browser`
+drops is **contribs**: it keeps `pgvector`, `pgvector_hnsw`, `pg_trgm` and `pgcrypto`, and nothing
+else.
+
+### The exclusion proof
+
+A feature that is merely *declared off* proves nothing — the crate can still be in the module
+because some other crate in `main_main`'s graph depends on it. So before the link the script asks
+cargo what it actually resolved, and prints:
+
+```
+wasm-build: profile browser excludes 40 crates: amcheck auto_explain btree_gin btree_gist citext
+  contrib_cube contrib_earthdistance contrib_lo contrib_seg dblink file_fdw fuzzystrmatch hstore
+  injection_points intarray isn ltree pageinspect passwordcheck pg_buffercache pg_freespacemap
+  pg_logicalinspect pg_overexplain pg_prewarm pg_stat_statements pg_surgery pg_visibility
+  pg_walinspect pgoutput pgrowlocks pgstattuple postgres_fdw sslinfo tablefunc tcn
+  test_custom_types test_decoding test_oat_hooks unaccent uuid_ossp
+wasm-build: profile browser leaves 3 gated crates linked (another crate in the graph depends on
+  them; their seams are still not installed):
+    bloom <- amapi bloom_build indexam
+    tsm_system_rows <- tablesample
+    tsm_system_time <- tablesample
+wasm-build: exclusion proof OK (no excluded crate is reachable in the link graph)
+```
+
+43 of the 47 contribs are gated off; 40 genuinely leave, and the 3 that do not are reported with the
+crate that keeps them (core's index and tablesample machinery names them directly). Counting the
+transitive deps that leave with them, the package graph goes 922 → 878. Nothing here was
+restructured to make the number bigger: where a gate cannot remove a crate, the feature is still
+declared — it still stops `seams_init` installing the seams — and the crate stays.
+
+### Sizes, after `wasm-opt -Oz`
+
+| Module | features | .wasm raw | gzip -9 | vs `full` raw |
+| --- | --- | --- | --- | --- |
+| `wasm32-wasip1-threads` | full | 39 040 753 | 13 434 230 | — |
+| `wasm32-wasip1-threads` | **browser** | **37 209 731** | **12 821 035** | −1 831 022 (−4.7%) |
+| `wasm32-wasip1` | full | 38 410 184 | 13 519 294 | — |
+| `wasm32-wasip1` | **browser** | **36 584 849** | **12 908 762** | −1 825 335 (−4.8%) |
+
+sha256: threads `439df68ba2892023f6a3216d34956e0c428935a49dbe5c46135785dcf94c0a2d`, single-session
+`3fb1ad313c5f49ddbded04d9174cb2e281eefa1da7af4c9da9b03efc466d8b28`.
+
+The `full` threads row is a REBUILD with the gates in place, not the old number carried forward: it
+came out at 39 040 753 raw and 13 434 230 gzipped, byte-for-byte the same sizes as the module before
+this change. **The gates cost nothing when they are all on.** (The sha differs — adding a
+`[features]` table changes the crates' metadata hashes and so their symbol names — but not one byte
+of size.)
+
+Forty contribs are worth 1.8 MB of a 37 MB module, which is the honest answer to "how much of the
+module is the extensions": about five percent. The interesting number is not this one; it is what a
+`browser` profile will be worth once the Tier A groups can actually be switched off.
+
+### The runtime smoke
+
+Two files, run through the threaded wire lane's `--sql` runner, split because the runner records any
+`ErrorResponse` as a lane failure:
+
+- `wasm/browser-profile-proof.sql` — `LOAD 'pg_trgm'`, `LOAD 'pgcrypto'`, `LOAD 'vector'` all answer,
+  and a GIN index over a jsonb column is built and queried (`index-gin` is on): **PASS**.
+- `wasm/browser-profile-refusal.sql` — one statement, `LOAD 'dblink'`:
+  `ERROR: could not access file "dblink": No such file or directory` (SQLSTATE 58P01), which is
+  PostgreSQL's own missing-module error. The same statement on the `full` module answers `LOAD`.
+
+`LOAD` rather than `CREATE EXTENSION`: the seeded image (`wasm/assets/vfs.img`) has no
+`share/extension` directory at all, so `CREATE EXTENSION pg_trgm` fails with `extension "pg_trgm" is
+not available` (0A000) on **every** profile, the full one included, and proves nothing. `LOAD 'name'`
+goes straight to dfmgr's named-builtin-library lookup — the registration a contrib crate performs
+from its `init_seams()`, and precisely the thing a feature gate removes.

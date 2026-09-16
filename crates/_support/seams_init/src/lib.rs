@@ -97,11 +97,13 @@ pub fn init_all_with_transport(transport: Transport) {
     heapam_visibility::init_seams();
     genam::init_seams();
     indexam::init_seams();
+    #[cfg(feature = "index-brin")]
     brin_build::init_seams();
     table::init_seams();
     tableam::init_seams();
     vacuumlazy::init_seams();
     commands_vacuum::init_seams();
+    #[cfg(feature = "parallel")]
     vacuumparallel::init_seams();
     commands_analyze::init_seams();
     commands_tablespace::init_seams();
@@ -236,69 +238,129 @@ pub fn init_all_with_transport(transport: Transport) {
     walsummarizer::init_seams();
     postmaster_startup::init_seams();
     syslogger::init_seams();
+    #[cfg(feature = "replication")]
     launcher::init_seams();
     janitor::init_seams();
+    #[cfg(feature = "replication")]
     walsender_config::init_seams();
+    #[cfg(feature = "replication")]
     walsender::init_seams();
+    #[cfg(feature = "replication")]
     syncrep::init_seams();
+    #[cfg(feature = "replication")]
     walreceiverfuncs::init_seams();
+    #[cfg(feature = "replication")]
     walreceiver::init_seams();
+    #[cfg(feature = "backup")]
     basebackup::init_seams();
+    #[cfg(feature = "replication")]
     slot::init_seams();
+    #[cfg(feature = "replication")]
     reorderbuffer::init_seams();
+    #[cfg(feature = "replication")]
     snapbuild::init_seams();
     rewriteheap::init_seams();
+    #[cfg(feature = "replication")]
     logical::init_seams();
+    #[cfg(feature = "replication")]
     origin::init_seams();
+    #[cfg(feature = "replication")]
     logicalworker::init_seams();
+    #[cfg(feature = "contrib-test_decoding")]
     test_decoding::init_seams();
+    #[cfg(feature = "contrib-pgoutput")]
     pgoutput::init_seams();
     adt_formatting::init_seams();
+    #[cfg(feature = "contrib-citext")]
     citext::init_seams();
+    #[cfg(feature = "contrib-isn")]
     isn::init_seams();
+    #[cfg(feature = "contrib-pg_surgery")]
     pg_surgery::init_seams();
+    #[cfg(feature = "contrib-uuid_ossp")]
     uuid_ossp::init_seams();
+    #[cfg(feature = "contrib-dblink")]
     dblink::init_seams();
+    #[cfg(feature = "contrib-pg_prewarm")]
     pg_prewarm::init_seams();
+    #[cfg(feature = "contrib-file_fdw")]
     file_fdw::init_seams();
+    #[cfg(feature = "contrib-postgres_fdw")]
     postgres_fdw::init_seams();
+    #[cfg(feature = "contrib-ltree")]
     ltree::init_seams();
+    #[cfg(feature = "contrib-intarray")]
     intarray::init_seams();
+    #[cfg(feature = "contrib-pgcrypto")]
     pgcrypto::init_seams();
+    #[cfg(feature = "contrib-pg_stat_statements")]
     pg_stat_statements::init_seams();
+    #[cfg(feature = "contrib-pg_buffercache")]
     pg_buffercache::init_seams();
+    #[cfg(feature = "contrib-auto_explain")]
     auto_explain::init_seams();
+    #[cfg(feature = "contrib-passwordcheck")]
     passwordcheck::init_seams();
+    #[cfg(feature = "contrib-test_oat_hooks")]
     test_oat_hooks::init_seams();
+    #[cfg(feature = "contrib-pgvector")]
     pgvector::init_seams();
+    #[cfg(feature = "contrib-pgvector_hnsw")]
     pgvector_hnsw::init_seams();
+    #[cfg(feature = "contrib-bloom")]
     bloom::init_seams();
+    #[cfg(feature = "contrib-hstore")]
     hstore::init_seams();
     adt_expandedrecord::init_seams();
+    #[cfg(feature = "contrib-pg_trgm")]
     pg_trgm::init_seams();
+    #[cfg(feature = "contrib-btree_gist")]
     btree_gist::init_seams();
+    #[cfg(feature = "contrib-btree_gin")]
     btree_gin::init_seams();
+    #[cfg(feature = "contrib-cube")]
     contrib_cube::init_seams();
+    #[cfg(feature = "contrib-earthdistance")]
     contrib_earthdistance::init_seams();
+    #[cfg(feature = "contrib-seg")]
     contrib_seg::init_seams();
+    #[cfg(feature = "contrib-unaccent")]
     unaccent::init_seams();
+    #[cfg(feature = "contrib-pg_walinspect")]
     pg_walinspect::init_seams();
+    #[cfg(feature = "contrib-injection_points")]
     injection_points::init_seams();
+    #[cfg(feature = "contrib-test_custom_types")]
     test_custom_types::init_seams();
+    #[cfg(feature = "contrib-sslinfo")]
     sslinfo::init_seams();
+    #[cfg(feature = "contrib-fuzzystrmatch")]
     fuzzystrmatch::init_seams();
+    #[cfg(feature = "contrib-tablefunc")]
     tablefunc::init_seams();
+    #[cfg(feature = "contrib-lo")]
     contrib_lo::init_seams();
+    #[cfg(feature = "contrib-tcn")]
     tcn::init_seams();
+    #[cfg(feature = "contrib-pageinspect")]
     pageinspect::init_seams();
+    #[cfg(feature = "contrib-pgstattuple")]
     pgstattuple::init_seams();
+    #[cfg(feature = "contrib-pg_freespacemap")]
     pg_freespacemap::init_seams();
+    #[cfg(feature = "contrib-amcheck")]
     amcheck::init_seams();
+    #[cfg(feature = "contrib-tsm_system_rows")]
     tsm_system_rows::init_seams();
+    #[cfg(feature = "contrib-tsm_system_time")]
     tsm_system_time::init_seams();
+    #[cfg(feature = "contrib-pg_visibility")]
     pg_visibility::init_seams();
+    #[cfg(feature = "contrib-pgrowlocks")]
     pgrowlocks::init_seams();
+    #[cfg(feature = "contrib-pg_logicalinspect")]
     pg_logicalinspect::init_seams();
+    #[cfg(feature = "contrib-pg_overexplain")]
     pg_overexplain::init_seams();
     session::init_seams();
     relpath::init_seams();
@@ -330,7 +392,9 @@ pub fn init_all_with_transport(transport: Transport) {
     condition_variable::init_seams();
     deadlock::init_seams();
     predicate::init_seams();
+    #[cfg(feature = "parallel")]
     parallel::init_seams();
+    #[cfg(feature = "parallel")]
     bgworker::init_seams();
     spi::init_seams();
     trigger::init_seams();
@@ -391,11 +455,16 @@ pub fn init_all_with_transport(transport: Transport) {
     elog::init_seams();
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
+    #[cfg(feature = "tsearch")]
     fmgr_core::register_late_builtins(adt_tsvector_stat::TS_STAT_BUILTINS);
+    #[cfg(feature = "replication")]
     fmgr_core::register_late_builtins(slotfuncs::builtins::SLOTFUNCS_BUILTINS);
+    #[cfg(feature = "replication")]
     slotfuncs::init_seams();
+    #[cfg(feature = "replication")]
     slotsync::init_seams();
     fmgr_core::register_late_builtins(waitevent::funcs::WAITEVENT_BUILTINS);
+    #[cfg(feature = "replication")]
     fmgr_core::register_late_builtins(logicalfuncs::LOGICALFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(rls::RLS_BUILTINS);
     fmgr_core::register_late_builtins(rewrite_handler::REWRITE_BUILTINS);
@@ -415,27 +484,45 @@ pub fn init_all_with_transport(transport: Transport) {
     fmgr_core::register_late_builtins(xmlmap::builtins::XMLMAP_BUILTINS);
     fmgr_core::register_late_builtins(be_fsstubs::fmgr_builtins::FSSTUBS_BUILTINS);
     fmgr_core::register_late_builtins(partbounds::PARTBOUNDS_BUILTINS);
+    #[cfg(feature = "tsearch")]
     fmgr_core::register_late_builtins(adt_tsquery_rewrite::TSQUERY_REWRITE_BUILTINS);
     sql_functions::init_seams();
     pg_proc::init_seams();
     regress_lib::init_seams();
+    #[cfg(feature = "plpgsql")]
     plpgsql::init_seams();
+    #[cfg(feature = "tsearch")]
     dict_snowball::init_seams();
+    #[cfg(feature = "geo")]
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
+    #[cfg(any(feature = "geo", feature = "index-gist"))]
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
     fmgr_core::register_late_builtins(commands_constraint::CONSTRAINT_BUILTINS);
+    #[cfg(feature = "index-spgist")]
     fmgr_core::register_late_builtins(spgist_text::SPGIST_TEXT_BUILTINS);
+    #[cfg(feature = "index-gist")]
     fmgr_core::register_late_builtins(rangetypes_gist::RANGETYPES_GIST_BUILTINS);
+    #[cfg(feature = "index-spgist")]
     fmgr_core::register_late_builtins(rangetypes_spgist::RANGETYPES_SPGIST_BUILTINS);
+    #[cfg(feature = "index-gist")]
     fmgr_core::register_late_builtins(network_gist::NETWORK_GIST_BUILTINS);
+    #[cfg(feature = "tsearch")]
     fmgr_core::register_late_builtins(adt_tsginidx::builtins::TSGINIDX_BUILTINS);
+    #[cfg(feature = "tsearch")]
     fmgr_core::register_late_builtins(adt_tsgistidx::TSGISTIDX_BUILTINS);
+    #[cfg(feature = "index-spgist")]
     fmgr_core::register_late_builtins(network_spgist::NETWORK_SPGIST_BUILTINS);
+    #[cfg(feature = "index-spgist")]
     fmgr_core::register_late_builtins(spgist_quadtree::SPGIST_QUAD_BUILTINS);
+    #[cfg(feature = "index-spgist")]
     fmgr_core::register_late_builtins(spgist_kdtree::SPGIST_KD_BUILTINS);
+    #[cfg(feature = "index-spgist")]
     fmgr_core::register_late_builtins(spgist_box::SPGIST_BOX_BUILTINS);
+    #[cfg(feature = "index-brin")]
     fmgr_core::register_late_builtins(brin_minmax_multi::MINMAX_MULTI_BUILTINS);
+    #[cfg(feature = "index-brin")]
     fmgr_core::register_late_builtins(brin_bloom::BLOOM_BUILTINS);
+    #[cfg(feature = "index-brin")]
     fmgr_core::register_late_builtins(brin_funcs::BRIN_FUNCS_BUILTINS);
     fmgr_core::register_late_builtins(partitionfuncs::PARTITIONFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(orderedsetaggs::ORDEREDSETAGGS_BUILTINS);
@@ -443,7 +530,9 @@ pub fn init_all_with_transport(transport: Transport) {
     fmgr_core::register_late_builtins(pg_config::PG_CONFIG_BUILTINS);
     fmgr_core::register_late_builtins(shmem::SHMEM_BUILTINS);
     fmgr_core::register_late_builtins(aio_funcs::AIO_FUNCS_BUILTINS);
+    #[cfg(feature = "replication")]
     fmgr_core::register_late_builtins(origin::ORIGIN_BUILTINS);
+    #[cfg(feature = "replication")]
     fmgr_core::register_late_builtins(logicalrelation::LOGICALRELATION_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
@@ -455,7 +544,9 @@ pub fn init_all_with_transport(transport: Transport) {
     guc::init_seams();
     guc_funcs::init_seams();
     variable::init_seams();
+    #[cfg(feature = "index-gin")]
     gin::init_seams();
+    #[cfg(feature = "index-gin")]
     gin_funcs::init_seams();
     user::init_seams();
     ps_status::init_seams();
@@ -470,6 +561,7 @@ pub fn init_all_with_transport(transport: Transport) {
     pg_prng::init_seams();
     regex_core::init_seams();
     adt_regexp::init_seams();
+    #[cfg(feature = "tsearch")]
     ts_cache::init_hooks();
     seclabel::init();
 

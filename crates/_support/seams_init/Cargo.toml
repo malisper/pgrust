@@ -16,7 +16,7 @@ sequence = { path = "../../backend/commands/sequence" }
 pg_constraint = { path = "../../backend/catalog/pg_constraint" }
 extension = { path = "../../backend/commands/extension" }
 detoast = { path = "../../backend/access/common/detoast" }
-dict_snowball = { path = "../../backend/snowball/dict_snowball" }
+dict_snowball = { path = "../../backend/snowball/dict_snowball", optional = true }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }
 printtup = { path = "../../backend/access/common/printtup" }
 relation = { path = "../../backend/access/common/relation" }
@@ -27,7 +27,7 @@ table = { path = "../../backend/access/table/table" }
 tableam = { path = "../../backend/access/table/tableam" }
 vacuumlazy = { path = "../../backend/access/heap/vacuumlazy" }
 commands_vacuum = { path = "../../backend/commands/vacuum" }
-vacuumparallel = { path = "../../backend/commands/vacuumparallel" }
+vacuumparallel = { path = "../../backend/commands/vacuumparallel", optional = true }
 commands_analyze = { path = "../../backend/commands/analyze" }
 commands_tablespace = { path = "../../backend/commands/tablespace" }
 commands_alter = { path = "../../backend/commands/alter" }
@@ -159,13 +159,13 @@ standby = { path = "../../backend/storage/ipc/standby" }
 condition_variable = { path = "../../backend/storage/lmgr/condition_variable" }
 deadlock = { path = "../../backend/storage/lmgr/deadlock" }
 predicate = { path = "../../backend/storage/lmgr/predicate" }
-parallel = { path = "../../backend/access/transam/parallel" }
-bgworker = { path = "../../backend/postmaster/bgworker" }
+parallel = { path = "../../backend/access/transam/parallel", optional = true }
+bgworker = { path = "../../backend/postmaster/bgworker", optional = true }
 spi = { path = "../../backend/executor/spi" }
 sql_functions = { path = "../../backend/executor/sql_functions" }
 pg_proc = { path = "../../backend/catalog/pg_proc" }
 regress_lib = { path = "../../backend/test_regress" }
-plpgsql = { path = "../../pl/plpgsql" }
+plpgsql = { path = "../../pl/plpgsql", optional = true }
 trigger = { path = "../../backend/commands/trigger" }
 ri_triggers = { path = "../../backend/utils/adt/ri_triggers" }
 pruneheap = { path = "../../backend/access/heap/pruneheap" }
@@ -198,27 +198,27 @@ waitevent_seams = { path = "../../backend/utils/activity/waitevent_seams" }
 postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 mcxt_stats = { path = "../../backend/utils/mmgr/mcxt_stats" }
 pgstat = { path = "../../backend/utils/activity/pgstat" }
-adt_geo = { path = "../../backend/utils/adt/geo" }
-spgist_text = { path = "../../backend/access/spgist/spgist_text" }
-spgist_quadtree = { path = "../../backend/access/spgist/spgist_quadtree" }
-spgist_kdtree = { path = "../../backend/access/spgist/spgist_kdtree" }
-spgist_box = { path = "../../backend/access/spgist/spgist_box" }
-gistproc = { path = "../../backend/access/gist/gistproc" }
-rangetypes_gist = { path = "../../backend/utils/adt/rangetypes_gist" }
-rangetypes_spgist = { path = "../../backend/utils/adt/rangetypes_spgist" }
-network_gist = { path = "../../backend/utils/adt/network_gist" }
-adt_tsginidx = { path = "../../backend/utils/adt/tsginidx" }
-adt_tsgistidx = { path = "../../backend/utils/adt/tsgistidx" }
-network_spgist = { path = "../../backend/utils/adt/network_spgist" }
+adt_geo = { path = "../../backend/utils/adt/geo", optional = true }
+spgist_text = { path = "../../backend/access/spgist/spgist_text", optional = true }
+spgist_quadtree = { path = "../../backend/access/spgist/spgist_quadtree", optional = true }
+spgist_kdtree = { path = "../../backend/access/spgist/spgist_kdtree", optional = true }
+spgist_box = { path = "../../backend/access/spgist/spgist_box", optional = true }
+gistproc = { path = "../../backend/access/gist/gistproc", optional = true }
+rangetypes_gist = { path = "../../backend/utils/adt/rangetypes_gist", optional = true }
+rangetypes_spgist = { path = "../../backend/utils/adt/rangetypes_spgist", optional = true }
+network_gist = { path = "../../backend/utils/adt/network_gist", optional = true }
+adt_tsginidx = { path = "../../backend/utils/adt/tsginidx", optional = true }
+adt_tsgistidx = { path = "../../backend/utils/adt/tsgistidx", optional = true }
+network_spgist = { path = "../../backend/utils/adt/network_spgist", optional = true }
 commands_constraint = { path = "../../backend/commands/constraint_cmd" }
-brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
-brin_build = { path = "../../backend/access/brin/brin_build" }
-brin_bloom = { path = "../../backend/access/brin/brin_bloom" }
-brin_funcs = { path = "../../backend/access/brin/brin_funcs" }
+brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi", optional = true }
+brin_build = { path = "../../backend/access/brin/brin_build", optional = true }
+brin_bloom = { path = "../../backend/access/brin/brin_bloom", optional = true }
+brin_funcs = { path = "../../backend/access/brin/brin_funcs", optional = true }
 adt_acl = { path = "../../backend/utils/adt/acl" }
-adt_tsvector_stat = { path = "../../backend/utils/adt/tsvector_stat" }
+adt_tsvector_stat = { path = "../../backend/utils/adt/tsvector_stat", optional = true }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
-adt_tsquery_rewrite = { path = "../../backend/utils/adt/tsquery_rewrite" }
+adt_tsquery_rewrite = { path = "../../backend/utils/adt/tsquery_rewrite", optional = true }
 orderedsetaggs = { path = "../../backend/utils/adt/orderedsetaggs" }
 partitionfuncs = { path = "../../backend/utils/adt/partitionfuncs" }
 genfile = { path = "../../backend/utils/adt/genfile" }
@@ -283,87 +283,331 @@ pg_sema = { path = "../../backend/port/pg_sema" }
 autovacuum = { path = "../../backend/postmaster/autovacuum" }
 janitor = { path = "../../backend/postmaster/janitor" }
 syslogger = { path = "../../backend/postmaster/syslogger" }
-launcher = { path = "../../backend/replication/launcher" }
-walsender_config = { path = "../../backend/replication/walsender_config" }
-walsender = { path = "../../backend/replication/walsender" }
-syncrep = { path = "../../backend/replication/syncrep" }
-walreceiver = { path = "../../backend/replication/walreceiver" }
-walreceiverfuncs = { path = "../../backend/replication/walreceiverfuncs" }
-basebackup = { path = "../../backend/backup/basebackup" }
-slot = { path = "../../backend/replication/slot" }
-reorderbuffer = { path = "../../backend/replication/logical/reorderbuffer" }
-snapbuild = { path = "../../backend/replication/logical/snapbuild" }
+launcher = { path = "../../backend/replication/launcher", optional = true }
+walsender_config = { path = "../../backend/replication/walsender_config", optional = true }
+walsender = { path = "../../backend/replication/walsender", optional = true }
+syncrep = { path = "../../backend/replication/syncrep", optional = true }
+walreceiver = { path = "../../backend/replication/walreceiver", optional = true }
+walreceiverfuncs = { path = "../../backend/replication/walreceiverfuncs", optional = true }
+basebackup = { path = "../../backend/backup/basebackup", optional = true }
+slot = { path = "../../backend/replication/slot", optional = true }
+reorderbuffer = { path = "../../backend/replication/logical/reorderbuffer", optional = true }
+snapbuild = { path = "../../backend/replication/logical/snapbuild", optional = true }
 rewriteheap = { path = "../../backend/access/heap/rewriteheap" }
-logical = { path = "../../backend/replication/logical/logical" }
-origin = { path = "../../backend/replication/origin" }
-logicalworker = { path = "../../backend/replication/logical/worker" }
-logicalrelation = { path = "../../backend/replication/logical/relation" }
-slotfuncs = { path = "../../backend/replication/slotfuncs" }
-slotsync = { path = "../../backend/replication/slotsync" }
-logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs" }
-pgoutput = { path = "../../contrib/pgoutput" }
-test_decoding = { path = "../../contrib/test_decoding" }
-citext = { path = "../../contrib/citext" }
-isn = { path = "../../contrib/isn" }
-pg_surgery = { path = "../../contrib/pg_surgery" }
-uuid_ossp = { path = "../../contrib/uuid_ossp" }
-dblink = { path = "../../contrib/dblink" }
-pg_prewarm = { path = "../../contrib/pg_prewarm" }
-file_fdw = { path = "../../contrib/file_fdw" }
-postgres_fdw = { path = "../../contrib/postgres_fdw" }
-ltree = { path = "../../contrib/ltree" }
-intarray = { path = "../../contrib/intarray" }
-pgcrypto = { path = "../../contrib/pgcrypto" }
-pg_stat_statements = { path = "../../contrib/pg_stat_statements" }
-pg_buffercache = { path = "../../contrib/pg_buffercache" }
-auto_explain = { path = "../../contrib/auto_explain" }
-passwordcheck = { path = "../../contrib/passwordcheck" }
-test_oat_hooks = { path = "../../contrib/test_oat_hooks" }
-pgvector = { path = "../../contrib/pgvector" }
-pgvector_hnsw = { path = "../../contrib/pgvector_hnsw" }
-bloom = { path = "../../contrib/bloom" }
-hstore = { path = "../../contrib/hstore" }
+logical = { path = "../../backend/replication/logical/logical", optional = true }
+origin = { path = "../../backend/replication/origin", optional = true }
+logicalworker = { path = "../../backend/replication/logical/worker", optional = true }
+logicalrelation = { path = "../../backend/replication/logical/relation", optional = true }
+slotfuncs = { path = "../../backend/replication/slotfuncs", optional = true }
+slotsync = { path = "../../backend/replication/slotsync", optional = true }
+logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs", optional = true }
+pgoutput = { path = "../../contrib/pgoutput", optional = true }
+test_decoding = { path = "../../contrib/test_decoding", optional = true }
+citext = { path = "../../contrib/citext", optional = true }
+isn = { path = "../../contrib/isn", optional = true }
+pg_surgery = { path = "../../contrib/pg_surgery", optional = true }
+uuid_ossp = { path = "../../contrib/uuid_ossp", optional = true }
+dblink = { path = "../../contrib/dblink", optional = true }
+pg_prewarm = { path = "../../contrib/pg_prewarm", optional = true }
+file_fdw = { path = "../../contrib/file_fdw", optional = true }
+postgres_fdw = { path = "../../contrib/postgres_fdw", optional = true }
+ltree = { path = "../../contrib/ltree", optional = true }
+intarray = { path = "../../contrib/intarray", optional = true }
+pgcrypto = { path = "../../contrib/pgcrypto", optional = true }
+pg_stat_statements = { path = "../../contrib/pg_stat_statements", optional = true }
+pg_buffercache = { path = "../../contrib/pg_buffercache", optional = true }
+auto_explain = { path = "../../contrib/auto_explain", optional = true }
+passwordcheck = { path = "../../contrib/passwordcheck", optional = true }
+test_oat_hooks = { path = "../../contrib/test_oat_hooks", optional = true }
+pgvector = { path = "../../contrib/pgvector", optional = true }
+pgvector_hnsw = { path = "../../contrib/pgvector_hnsw", optional = true }
+bloom = { path = "../../contrib/bloom", optional = true }
+hstore = { path = "../../contrib/hstore", optional = true }
 adt_expandedrecord = { path = "../../backend/utils/adt/expandedrecord" }
-pg_trgm = { path = "../../contrib/pg_trgm" }
-btree_gist = { path = "../../contrib/btree_gist" }
-btree_gin = { path = "../../contrib/btree_gin" }
-contrib_cube = { path = "../../contrib/cube" }
-contrib_earthdistance = { path = "../../contrib/earthdistance" }
-contrib_seg = { path = "../../contrib/seg" }
-unaccent = { path = "../../contrib/unaccent" }
-pg_walinspect = { path = "../../contrib/pg_walinspect" }
-injection_points = { path = "../../contrib/injection_points" }
-test_custom_types = { path = "../../contrib/test_custom_types" }
-sslinfo = { path = "../../contrib/sslinfo" }
-fuzzystrmatch = { path = "../../contrib/fuzzystrmatch" }
-tablefunc = { path = "../../contrib/tablefunc" }
-contrib_lo = { path = "../../contrib/lo" }
-tcn = { path = "../../contrib/tcn" }
-pageinspect = { path = "../../contrib/pageinspect" }
-pgstattuple = { path = "../../contrib/pgstattuple" }
-pg_freespacemap = { path = "../../contrib/pg_freespacemap" }
-amcheck = { path = "../../contrib/amcheck" }
-tsm_system_rows = { path = "../../contrib/tsm_system_rows" }
-tsm_system_time = { path = "../../contrib/tsm_system_time" }
-pg_visibility = { path = "../../contrib/pg_visibility" }
-pgrowlocks = { path = "../../contrib/pgrowlocks" }
-pg_logicalinspect = { path = "../../contrib/pg_logicalinspect" }
-pg_overexplain = { path = "../../contrib/pg_overexplain" }
+pg_trgm = { path = "../../contrib/pg_trgm", optional = true }
+btree_gist = { path = "../../contrib/btree_gist", optional = true }
+btree_gin = { path = "../../contrib/btree_gin", optional = true }
+contrib_cube = { path = "../../contrib/cube", optional = true }
+contrib_earthdistance = { path = "../../contrib/earthdistance", optional = true }
+contrib_seg = { path = "../../contrib/seg", optional = true }
+unaccent = { path = "../../contrib/unaccent", optional = true }
+pg_walinspect = { path = "../../contrib/pg_walinspect", optional = true }
+injection_points = { path = "../../contrib/injection_points", optional = true }
+test_custom_types = { path = "../../contrib/test_custom_types", optional = true }
+sslinfo = { path = "../../contrib/sslinfo", optional = true }
+fuzzystrmatch = { path = "../../contrib/fuzzystrmatch", optional = true }
+tablefunc = { path = "../../contrib/tablefunc", optional = true }
+contrib_lo = { path = "../../contrib/lo", optional = true }
+tcn = { path = "../../contrib/tcn", optional = true }
+pageinspect = { path = "../../contrib/pageinspect", optional = true }
+pgstattuple = { path = "../../contrib/pgstattuple", optional = true }
+pg_freespacemap = { path = "../../contrib/pg_freespacemap", optional = true }
+amcheck = { path = "../../contrib/amcheck", optional = true }
+tsm_system_rows = { path = "../../contrib/tsm_system_rows", optional = true }
+tsm_system_time = { path = "../../contrib/tsm_system_time", optional = true }
+pg_visibility = { path = "../../contrib/pg_visibility", optional = true }
+pgrowlocks = { path = "../../contrib/pgrowlocks", optional = true }
+pg_logicalinspect = { path = "../../contrib/pg_logicalinspect", optional = true }
+pg_overexplain = { path = "../../contrib/pg_overexplain", optional = true }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }
 aio_core = { path = "../../backend/storage/aio/aio_core" }
 aio_uring = { path = "../../backend/storage/aio/aio_uring" }
-gin = { path = "../../backend/access/gin/gin" }
-gin_funcs = { path = "../../backend/access/gin/gin_funcs" }
+gin = { path = "../../backend/access/gin/gin", optional = true }
+gin_funcs = { path = "../../backend/access/gin/gin_funcs", optional = true }
 types_fmgr = { path = "../types/fmgr" }
 format_type = { path = "../../backend/utils/adt/format_type" }
 ruleutils = { path = "../../backend/utils/adt/ruleutils" }
 adt_regproc = { path = "../../backend/utils/adt/regproc" }
-ts_cache = { path = "../../backend/utils/cache/ts_cache" }
+ts_cache = { path = "../../backend/utils/cache/ts_cache", optional = true }
 statistics = { path = "../../backend/statistics/statistics" }
 stats_import = { path = "../../backend/statistics/stats_import" }
 typecmds = { path = "../../backend/commands/typecmds" }
+
+# What this binary links is a FEATURE LIST, not a fixed set. seams_init is the
+# only place a subsystem enters the postgres binary (its path dep plus the
+# `init_seams()` call below it), so making a dependency `optional = true` and
+# putting a `cfg` on its init call is the whole mechanism: feature off => the
+# crate is not in the link graph at all, and the subsystem's seams are never
+# installed. A contrib whose crate is gone no longer registers its named
+# builtin library with dfmgr, so `CREATE EXTENSION` fails with PostgreSQL's own
+# "could not access file" error; a core builtin whose crate is gone resolves to
+# fmgr's existing `NotPorted` stub, an error at call time.
+#
+# TIER A (replication, parallel, backup) is DECLARED BUT UNTESTED OFF: the
+# postmaster touches these at BOOT, and a seam that is called with nothing
+# installed panics `seam not installed` (crates/_support/seam_core). They are on
+# in every profile here. TIER B (index-*, tsearch, geo, jsonpath, pgrcolumnar,
+# plpgsql) is reached only through fmgr/pg_am dispatch and is safe off by
+# construction -- also on in every profile here. NOTHING below changes the
+# default build: `default = ["full"]` is exactly the dependency set and the
+# init order that existed before this section was added.
+#
+# Crates a feature CANNOT remove, because a non-seams_init crate in main_main's
+# graph depends on them too (`cargo tree -i <crate> -p main_main`). The feature
+# is still declared -- it stops seams_init installing the seams -- but the code
+# stays in the module:
+#   bloom, pgvector, pgvector_hnsw   <- amapi, indexam, planner, catalog_index
+#   tsm_system_rows, tsm_system_time <- tablesample
+#   dict_snowball, ts_cache          <- fmgr_core (and to_tsany, wparser_def)
+#   adt_tsginidx                     <- gin
+#   adt_geo                          <- regress_lib
+#   gin, brin_*, spgist_*            <- indexam, planner, catalog_index, autovacuum
+#   parallel, bgworker               <- execmain, launch_backend, postmaster, ...
+#   slot, origin, logical, snapbuild, reorderbuffer, walsender, walreceiver,
+#   slotsync, slotfuncs, launcher, walsender_config, walreceiverfuncs
+#                                    <- ipci, postmaster, subscriptioncmds, ...
+# `jsonpath` (adt_jsonpath, adt_jsonpath_exec) and `pgrcolumnar` are not
+# seams_init dependencies at all -- core calls them directly (pgrcolumnar <-
+# copy_cmd, postgres, tableam, tablecmds) -- so their features are declared
+# empty and gate nothing. The build script proves the real exclusion set from
+# `cargo tree`, so none of this has to be believed.
+[features]
+default = [
+    "full",
+]
+full = [
+    "contrib-all",
+    "replication",
+    "parallel",
+    "backup",
+    "index-gin",
+    "index-gist",
+    "index-spgist",
+    "index-brin",
+    "tsearch",
+    "geo",
+    "jsonpath",
+    "pgrcolumnar",
+    "plpgsql",
+]
+contrib-all = [
+    "contrib-amcheck",
+    "contrib-auto_explain",
+    "contrib-bloom",
+    "contrib-btree_gin",
+    "contrib-btree_gist",
+    "contrib-citext",
+    "contrib-cube",
+    "contrib-dblink",
+    "contrib-earthdistance",
+    "contrib-file_fdw",
+    "contrib-fuzzystrmatch",
+    "contrib-hstore",
+    "contrib-injection_points",
+    "contrib-intarray",
+    "contrib-isn",
+    "contrib-lo",
+    "contrib-ltree",
+    "contrib-pageinspect",
+    "contrib-passwordcheck",
+    "contrib-pg_buffercache",
+    "contrib-pg_freespacemap",
+    "contrib-pg_logicalinspect",
+    "contrib-pg_overexplain",
+    "contrib-pg_prewarm",
+    "contrib-pg_stat_statements",
+    "contrib-pg_surgery",
+    "contrib-pg_trgm",
+    "contrib-pg_visibility",
+    "contrib-pg_walinspect",
+    "contrib-pgcrypto",
+    "contrib-pgoutput",
+    "contrib-pgrowlocks",
+    "contrib-pgstattuple",
+    "contrib-pgvector",
+    "contrib-pgvector_hnsw",
+    "contrib-postgres_fdw",
+    "contrib-seg",
+    "contrib-sslinfo",
+    "contrib-tablefunc",
+    "contrib-tcn",
+    "contrib-test_custom_types",
+    "contrib-test_decoding",
+    "contrib-test_oat_hooks",
+    "contrib-tsm_system_rows",
+    "contrib-tsm_system_time",
+    "contrib-unaccent",
+    "contrib-uuid_ossp",
+]
+# The browser keep set: every group feature (nothing core is switched off
+# yet) plus the four contribs the web demo actually uses.
+browser = [
+    "replication",
+    "parallel",
+    "backup",
+    "index-gin",
+    "index-gist",
+    "index-spgist",
+    "index-brin",
+    "tsearch",
+    "geo",
+    "jsonpath",
+    "pgrcolumnar",
+    "plpgsql",
+    "contrib-pgvector",
+    "contrib-pgvector_hnsw",
+    "contrib-pg_trgm",
+    "contrib-pgcrypto",
+]
+
+# One contrib, one feature.
+contrib-amcheck = ["dep:amcheck"]
+contrib-auto_explain = ["dep:auto_explain"]
+contrib-bloom = ["dep:bloom"]
+contrib-btree_gin = ["dep:btree_gin"]
+contrib-btree_gist = ["dep:btree_gist"]
+contrib-citext = ["dep:citext"]
+contrib-cube = ["dep:contrib_cube"]
+contrib-dblink = ["dep:dblink"]
+contrib-earthdistance = ["dep:contrib_earthdistance"]
+contrib-file_fdw = ["dep:file_fdw"]
+contrib-fuzzystrmatch = ["dep:fuzzystrmatch"]
+contrib-hstore = ["dep:hstore"]
+contrib-injection_points = ["dep:injection_points"]
+contrib-intarray = ["dep:intarray"]
+contrib-isn = ["dep:isn"]
+contrib-lo = ["dep:contrib_lo"]
+contrib-ltree = ["dep:ltree"]
+contrib-pageinspect = ["dep:pageinspect"]
+contrib-passwordcheck = ["dep:passwordcheck"]
+contrib-pg_buffercache = ["dep:pg_buffercache"]
+contrib-pg_freespacemap = ["dep:pg_freespacemap"]
+contrib-pg_logicalinspect = ["dep:pg_logicalinspect"]
+contrib-pg_overexplain = ["dep:pg_overexplain"]
+contrib-pg_prewarm = ["dep:pg_prewarm"]
+contrib-pg_stat_statements = ["dep:pg_stat_statements"]
+contrib-pg_surgery = ["dep:pg_surgery"]
+contrib-pg_trgm = ["dep:pg_trgm"]
+contrib-pg_visibility = ["dep:pg_visibility"]
+contrib-pg_walinspect = ["dep:pg_walinspect"]
+contrib-pgcrypto = ["dep:pgcrypto"]
+contrib-pgoutput = ["dep:pgoutput"]
+contrib-pgrowlocks = ["dep:pgrowlocks"]
+contrib-pgstattuple = ["dep:pgstattuple"]
+contrib-pgvector = ["dep:pgvector"]
+contrib-pgvector_hnsw = ["dep:pgvector_hnsw"]
+contrib-postgres_fdw = ["dep:postgres_fdw"]
+contrib-seg = ["dep:contrib_seg"]
+contrib-sslinfo = ["dep:sslinfo"]
+contrib-tablefunc = ["dep:tablefunc"]
+contrib-tcn = ["dep:tcn"]
+contrib-test_custom_types = ["dep:test_custom_types"]
+contrib-test_decoding = ["dep:test_decoding"]
+contrib-test_oat_hooks = ["dep:test_oat_hooks"]
+contrib-tsm_system_rows = ["dep:tsm_system_rows"]
+contrib-tsm_system_time = ["dep:tsm_system_time"]
+contrib-unaccent = ["dep:unaccent"]
+contrib-uuid_ossp = ["dep:uuid_ossp"]
+
+# Subsystem groups. Declared here, on in every profile (see the header).
+replication = [
+    "dep:launcher",
+    "dep:logical",
+    "dep:logicalfuncs",
+    "dep:logicalrelation",
+    "dep:reorderbuffer",
+    "dep:snapbuild",
+    "dep:logicalworker",
+    "dep:origin",
+    "dep:slot",
+    "dep:slotfuncs",
+    "dep:slotsync",
+    "dep:syncrep",
+    "dep:walreceiver",
+    "dep:walreceiverfuncs",
+    "dep:walsender",
+    "dep:walsender_config",
+]
+parallel = [
+    "dep:parallel",
+    "dep:bgworker",
+    "dep:vacuumparallel",
+]
+backup = [
+    "dep:basebackup",
+]
+index-gin = [
+    "dep:gin",
+    "dep:gin_funcs",
+]
+index-gist = [
+    "dep:gistproc",
+    "dep:rangetypes_gist",
+    "dep:network_gist",
+]
+index-spgist = [
+    "dep:spgist_text",
+    "dep:spgist_quadtree",
+    "dep:spgist_kdtree",
+    "dep:spgist_box",
+    "dep:rangetypes_spgist",
+    "dep:network_spgist",
+]
+index-brin = [
+    "dep:brin_minmax_multi",
+    "dep:brin_build",
+    "dep:brin_bloom",
+    "dep:brin_funcs",
+]
+tsearch = [
+    "dep:adt_tsginidx",
+    "dep:adt_tsgistidx",
+    "dep:adt_tsvector_stat",
+    "dep:adt_tsquery_rewrite",
+    "dep:ts_cache",
+    "dep:dict_snowball",
+]
+geo = [
+    "dep:adt_geo",
+    "dep:gistproc",
+]
+jsonpath = []
+pgrcolumnar = []
+plpgsql = [
+    "dep:plpgsql",
+]
 
 # `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
 # in product builds (law 0.1).

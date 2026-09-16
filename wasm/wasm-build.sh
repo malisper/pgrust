@@ -33,6 +33,15 @@ TOOLCHAIN="${PGRUST_WASM_TOOLCHAIN:-nightly-2026-07-17}"
 TARGET="${PGRUST_WASM_TARGET:-wasm32-wasip1}"
 LEDGER="$ROOT/wasm/wasm-crate-ledger.md"
 
+# PGRUST_WASM_FEATURES selects WHICH SUBSYSTEMS THE BINARY LINKS. The names are
+# main_main's features, which forward to seams_init's (crates/_support/seams_init
+# Cargo.toml has the full list and the reasoning). `full` is the default and is
+# the build that existed before the gates: every contrib, every subsystem group.
+# `browser` is the web-demo profile -- every subsystem group still on, but only
+# the four contribs the demo uses. The link leg below always passes
+# --no-default-features, so this variable is the ONLY thing that decides the set.
+FEATURES="${PGRUST_WASM_FEATURES:-full}"
+
 # re2 is a build.rs probe; force the stub engine deterministically on wasm.
 export PGRUST_FORCE_NO_RE2=1
 
@@ -124,16 +133,109 @@ echo "wasm-build: crate-subset compile OK (panic=unwind, +exception-handling)"
 # profile is the gate's fast path; PGRUST_WASM_PROFILE=wasm-release builds the
 # optimized module the web demo (wasm) ships — ~44MB vs the ~217MB
 # dev binary (the profile is native-inert: nothing native selects it).
+# --------------------------------------------------------------------------
+# Exclusion proof. A feature that is merely *declared off* proves nothing: the
+# crate can still be in the module because some OTHER crate in main_main's graph
+# depends on it (contribs that core's index machinery pulls in directly, for
+# instance). So before the link, ask cargo what it actually resolved:
+#
+#   * which seams_init features this profile turned ON (cargo tree -f '{f}'),
+#   * which of seams_init's optional dependencies those features enable,
+#   * which crates are in the link graph at all (cargo tree, forward).
+#
+# Optional deps the profile does NOT enable and that are NOT in the graph are
+# the real exclusions -- the N in the line this prints. Ones the profile does
+# not enable but that are in the graph anyway are reported as "still linked"
+# with the crate that pulls them: declared, not removed, not fought (the gate
+# still stops seams_init installing their seams). Then the hard assertion: no
+# crate counted as excluded may appear in the graph. `cargo tree` needs no
+# -Zbuild-std -- it resolves, it does not compile.
+prove_feature_exclusion() {
+    if [ "$FEATURES" = "full" ]; then
+        echo "wasm-build: profile full excludes 0 crates (every gate on; nothing to prove)"
+        return 0
+    fi
+
+    local tree graph enabled
+    tree=$(cargo +"${TOOLCHAIN}" tree --target "$TARGET" -p main_main \
+        --no-default-features --features "$FEATURES" -e normal --prefix none -f '{p}|{f}')
+    graph=$(printf '%s\n' "$tree" | awk '{print $1}' | LC_ALL=C sort -u)
+    enabled=$(printf '%s\n' "$tree" | awk -F'|' '/^seams_init / && !seen {e=$2; seen=1} END {print e}')
+    [ -n "$enabled" ] || { echo "wasm-build: FAIL - seams_init not in the graph for features '$FEATURES'" >&2; exit 1; }
+
+    # Optional deps of seams_init, as PACKAGE names (the aliases in the manifest
+    # are not always the package name: contrib_cube is the `cube` package), split
+    # into the ones "$enabled" turns on and the ones it does not.
+    local off
+    off=$(SEAMS_ENABLED="$enabled" python3 - "$ROOT/crates/_support/seams_init/Cargo.toml" <<'PYEOF'
+import os, re, sys
+manifest = sys.argv[1]
+root = os.path.dirname(manifest)
+text = open(manifest).read()
+optional, feats, section = {}, {}, None
+for line in text.split("\n"):
+    if line.startswith("["):
+        section = line.strip()
+        continue
+    if section == "[dependencies]":
+        m = re.match(r'\s*([A-Za-z0-9_-]+)\s*=\s*\{([^}]*)\}\s*$', line)
+        if m and "optional = true" in m.group(2):
+            p = re.search(r'path\s*=\s*"([^"]+)"', m.group(2)).group(1)
+            name = re.search(r'^\s*name\s*=\s*"([^"]+)"', open(os.path.join(root, p, "Cargo.toml")).read(), re.M).group(1)
+            optional[m.group(1)] = name
+# [features]: `name = [ ... ]`, one entry per line or inline
+for m in re.finditer(r'^([A-Za-z0-9_-]+)\s*=\s*\[(.*?)\]', text[text.index("[features]"):], re.M | re.S):
+    feats[m.group(1)] = re.findall(r'"([^"]+)"', m.group(2))
+on = set()
+for f in os.environ["SEAMS_ENABLED"].split(","):
+    f = f.strip()
+    for entry in feats.get(f, []):
+        if entry.startswith("dep:"):
+            on.add(entry[4:])
+print("\n".join(sorted(optional[a] for a in optional if a not in on)))
+PYEOF
+)
+
+    local excluded="" still=""
+    for c in $off; do
+        if printf '%s\n' "$graph" | grep -Fxq -- "$c"; then still="$still $c"; else excluded="$excluded $c"; fi
+    done
+    excluded=$(echo $excluded); still=$(echo $still)
+    local n_excluded=0
+    [ -n "$excluded" ] && n_excluded=$(echo "$excluded" | wc -w | tr -d ' ')
+    echo "wasm-build: profile $FEATURES excludes $n_excluded crates: $excluded"
+    if [ -n "$still" ]; then
+        echo "wasm-build: profile $FEATURES leaves $(echo "$still" | wc -w | tr -d ' ') gated crates linked (another crate in the graph depends on them; their seams are still not installed):"
+        for c in $still; do
+            echo "    $c <- $(cargo +"${TOOLCHAIN}" tree --target "$TARGET" -i "$c" -p main_main --no-default-features --features "$FEATURES" -e normal --prefix none --depth 1 2>/dev/null | tail -n +2 | awk '{print $1}' | LC_ALL=C sort -u | tr '\n' ' ')"
+        done
+    fi
+    # The assertion: nothing counted as excluded may be in the graph.
+    local bad=0
+    for c in $excluded; do
+        if printf '%s\n' "$graph" | grep -Fxq -- "$c"; then
+            echo "wasm-build: FAIL - $c is counted as excluded but IS in the link graph:" >&2
+            cargo +"${TOOLCHAIN}" tree --target "$TARGET" -i "$c" -p main_main \
+                --no-default-features --features "$FEATURES" -e normal >&2 || true
+            bad=1
+        fi
+    done
+    [ "$bad" = "0" ] || exit 1
+    echo "wasm-build: exclusion proof OK (no excluded crate is reachable in the link graph)"
+}
+
 PROFILE="${PGRUST_WASM_PROFILE:-dev}"
 case "$PROFILE" in
     dev) PROFILE_DIR=debug ;;
     *)   PROFILE_DIR="$PROFILE" ;;
 esac
 if [ "${PGRUST_WASM_SKIP_LINK:-0}" != "1" ]; then
-    cargo +"${TOOLCHAIN}" build --target "$TARGET" -Zbuild-std=std,panic_unwind -p main_main --bin postgres --profile "$PROFILE"
+    prove_feature_exclusion
+    cargo +"${TOOLCHAIN}" build --target "$TARGET" -Zbuild-std=std,panic_unwind -p main_main --bin postgres --profile "$PROFILE" \
+        --no-default-features --features "$FEATURES"
     BIN_WASM="$ROOT/target/${TARGET}/${PROFILE_DIR}/postgres.wasm"
     [ -f "$BIN_WASM" ] || { echo "wasm-build: FAIL — postgres.wasm not produced" >&2; exit 1; }
-    echo "wasm-build: postgres.wasm linked ($(du -h "$BIN_WASM" | cut -f1), profile $PROFILE)"
+    echo "wasm-build: postgres.wasm linked ($(du -h "$BIN_WASM" | cut -f1), profile $PROFILE, features $FEATURES)"
 
     # Binaryen pass — release profile only (dev builds are untouched), opt out
     # with PGRUST_WASM_OPT=0. `[profile.wasm-release]` is `lto = false` with
@@ -197,4 +299,4 @@ else
     echo "wasm-build: smoke built (set PGRUST_WASM_RUN_SMOKE=1 with wasmtime installed to execute it)"
 fi
 
-echo "VERDICT: wasm-build PASS (${N_INCLUDE}/${N_MEMBERS} crates @ ${TOOLCHAIN}, panic=unwind)"
+echo "VERDICT: wasm-build PASS (${N_INCLUDE}/${N_MEMBERS} crates @ ${TOOLCHAIN}, panic=unwind, features ${FEATURES})"
