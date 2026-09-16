@@ -105,3 +105,23 @@ iteration one.
 What this experiment did NOT find: any evidence that the profile explains the 1.3–9× gap to PGlite.
 Even the best variant leaves Test 2 at 4273 ms against PGlite's 579 ms. The gap is in the guest or
 the transport, not in codegen flags.
+
+## The same profile on 0.3 (2026-09-16)
+
+Rebuilt unchanged — same profile, same `nightly-2026-07-17`, same target — on the spike line rebased
+onto upstream v0.3 (`79ad992ede`, PostgreSQL 18.6):
+
+| Module | .wasm raw | gzip -9 | vs the row above |
+| --- | --- | --- | --- |
+| baseline on v0.2 (`46cb91c6cd`) | 46 431 092 | 13 306 733 | — |
+| baseline on v0.3 (`5eb87502c3`) | **53 414 445** | 15 097 262 | +15.0% raw, +13.5% gz |
+
+sha256 `b54a54a0c33281d147bacc9f756c8f32128c1540aae4f8e0945656748f67683f`. Seven megabytes of engine,
+not of profile: nothing in `[profile.wasm-release]` moved, and the duplication result in the bench's
+`2026-09-08-wasm-size-map.md` applies to this module exactly as it did to the last one.
+
+One thing the rebase changed underneath the module: `child_thread_stack_size()` now takes the SCALED
+guard budget (`max_stack_depth` x `STACK_DEPTH_SCALE` + 8 MiB = 16 MiB at `max_stack_depth=2048`),
+which dominates the 4 MiB wasm `UNLIMITED_STACK_RESERVE` floor, so the floor no longer decides what a
+child thread reserves — and the browser peak fell anyway, 656.9 MiB to 263.5 MiB on the bench's
+one-machine A/B of the two modules.
