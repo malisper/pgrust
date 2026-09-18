@@ -487,21 +487,32 @@ pub fn PortalDefineQuery(
     Ok(())
 }
 
-/// `PortalDefineQuery` for a caller whose source text outlives the portal
-/// (exec_simple_query: the text is the MessageContext message, and the
-/// unnamed portal is dropped before the message is reset). This is C's own
-/// contract — `portal->sourceText = sourceText` shares the caller's pointer —
-/// and avoids copying the whole multi-statement message once per statement.
+/// `PortalDefineQuery` for a caller whose source text outlives the portal.
+/// This is C's own contract — `portal->sourceText = sourceText` shares the
+/// caller's pointer — and avoids copying a whole multi-statement message
+/// once per statement (exec_simple_query's 25 000-INSERT scripts were 79%
+/// memmove before this).
+///
+/// The portal registry stores `Portal<'static>`, so the borrow's lifetime is
+/// extended here, in the one place that states the rule, rather than at the
+/// call site.
 ///
 /// # Safety
-/// `sourceText` must stay valid and unmoved until the portal is dropped.
-pub unsafe fn PortalDefineQuerySharedText(
+/// `sourceText` must outlive the portal: it must stay valid and unmoved until
+/// `PortalDrop` runs for `portal`. For exec_simple_query the text is the
+/// MessageContext message and the unnamed portal is dropped — on success in
+/// the statement loop, on error by `error_recovery`'s AbortCurrentTransaction
+/// — before the main loop resets MessageContext for the next message.
+pub unsafe fn PortalDefineQuerySharedText<'a>(
     portal: &Portal<'static>,
-    sourceText: &'static str,
+    sourceText: &'a str,
     commandTag: CommandTag,
     stmts: StmtListHandle,
     cplan: CachedPlanHandle,
 ) {
+    // SAFETY: the caller guarantees `sourceText` outlives the portal (see
+    // above); this is the only lifetime extension for `sourceText`.
+    let shared: &'static str = unsafe { core::mem::transmute::<&'a str, &'static str>(sourceText) };
     let mut p = portal.borrow_mut();
     debug_assert_eq!(p.status, PORTAL_NEW);
     p.stmts = stmts;
@@ -509,7 +520,7 @@ pub unsafe fn PortalDefineQuerySharedText(
     p.qc = QueryCompletion { commandTag, nprocessed: 0 };
     p.commandTag = commandTag;
     p.prepStmtName = None;
-    p.sourceText = Some(sourceText);
+    p.sourceText = Some(shared);
     p.status = PORTAL_DEFINED;
 }
 
