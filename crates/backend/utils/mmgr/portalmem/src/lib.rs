@@ -479,9 +479,38 @@ pub fn PortalDefineQuery(
         Some(s) => Some(PgString::from_str_in(s, mcx)?),
         None => None,
     };
-    p.sourceText = Some(PgString::from_str_in(sourceText, mcx)?);
+    // SAFETY: bytes copied from a `&str` are valid UTF-8; the copy lives in
+    // TopPortalContext for the portal's lifetime.
+    let copy: &'static [u8] = mcx::slice_in(mcx, sourceText.as_bytes())?.leak();
+    p.sourceText = Some(unsafe { core::str::from_utf8_unchecked(copy) });
     p.status = PORTAL_DEFINED;
     Ok(())
+}
+
+/// `PortalDefineQuery` for a caller whose source text outlives the portal
+/// (exec_simple_query: the text is the MessageContext message, and the
+/// unnamed portal is dropped before the message is reset). This is C's own
+/// contract — `portal->sourceText = sourceText` shares the caller's pointer —
+/// and avoids copying the whole multi-statement message once per statement.
+///
+/// # Safety
+/// `sourceText` must stay valid and unmoved until the portal is dropped.
+pub unsafe fn PortalDefineQuerySharedText(
+    portal: &Portal<'static>,
+    sourceText: &'static str,
+    commandTag: CommandTag,
+    stmts: StmtListHandle,
+    cplan: CachedPlanHandle,
+) {
+    let mut p = portal.borrow_mut();
+    debug_assert_eq!(p.status, PORTAL_NEW);
+    p.stmts = stmts;
+    p.cplan = cplan;
+    p.qc = QueryCompletion { commandTag, nprocessed: 0 };
+    p.commandTag = commandTag;
+    p.prepStmtName = None;
+    p.sourceText = Some(sourceText);
+    p.status = PORTAL_DEFINED;
 }
 
 fn PortalReleaseCachedPlan(portal: &Portal<'static>) {
@@ -1400,7 +1429,7 @@ pub fn pg_cursor_rows<'a>(mcx: Mcx<'a>) -> PgResult<PgVec<'a, PgCursorRow<'a>>> 
             let Some(source_text) = &p.sourceText else { continue };
             rows.push(PgCursorRow {
                 name: p.name.clone_in(mcx)?,
-                statement: source_text.clone_in(mcx)?,
+                statement: PgString::from_str_in(source_text, mcx)?,
                 is_holdable: (p.cursorOptions & CURSOR_OPT_HOLD) != 0,
                 is_binary: (p.cursorOptions & CURSOR_OPT_BINARY) != 0,
                 is_scrollable: (p.cursorOptions & CURSOR_OPT_SCROLL) != 0,

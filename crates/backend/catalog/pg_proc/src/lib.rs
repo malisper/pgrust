@@ -984,7 +984,7 @@ pub fn function_parse_error_transpose(e: &mut types_error::PgError, prosrc: &str
     // sourceText.
     let query = pquery::ActivePortal()
         .filter(|p| p.borrow().status == types_portal::PortalStatus::PORTAL_ACTIVE)
-        .and_then(|p| p.borrow().sourceText.as_ref().map(|s| s.as_str().to_string()));
+        .and_then(|p| p.borrow().sourceText.map(|s| s.to_string()));
     if let Some(q) = query {
         let newpos = match_prosrc_to_query(prosrc, &q, origpos);
         if newpos > 0 {

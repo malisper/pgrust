@@ -228,7 +228,7 @@ fn define_query_stores_and_shares_handles() {
     {
         let p = portal.borrow();
         assert_eq!(p.status, PORTAL_DEFINED);
-        assert_eq!(p.sourceText.as_ref().unwrap().as_str(), "select 1");
+        assert_eq!(p.sourceText.unwrap(), "select 1");
         assert_eq!(p.prepStmtName.as_ref().unwrap().as_str(), "ps1");
         assert_eq!(p.stmts, StmtListHandle(5));
         assert_eq!(p.cplan, CachedPlanHandle(11));

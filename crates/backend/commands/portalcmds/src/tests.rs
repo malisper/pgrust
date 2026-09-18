@@ -337,7 +337,7 @@ fn declare_fetch_close_select1_e2e() {
         let p = portal.borrow();
         assert_eq!(p.strategy, PORTAL_ONE_SELECT);
         assert_ne!(p.cursorOptions & CURSOR_OPT_NO_SCROLL, 0, "Result plan can't back up");
-        assert_eq!(p.sourceText.as_ref().unwrap().as_str(), "DECLARE c1 CURSOR FOR SELECT 1");
+        assert_eq!(p.sourceText.unwrap(), "DECLARE c1 CURSOR FOR SELECT 1");
     }
     drop(portal);
 

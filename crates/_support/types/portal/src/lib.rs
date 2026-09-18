@@ -120,7 +120,7 @@ pub struct PortalData<'mcx> {
     pub activeSubid: SubTransactionId,
     pub createLevel: i32,
 
-    pub sourceText: Option<PgString<'mcx>>,
+    pub sourceText: Option<&'mcx str>,
     pub commandTag: CommandTag,
     pub qc: QueryCompletion,
     pub stmts: StmtListHandle,

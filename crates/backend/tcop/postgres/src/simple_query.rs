@@ -571,14 +571,18 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
             // SAFETY: `plantree_list` is arena-backed by `mcx` and neither moves
             // nor drops before `stmt_list::free(stmts)` / the next reset_all().
             let stmts = unsafe { pquery::stmt_list::register(&plantree_list) };
-            portalmem::PortalDefineQuery(
-                &portal,
-                None,
-                query_string,
-                command_tag,
-                stmts,
-                CachedPlanHandle::NULL,
-            )?;
+            // SAFETY: `query_string` is the MessageContext message; the unnamed
+            // portal is dropped before MessageContext is reset. C shares the
+            // pointer the same way (`portal->sourceText = sourceText`).
+            unsafe {
+                portalmem::PortalDefineQuerySharedText(
+                    &portal,
+                    core::mem::transmute::<&str, &'static str>(query_string),
+                    command_tag,
+                    stmts,
+                    CachedPlanHandle::NULL,
+                )
+            };
 
             pquery::PortalStart(&portal, ParamListHandle::NULL, 0, None)?;
             crate::stmt_trace::probe("q.portalstart");
