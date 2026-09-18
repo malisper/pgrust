@@ -453,11 +453,8 @@ pub fn CreateNewPortal() -> PgResult<Portal<'static>> {
     }
 }
 
-// Stores the passed values; the stmts/cplan handles are Copy stores written
-// before anything fallible, so a failed pstrdup cannot leak the plancache
-// refcount the caller handed off (C's no-elog-before-storing-cplan rule). The
-// source-text/prep-name copies are the single pstrdup analog; C shares the
-// caller's pointer.
+// stmts/cplan are Copy stores written before anything fallible, so a failed
+// copy cannot leak the plancache refcount (C's no-elog-before-storing-cplan).
 pub fn PortalDefineQuery(
     portal: &Portal<'static>,
     prepStmtName: Option<&str>,
@@ -479,30 +476,18 @@ pub fn PortalDefineQuery(
         Some(s) => Some(PgString::from_str_in(s, mcx)?),
         None => None,
     };
-    // SAFETY: bytes copied from a `&str` are valid UTF-8; the copy lives in
-    // TopPortalContext for the portal's lifetime.
     let copy: &'static [u8] = mcx::slice_in(mcx, sourceText.as_bytes())?.leak();
+    // SAFETY: copied from a `&str`.
     p.sourceText = Some(unsafe { core::str::from_utf8_unchecked(copy) });
     p.status = PORTAL_DEFINED;
     Ok(())
 }
 
-/// `PortalDefineQuery` for a caller whose source text outlives the portal.
-/// This is C's own contract — `portal->sourceText = sourceText` shares the
-/// caller's pointer — and avoids copying a whole multi-statement message
-/// once per statement (exec_simple_query's 25 000-INSERT scripts were 79%
-/// memmove before this).
-///
-/// The portal registry stores `Portal<'static>`, so the borrow's lifetime is
-/// extended here, in the one place that states the rule, rather than at the
-/// call site.
-///
+/// `PortalDefineQuery` sharing the caller's text as C does; exec_simple_query's
+/// per-statement copy of the whole message was 79% of its time.
 /// # Safety
-/// `sourceText` must outlive the portal: it must stay valid and unmoved until
-/// `PortalDrop` runs for `portal`. For exec_simple_query the text is the
-/// MessageContext message and the unnamed portal is dropped — on success in
-/// the statement loop, on error by `error_recovery`'s AbortCurrentTransaction
-/// — before the main loop resets MessageContext for the next message.
+/// `sourceText` outlives `portal`: the simple-query portal is dropped (or
+/// aborted by error_recovery) before MessageContext resets.
 pub unsafe fn PortalDefineQuerySharedText<'a>(
     portal: &Portal<'static>,
     sourceText: &'a str,
@@ -510,8 +495,7 @@ pub unsafe fn PortalDefineQuerySharedText<'a>(
     stmts: StmtListHandle,
     cplan: CachedPlanHandle,
 ) {
-    // SAFETY: the caller guarantees `sourceText` outlives the portal (see
-    // above); this is the only lifetime extension for `sourceText`.
+    // SAFETY: the caller's contract above.
     let shared: &'static str = unsafe { core::mem::transmute::<&'a str, &'static str>(sourceText) };
     let mut p = portal.borrow_mut();
     debug_assert_eq!(p.status, PORTAL_NEW);
