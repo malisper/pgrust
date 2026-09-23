@@ -27,17 +27,13 @@ impl EntropySource for OsEntropy {
             // SAFETY: chunk is a live writable buffer of chunk.len() <= 256 bytes.
             let rc = unsafe { libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len()) };
             // musl has getentropy(3) since 1.1.20, but the libc crate binds it
-            // for glibc only. getrandom(2) with no flags is the same kernel
-            // CSPRNG, and never returns short for <= 256 bytes.
+            // for glibc only, so do what glibc's and musl's getentropy do over
+            // getrandom(2) (same kernel CSPRNG).
             #[cfg(target_env = "musl")]
-            let rc = {
-                // SAFETY: chunk is a live writable buffer of chunk.len() <= 256 bytes.
-                let n = unsafe { libc::getrandom(chunk.as_mut_ptr().cast(), chunk.len(), 0) };
-                if usize::try_from(n) == Ok(chunk.len()) {
-                    0
-                } else {
-                    -1
-                }
+            let rc = if getentropy_loop(chunk, getrandom) {
+                0
+            } else {
+                -1
             };
             if rc != 0 {
                 return dev_urandom(buf);
@@ -45,6 +41,33 @@ impl EntropySource for OsEntropy {
         }
         true
     }
+}
+
+/// One `getrandom(2)` call with no flags: bytes written, or the errno.
+#[cfg(target_env = "musl")]
+fn getrandom(buf: &mut [u8]) -> Result<usize, i32> {
+    // SAFETY: buf is a live writable buffer of buf.len() bytes.
+    let n = unsafe { libc::getrandom(buf.as_mut_ptr().cast(), buf.len(), 0) };
+    usize::try_from(n).map_err(|_| std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+}
+
+/// getentropy(3) semantics over a getrandom-shaped call, as glibc and musl
+/// implement them: fill all of `buf` or fail. `EINTR` retries (an
+/// interrupted wait for the entropy pool must not reach the dev-urandom
+/// fallback, which does not wait for it); a short read continues from where
+/// it stopped; any other error, or a zero-byte read, fails.
+#[cfg(target_env = "musl")]
+fn getentropy_loop(buf: &mut [u8], mut call: impl FnMut(&mut [u8]) -> Result<usize, i32>) -> bool {
+    let mut p = 0;
+    while p < buf.len() {
+        match call(&mut buf[p..]) {
+            Ok(0) => return false,
+            Ok(n) => p += n,
+            Err(libc::EINTR) => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 #[cold]
@@ -87,6 +110,32 @@ mod tests {
         assert!(dev_urandom(&mut b));
         assert_ne!(&a[..], &[0u8; 300][..]);
         assert_ne!(&a[..], &b[..]);
+    }
+
+    // The musl arm keeps getentropy's contract: EINTR retries and a short
+    // read resumes, rather than falling back to dev-urandom.
+    #[cfg(target_env = "musl")]
+    #[test]
+    fn getentropy_loop_retries_eintr_and_short_reads() {
+        let mut script = vec![Err(libc::EINTR), Ok(3), Err(libc::EINTR), Ok(5)].into_iter();
+        let mut buf = [0u8; 8];
+        assert!(getentropy_loop(&mut buf, |b| {
+            let r = script.next().unwrap();
+            if let Ok(n) = r {
+                b[..n].fill(0xAB);
+            }
+            r
+        }));
+        assert_eq!(buf, [0xAB; 8]);
+        assert!(script.next().is_none());
+    }
+
+    #[cfg(target_env = "musl")]
+    #[test]
+    fn getentropy_loop_fails_on_other_errors() {
+        let mut buf = [0u8; 8];
+        assert!(!getentropy_loop(&mut buf, |_| Err(libc::ENOSYS)));
+        assert!(!getentropy_loop(&mut buf, |_| Ok(0)));
     }
 
     #[test]
