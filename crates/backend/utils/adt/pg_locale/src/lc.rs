@@ -1,6 +1,8 @@
 //! LC_* category ids and newlocale masks, one indirection for the wasm arm.
 //!
-//! native: re-exports the platform libc crate's values.
+//! native: re-exports the platform libc crate's values, except on musl,
+//! whose `LC_*_MASK` constants the libc crate does not bind (glibc only);
+//! musl takes the table below, which is musl's own locale.h.
 //! wasm32: the wasi libc CRATE exposes no locale surface, but wasi-libc
 //! itself (musl-derived) ships setlocale/newlocale and the *_l workers as
 //! weak symbols with musl's category numbering — these are musl locale.h's
@@ -8,14 +10,14 @@
 //! wasi-libc's locale is C/POSIX-only: setlocale/newlocale fail cleanly for
 //! any other name, which is exactly C's behavior on a locale-less libc.
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(not(any(target_family = "wasm", target_env = "musl")))]
 pub(crate) use libc::{
     LC_ALL_MASK, LC_COLLATE, LC_COLLATE_MASK, LC_CTYPE, LC_CTYPE_MASK, LC_MESSAGES,
     LC_MESSAGES_MASK, LC_MONETARY, LC_MONETARY_MASK, LC_NUMERIC, LC_NUMERIC_MASK, LC_TIME,
     LC_TIME_MASK,
 };
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", target_env = "musl"))]
 mod wasm_lc {
     use core::ffi::c_int;
     // musl locale.h category ids.
@@ -35,5 +37,5 @@ mod wasm_lc {
     pub(crate) const LC_ALL_MASK: c_int = 0x7fffffff;
 }
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", target_env = "musl"))]
 pub(crate) use wasm_lc::*;

@@ -23,8 +23,22 @@ impl EntropySource for OsEntropy {
     fn fill(&self, buf: &mut [u8]) -> bool {
         // getentropy caps a request at 256 bytes.
         for chunk in buf.chunks_mut(256) {
+            #[cfg(not(target_env = "musl"))]
             // SAFETY: chunk is a live writable buffer of chunk.len() <= 256 bytes.
             let rc = unsafe { libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len()) };
+            // musl has getentropy(3) since 1.1.20, but the libc crate binds it
+            // for glibc only. getrandom(2) with no flags is the same kernel
+            // CSPRNG, and never returns short for <= 256 bytes.
+            #[cfg(target_env = "musl")]
+            let rc = {
+                // SAFETY: chunk is a live writable buffer of chunk.len() <= 256 bytes.
+                let n = unsafe { libc::getrandom(chunk.as_mut_ptr().cast(), chunk.len(), 0) };
+                if usize::try_from(n) == Ok(chunk.len()) {
+                    0
+                } else {
+                    -1
+                }
+            };
             if rc != 0 {
                 return dev_urandom(buf);
             }
