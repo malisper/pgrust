@@ -595,17 +595,36 @@ mod global {
 
     // -- fd-park mode (epoll/kqueue integration) ------------------------------
 
+    /// `pipe(2)` with the C contract (`-1` + errno on failure). The libc crate
+    /// binds it for every target except wasm, where only WASIX's wasi-libc
+    /// implements it and the crate's wasi module (shared with wasip1) declares
+    /// nothing.
+    #[cfg(not(target_family = "wasm"))]
+    unsafe fn raw_pipe(fds: *mut i32) -> i32 {
+        // SAFETY: callers pass a 2-slot array.
+        unsafe { libc::pipe(fds) }
+    }
+
+    #[cfg(all(target_family = "wasm", target_vendor = "wasmer"))]
+    unsafe fn raw_pipe(fds: *mut i32) -> i32 {
+        extern "C" {
+            fn pipe(fds: *mut i32) -> i32;
+        }
+        // SAFETY: callers pass a 2-slot array.
+        unsafe { pipe(fds) }
+    }
+
     /// Ensure this thread's wake pipe exists; returns the READ end for the
     /// caller to register in its WaitEventSet. Errors are raw errno.
     ///
-    /// wasm32: WASI p1 has no pipe(2); fd-park is native-only until the boot
-    /// increment lands the WASI waiteventset backend (poll_oneoff/latch-park).
-    #[cfg(target_family = "wasm")]
+    /// wasm32-wasip1: WASI p1 has no pipe(2); fd-park is native-only until the
+    /// boot increment lands the WASI waiteventset backend (poll_oneoff/latch-park).
+    #[cfg(all(target_family = "wasm", not(target_vendor = "wasmer")))]
     pub fn ensure_wake_pipe() -> Result<i32, i32> {
         Err(libc::ENOSYS)
     }
 
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
     pub fn ensure_wake_pipe() -> Result<i32, i32> {
         let idx = try_current_slot().ok_or(libc::EAGAIN)?;
         let s = slot(idx);
@@ -615,17 +634,17 @@ mod global {
         }
         let mut pipefd = [0i32; 2];
         // SAFETY: pipe(2) into a 2-slot array.
-        if unsafe { libc::pipe(pipefd.as_mut_ptr()) } < 0 {
+        if unsafe { raw_pipe(pipefd.as_mut_ptr()) } < 0 {
             return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
         }
         for fd in pipefd {
-            for (cmd, arg) in
-                [(libc::F_SETFL, libc::O_NONBLOCK), (libc::F_SETFD, libc::FD_CLOEXEC)]
-            {
+            for (cmd, arg) in [
+                (libc::F_SETFL, libc::O_NONBLOCK),
+                (libc::F_SETFD, libc::FD_CLOEXEC),
+            ] {
                 // SAFETY: fcntl on fds just created.
                 if unsafe { libc::fcntl(fd, cmd, arg) } == -1 {
-                    let errno =
-                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
                     for fd in pipefd {
                         // SAFETY: closing the fds we just created.
                         unsafe { libc::close(fd) };
@@ -653,9 +672,9 @@ mod global {
     pub fn begin_fd_park() -> bool {
         let idx = current_slot();
         let mut g = slot(idx).lock();
-        // wasm32: no wake pipe can exist (no pipe(2)); "parked" is pure mode
-        // bookkeeping — the wasm wait backend blocks on time alone.
-        #[cfg(not(target_family = "wasm"))]
+        // wasm32-wasip1: no wake pipe can exist (no pipe(2)); "parked" is pure
+        // mode bookkeeping — the wasm wait backend blocks on time alone.
+        #[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
         debug_assert!(g.wake_wfd >= 0, "fd-park without a wake pipe");
         match g.mode {
             Mode::Notified => {

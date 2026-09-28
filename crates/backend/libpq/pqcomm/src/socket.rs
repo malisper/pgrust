@@ -415,6 +415,25 @@ pub fn ListenServerPort(
                 .finish(loc("ListenServerPort"))?;
         }
 
+        // A blocking listener is correct here and nowhere else is it load-bearing,
+        // so this is scoped to the one platform where it costs the accept loop its
+        // queue: WASIX parks an empty-queue accept() for a 30 s timeout it invents
+        // itself (errno ETIMEDOUT, not EWOULDBLOCK), and a parked accept consumes
+        // the readiness the epoll watch still owes the rest of an arrival burst.
+        // Non-blocking gives the EAGAIN at 0 ms that `drain_end` below, and the
+        // drain in postmaster's ServerLoop, are written to terminate on. Set before
+        // ConfigurePostmasterWaitSet registers the fd, as the measured fix requires.
+        if cfg!(all(target_family = "wasm", target_vendor = "wasmer")) {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                ereport(FATAL)
+                    .with_saved_errno(errno())
+                    .errmsg("could not set listening socket to nonblocking mode: %m")
+                    .finish(loc("ListenServerPort"))?;
+            }
+        }
+
         // Without SO_REUSEADDR a new postmaster can't start right away after
         // a stop or crash.
         if addr.family != ip::sys::AF_UNIX
@@ -640,14 +659,23 @@ pub fn AcceptConnection(server_fd: pgsocket, client_sock: &mut ClientSocket) -> 
     };
     if fd == PGINVALID_SOCKET {
         client_sock.sock = PGINVALID_SOCKET;
-        let _ = ereport(LOG)
-            .with_saved_errno(errno())
-            .errcode_for_socket_access()
-            .errmsg("could not accept new connection: %m")
-            .finish(loc("AcceptConnection"));
+        // ServerLoop drains the accept queue to empty on WASIX, because there
+        // one epoll event stands for however many connections completed while
+        // the postmaster was busy (see serverloop.rs). The EWOULDBLOCK that
+        // ends a drain is the expected tail of the batch, not a spurious
+        // wakeup, so it must not cost a log line and a 100 ms delay per event.
+        let drain_end =
+            cfg!(all(target_family = "wasm", target_vendor = "wasmer")) && errno() == libc::EAGAIN;
+        if !drain_end {
+            let _ = ereport(LOG)
+                .with_saved_errno(errno())
+                .errcode_for_socket_access()
+                .errmsg("could not accept new connection: %m")
+                .finish(loc("AcceptConnection"));
 
-        // The postmaster retries immediately on read-ready; delay a bit.
-        std::thread::sleep(std::time::Duration::from_micros(100000));
+            // The postmaster retries immediately on read-ready; delay a bit.
+            std::thread::sleep(std::time::Duration::from_micros(100000));
+        }
         return STATUS_ERROR;
     }
     client_sock.sock = fd;

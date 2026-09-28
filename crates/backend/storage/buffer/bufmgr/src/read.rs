@@ -650,14 +650,15 @@ fn AbortBufferIO(buffer: Buffer) {
         debug_assert!(buf_state & BM_DIRTY == 0);
         UnlockBufHdr(desc, buf_state);
     } else {
+        // Upstream (bufmgr.c AbortBufferIO) treats a valid — hence dirty —
+        // buffer still in progress at abort time as the *normal* result of the
+        // write path erroring after StartBufferIO, and simply falls through to
+        // TerminateBufferIO. On this unwinding port that error is a panic exit
+        // from FlushBuffer's `ereport`, so reaching here is expected, not an
+        // invariant violation: asserting BM_DIRTY (upstream's debug-only
+        // `Assert`) and cleaning up, rather than aborting the whole postmaster.
+        debug_assert!(buf_state & BM_DIRTY != 0);
         UnlockBufHdr(desc, buf_state);
-        // INVARIANT: the only write-side StartBufferIO is FlushBuffer
-        // (write.rs), and every one of its exits calls TerminateBufferIO
-        // inline (with forget_owner) before an Err can propagate, so no
-        // write IO is ever left in progress for abort to clean up. Reaching
-        // this means a callee panicked between StartBufferIO and
-        // TerminateBufferIO on the write path.
-        panic!("AbortBufferIO found a dirty buffer with IO in progress: FlushBuffer terminates every write IO inline (write.rs), so no write path can leak BM_IO_IN_PROGRESS");
     }
     TerminateBufferIO(desc, false, BM_IO_ERROR, false, false);
 }

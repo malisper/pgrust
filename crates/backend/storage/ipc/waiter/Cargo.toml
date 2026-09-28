@@ -9,7 +9,11 @@ name = "waiter"
 path = "src/lib.rs"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(loom)",
+    "cfg(pgrust_sim)",
+    'cfg(target_vendor, values("wasmer"))',
+] }
 
 [dependencies]
 # THE single lock library (permit-s1): mod sync is a facade over it.

@@ -248,11 +248,25 @@ pub fn ServerLoop() -> PgResult<i32> {
             }
 
             if event.events & WL_SOCKET_ACCEPT != 0 {
-                if let Ok(s) = pqcomm_seams::accept_connection::call(event.fd) {
-                    let _ = BackendStartup(s);
-                    // The child thread shares the fd table: the socket is
-                    // owned by the spawned backend, no postmaster-side close
-                    // (C closes its fork copy here).
+                // One event, one accept on Linux: the epoll watch is
+                // level-triggered, so a queued connection re-fires. WASIX
+                // coalesces readiness into a single transition event
+                // (lib/wasix os/epoll take_pending_bits), so several
+                // connections can be queued behind one wakeup and only the
+                // first would ever be taken. Drain to the queue's end there;
+                // AcceptConnection's EWOULDBLOCK is the loop's terminator.
+                let mut first_accept = true;
+                while first_accept || cfg!(all(target_family = "wasm", target_vendor = "wasmer")) {
+                    first_accept = false;
+                    match pqcomm_seams::accept_connection::call(event.fd) {
+                        // The child thread shares the fd table: the socket is
+                        // owned by the spawned backend, no postmaster-side
+                        // close (C closes its fork copy here).
+                        Ok(s) => {
+                            let _ = BackendStartup(s);
+                        }
+                        Err(_) => break,
+                    }
                 }
             }
         }

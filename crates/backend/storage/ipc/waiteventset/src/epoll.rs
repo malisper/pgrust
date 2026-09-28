@@ -6,6 +6,21 @@ use crate::{drain, elog_error_m, os_error, Latch, PgResult, WaitEvent, WaitEvent
 use types_core::PGINVALID_SOCKET;
 use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
 
+// WASIX: the libc crate's wasi module (shared with wasip1) binds no epoll
+// surface, so the items below are re-declared against wasix-libc.
+#[cfg(all(target_family = "wasm", target_vendor = "wasmer"))]
+use crate::wasm_epoll as libc;
+
+// epoll_ev.u64 is the registered WaitEvent's position, but WASIX's
+// epoll_pwait() restores `data` through a ptr -> fd -> data1 -> u64 priority
+// chain (musl src/linux/epoll.c:93-108): a zero tag is replaced by the watched
+// fd, and events[pos] would index a socket number. Biasing by one keeps the
+// pointer view non-zero; Linux stores the 8 bytes verbatim.
+#[cfg(not(all(target_family = "wasm", target_vendor = "wasmer")))]
+const TAG_BIAS: u64 = 0;
+#[cfg(all(target_family = "wasm", target_vendor = "wasmer"))]
+const TAG_BIAS: u64 = 1;
+
 pub(crate) struct BackendSet {
     epoll_fd: i32,
     ret_events: Vec<libc::epoll_event>,
@@ -64,7 +79,7 @@ impl BackendSet {
         let mut epoll_ev = libc::epoll_event {
             events: mask as u32,
             // C's data.ptr WaitEvent pointer -> stable position.
-            u64: event.pos as u64,
+            u64: event.pos as u64 + TAG_BIAS,
         };
         let action = if old_events == 0 {
             libc::EPOLL_CTL_ADD
@@ -121,7 +136,7 @@ pub(crate) fn wait_block(
         if returned_events == occurred_events.len() {
             break;
         }
-        let cur_event = &events[epoll_ev.u64 as usize];
+        let cur_event = &events[(epoll_ev.u64 - TAG_BIAS) as usize];
         let mut out = WaitEvent {
             pos: cur_event.pos,
             user_data: cur_event.user_data,

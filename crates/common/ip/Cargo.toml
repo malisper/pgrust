@@ -10,3 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"
+
+# src/sys.rs keys its WASIX arms on target_vendor = "wasmer" (the
+# wasm32-wasmer-wasi target's vendor); the upstream rustc value list predates
+# that target, so declare it rather than carry an unexpected_cfgs warning in
+# every native/wasip1 build.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("wasmer"))'] }

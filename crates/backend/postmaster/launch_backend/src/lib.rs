@@ -814,6 +814,20 @@ pub fn postmaster_child_launch(
         }
     };
 
+    // C25: a child whose stack reservation no longer fits the guest's linear
+    // memory is refused here, before it costs a pid. The refusal cannot be
+    // handled later: the guest's only route to more memory is a grow that
+    // cannot be undone, and a refused grow ends in std's allocation-error hook
+    // aborting the postmaster and every session already served with it.
+    let stack_size = child_thread_stack_size();
+    #[cfg(target_arch = "wasm32")]
+    if linear_memory_refuses(stack_size) {
+        // The -1 contract is fork()'s, same as the two refusals below: the
+        // postmaster closes the client socket and reclaims the slot.
+        vfs::set_errno(libc::EAGAIN);
+        return -1;
+    }
+
     let Some(child_pid) = reserve_child_pid() else {
         // Synthetic pid space exhausted: refuse with the same -1 contract as a
         // failed thread spawn (the postmaster closes the client socket and
@@ -861,7 +875,7 @@ pub fn postmaster_child_launch(
 
     let spawned = std::thread::Builder::new()
         .name(format!("pg:{}:{}", kind.name, child_pid))
-        .stack_size(child_thread_stack_size())
+        .stack_size(stack_size)
         .spawn(move || {
             // PERMIT-S1: bind this thread to its slot and park until the
             // first permit grant. Declared FIRST so its Drop — the teardown
@@ -891,7 +905,7 @@ pub fn postmaster_child_launch(
 
             // C records the stack base once in main(); each thread owns its own.
             let _ = stack_depth::set_stack_base();
-            stack_depth::set_thread_stack_ceiling(child_thread_stack_size());
+            stack_depth::set_thread_stack_ceiling(stack_size);
 
             let guc_result = if guc::layers::base_share_enabled() {
                 guc::store::initialize_guc_options_for_child_base(&guc_base)
@@ -957,6 +971,146 @@ fn child_thread_stack_size() -> usize {
         .unwrap_or(0);
     let computed = rlim.max(scaled_need).max(2 << 20).min(512 << 20);
     computed.max(min_stack)
+}
+
+// The guest-side half of the C25 refusal. Linear memory can only grow (the
+// linked libc builds its allocator without mmap backup and with trimming
+// disabled, and its sbrk aborts a negative increment), so the ceiling is a
+// one-way budget and `memory.size()` is already this process's high-water
+// mark: it counts every reservation handed out since boot, including those of
+// backends that have since exited. The default ceiling is the module's declared
+// imported-memory maximum, which for this artifact is also the bound the host
+// enforces — so no trial grow is needed to learn it, and none would be
+// possible: a probe that grows to test availability cannot give the pages back.
+// The margin is one further reservation while every reservation handed out is
+// still live: the measured cost per admitted backend exceeds the reservation
+// alone, and the refusal path renders its own log line, so the budget has to
+// still cover a whole child for the "no" to be answerable.
+// Once a child has exited the arithmetic changes. dlmalloc here has no mmap and
+// cannot trim, so `memory.size()` is the arena's high-water mark and never
+// falls, while the exited child's stack block does go back to the allocator's
+// free lists. Measured on this artifact: 150 sequential (connect, query, close)
+// clients cost ~4.8 pages each, because the next backend takes the previous
+// one's block, while 226 concurrently live ones cost ~270 each. A launch with
+// an exited child behind it therefore needs room only for its residue, and the
+// guard has to let it through -- otherwise one traffic spike retires the server
+// for the rest of the postmaster's life. PGRUST_WASM_MEM_CAP_PAGES re-sizes the
+// ceiling for an A/B against the same module; 0 disables the guard.
+#[cfg(target_arch = "wasm32")]
+fn linear_memory_refuses(reservation_bytes: usize) -> bool {
+    let ceiling_pages = std::env::var("PGRUST_WASM_MEM_CAP_PAGES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(65_536);
+    // SAFETY: memory 0 is this module's own linear memory — the imported
+    // `env.memory` every allocation in the guest comes from.
+    let used_pages = unsafe { core::arch::wasm32::memory_size(0) } as usize;
+    let live = live_child_count();
+    let peak = PEAK_LIVE_CHILDREN.load(Ordering::Relaxed);
+    if linear_memory_refuses_at(used_pages, reservation_bytes, ceiling_pages, live, peak) {
+        return true;
+    }
+    PEAK_LIVE_CHILDREN.store(peak.max(live + 1), Ordering::Relaxed);
+    false
+}
+
+/// Entries leave `CHILD_THREADS` in `join_announced_child`, which is where a
+/// child's thread ends and its stack goes back to the allocator, so the length
+/// is the number of reservations currently held. A retention-parked worker keeps
+/// both its entry and its stack, so counting it errs toward refusing.
+#[cfg(target_arch = "wasm32")]
+fn live_child_count() -> usize {
+    CHILD_THREADS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len()
+}
+
+#[cfg(target_arch = "wasm32")]
+static PEAK_LIVE_CHILDREN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+// The arithmetic alone, so the boundary is testable off the guest.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn linear_memory_refuses_at(
+    used_pages: usize,
+    reservation_bytes: usize,
+    ceiling_pages: usize,
+    live_children: usize,
+    peak_children: usize,
+) -> bool {
+    if ceiling_pages == 0 {
+        return false;
+    }
+    const PAGE_BYTES: usize = 65_536;
+    let needed = reservation_bytes.div_ceil(PAGE_BYTES);
+    let free = ceiling_pages.saturating_sub(used_pages);
+    // A quarter reservation covers the residue of ~13 completed clients at the
+    // measured 4.8 pages each.
+    let room = if live_children < peak_children { needed / 4 } else { needed * 2 };
+    free < room
+}
+
+#[cfg(test)]
+mod linear_memory_tests {
+    use super::linear_memory_refuses_at;
+
+    const RESERVE: usize = 16 << 20;
+    const CEILING: usize = 65_536;
+    // Nobody has ever exited: the first climb, where every reservation is live.
+    const FRESH: (usize, usize) = (0, 0);
+
+    #[test]
+    fn admits_while_two_reservations_stay_free() {
+        // 4 751 pages of boot-time mapping, the measured postmaster baseline.
+        assert!(!linear_memory_refuses_at(4_751, RESERVE, CEILING, FRESH.0, FRESH.1));
+        // The last admission the arithmetic still allows: 65 536 - 512 = 65 024.
+        assert!(!linear_memory_refuses_at(65_024, RESERVE, CEILING, FRESH.0, FRESH.1));
+    }
+
+    #[test]
+    fn refuses_once_the_margin_is_eaten() {
+        // One page over that boundary admits a child and leaves the refusal
+        // path no room to say "no" to the next one.
+        assert!(linear_memory_refuses_at(65_025, RESERVE, CEILING, FRESH.0, FRESH.1));
+        // The measured wall: 65 298 pages used with 238 free could not have
+        // served a 256-page reservation whoever was refusing.
+        assert!(linear_memory_refuses_at(65_298, RESERVE, CEILING, FRESH.0, FRESH.1));
+    }
+
+    #[test]
+    fn a_reservation_rounds_up_to_whole_pages() {
+        // One byte of reservation still costs a page, 65 537 bytes cost two.
+        assert!(!linear_memory_refuses_at(65_534, 1, CEILING, FRESH.0, FRESH.1));
+        assert!(linear_memory_refuses_at(65_534, 65_537, CEILING, FRESH.0, FRESH.1));
+    }
+
+    #[test]
+    fn zero_ceiling_disables_the_guard() {
+        assert!(!linear_memory_refuses_at(usize::MAX, usize::MAX, 0, FRESH.0, FRESH.1));
+    }
+
+    #[test]
+    fn an_exited_child_lets_the_next_one_in_below_the_ceiling() {
+        // Leg 57d2's state: 65 298 pages mapped, 238 of the ceiling still
+        // unmapped, 206 of 226 children gone. The page-only guard refused here
+        // because 238 < 2*256; with exited children behind it the arena needs
+        // room only for the residue, so this admits.
+        assert!(!linear_memory_refuses_at(65_298, RESERVE, CEILING, 20, 226));
+        // The same reading with nobody gone is the first climb again, and refuses.
+        assert!(linear_memory_refuses_at(65_298, RESERVE, CEILING, 226, 226));
+        // Even with exits behind it, an arena exactly at its ceiling has no page
+        // left for the residue: the guard still says no, and that is the true
+        // wall rather than a conservatism this predicate can remove.
+        assert!(linear_memory_refuses_at(CEILING, RESERVE, CEILING, 20, 226));
+    }
+
+    #[test]
+    fn reuse_still_needs_room_for_the_residue() {
+        // Reuse pays for the stack but not for the backend's own heap delta.
+        assert!(linear_memory_refuses_at(CEILING - 63, RESERVE, CEILING, 1, 226));
+        assert!(!linear_memory_refuses_at(CEILING - 64, RESERVE, CEILING, 1, 226));
+    }
 }
 
 pub fn init_seams() {

@@ -7,8 +7,14 @@
 pub mod sys;
 
 #[cfg(not(target_family = "wasm"))]
-use std::mem::{size_of, MaybeUninit};
-#[cfg(not(target_family = "wasm"))]
+use std::mem::size_of;
+
+// "Resolver-capable" = the netdb/sockaddr surface is reachable: every native
+// target, plus wasm32-wasmer-wasi, whose wasi-libc exports getaddrinfo (see
+// crate::sys). Plain wasm32-wasip1 keeps the EAI_FAIL posture below.
+#[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
+use std::mem::MaybeUninit;
+#[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
 use std::ptr;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -28,10 +34,11 @@ const SOCKADDR_STORAGE_SIZE: usize = size_of::<libc::sockaddr_storage>();
 #[cfg(target_family = "wasm")]
 const SOCKADDR_STORAGE_SIZE: usize = 128;
 
-// wasm32: WASI p1 has no resolver and no AF_UNIX sockets; the wasi libc
-// crate exposes none of the netdb/sockaddr surface. The API keeps its shape
-// and every resolution fails with EAI_FAIL (musl value) — pqcomm/backend
-// callers treat that as "client address unknown", exactly the C failure arm.
+// wasm32: pg_getnameinfo_all stays stubbed on both wasm arms (see its body),
+// and on wasm32-wasip1 — where the wasi libc crate exposes none of the
+// netdb/sockaddr surface — every resolution fails with EAI_FAIL (musl value);
+// pqcomm/backend callers treat that as "client address unknown", exactly the
+// C failure arm.
 #[cfg(target_family = "wasm")]
 mod wasm_netdb {
     pub const EAI_FAIL: i32 = -4;
@@ -69,7 +76,7 @@ pub struct PgAddrInfo {
 }
 
 // Resolved addresses replace `result`'s contents (C zeroes *result first).
-#[cfg(target_family = "wasm")]
+#[cfg(all(target_family = "wasm", not(target_vendor = "wasmer")))]
 pub fn pg_getaddrinfo_all(
     _hostname: Option<&str>,
     _servname: Option<&str>,
@@ -80,14 +87,14 @@ pub fn pg_getaddrinfo_all(
     wasm_netdb::EAI_FAIL
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
 pub fn pg_getaddrinfo_all(
     hostname: Option<&str>,
     servname: Option<&str>,
     hint: &AddrInfoHint,
     result: &mut Vec<PgAddrInfo>,
 ) -> i32 {
-    if hint.family == libc::AF_UNIX {
+    if hint.family == sys::AF_UNIX {
         result.clear();
         return getaddrinfo_unix(servname.unwrap_or(""), Some(hint), result);
     }
@@ -97,18 +104,18 @@ pub fn pg_getaddrinfo_all(
 // getaddrinfo(host, NULL, NULL, ...) as hba.c:1118 check_hostname calls it:
 // a NULL hints pointer keeps the platform defaults (glibc adds AI_ADDRCONFIG
 // and AI_V4MAPPED), which zeroed hints do not.
-#[cfg(target_family = "wasm")]
+#[cfg(all(target_family = "wasm", not(target_vendor = "wasmer")))]
 pub fn pg_getaddrinfo_default_hints(_hostname: &str, result: &mut Vec<PgAddrInfo>) -> i32 {
     result.clear();
     wasm_netdb::EAI_FAIL
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
 pub fn pg_getaddrinfo_default_hints(hostname: &str, result: &mut Vec<PgAddrInfo>) -> i32 {
     getaddrinfo_inet(Some(hostname), None, None, result)
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
 fn getaddrinfo_inet(
     hostname: Option<&str>,
     servname: Option<&str>,
@@ -120,29 +127,29 @@ fn getaddrinfo_inet(
     let host_c = match hostname {
         Some(h) if !h.is_empty() => match std::ffi::CString::new(h) {
             Ok(c) => Some(c),
-            Err(_) => return libc::EAI_FAIL,
+            Err(_) => return sys::EAI_FAIL,
         },
         _ => None,
     };
     let serv_c = match servname {
         Some(s) => match std::ffi::CString::new(s) {
             Ok(c) => Some(c),
-            Err(_) => return libc::EAI_FAIL,
+            Err(_) => return sys::EAI_FAIL,
         },
         None => None,
     };
 
-    let mut hints: libc::addrinfo = unsafe { MaybeUninit::zeroed().assume_init() };
+    let mut hints: sys::addrinfo = unsafe { MaybeUninit::zeroed().assume_init() };
     if let Some(hint) = hint {
         hints.ai_flags = hint.flags;
         hints.ai_family = hint.family;
         hints.ai_socktype = hint.socktype;
     }
 
-    let mut res: *mut libc::addrinfo = ptr::null_mut();
+    let mut res: *mut sys::addrinfo = ptr::null_mut();
     // SAFETY: host/serv are NUL-terminated CStrings or NULL; res freed iff rc==0.
     let rc = unsafe {
-        libc::getaddrinfo(
+        sys::getaddrinfo(
             host_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
             serv_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
             hint.map_or(ptr::null(), |_| &hints),
@@ -161,7 +168,7 @@ fn getaddrinfo_inet(
         ai = info.ai_next;
     }
     // SAFETY: res came from a successful getaddrinfo and is freed exactly once.
-    unsafe { libc::freeaddrinfo(res) };
+    unsafe { sys::freeaddrinfo(res) };
 
     0
 }
@@ -210,6 +217,18 @@ pub fn pg_getnameinfo_all(
     }
 
     rc
+}
+
+// WASIX sockets are inet/inet6 only: an AF_UNIX request (the postmaster's
+// Unix-socket listen leg, `local` pg_hba lines) has nothing to resolve to, so
+// it takes C's resolver-failure arm and the caller moves on.
+#[cfg(all(target_family = "wasm", target_vendor = "wasmer"))]
+fn getaddrinfo_unix(
+    _path: &str,
+    _hintsp: Option<&AddrInfoHint>,
+    _result: &mut Vec<PgAddrInfo>,
+) -> i32 {
+    sys::EAI_FAIL
 }
 
 // C bug parity: only one addrinfo is ever set; AI_CANONNAME unsupported.
@@ -367,8 +386,10 @@ pub fn sockaddr_family(addr: &SockAddr) -> i32 {
     fam as i32
 }
 
-// wasm32: musl-layout ss_family — a native-endian u16 at offset 0. Only
-// all-zero (unknown) addresses exist on wasm, so this reads 0/AF_UNSPEC.
+// wasm32: musl-layout ss_family — a native-endian u16 at offset 0. Read
+// unaligned-by-hand because a &sockaddr_storage reference can be misaligned
+// inside the byte buffer; on wasip1 only all-zero (unknown) addresses exist,
+// so this returns AF_UNSPEC there.
 #[cfg(target_family = "wasm")]
 pub fn sockaddr_family(addr: &SockAddr) -> i32 {
     u16::from_ne_bytes([addr.addr[0], addr.addr[1]]) as i32
@@ -379,8 +400,8 @@ pub fn sockaddr_is_all_zeros(addr: &SockAddr) -> bool {
     addr.salen == 0 && addr.addr.iter().all(|&b| b == 0)
 }
 
-#[cfg(not(target_family = "wasm"))]
-fn copy_addrinfo(info: &libc::addrinfo) -> PgAddrInfo {
+#[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
+fn copy_addrinfo(info: &sys::addrinfo) -> PgAddrInfo {
     let mut sa = SockAddr::zeroed();
     if !info.ai_addr.is_null() && (info.ai_addrlen as usize) <= sa.addr.len() {
         // SAFETY: ai_addr holds ai_addrlen valid bytes, bounded by the dest.

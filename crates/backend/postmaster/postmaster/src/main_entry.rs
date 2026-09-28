@@ -106,11 +106,55 @@ extern "C" fn c_handle_pm_pmsignal(sig: i32) {
 }
 extern "C" fn c_dummy_handler(_sig: i32) {}
 
-// wasm32: WASI p1 delivers no signals; the postmaster's process-signal
-// installs are no-ops (the postmaster is unreachable on wasm anyway —
-// no listen sockets — but the crate must compile).
+// wasm32: WASIX does deliver signals, but only into dispositions the guest
+// registered through libc. wasix-libc keeps a process-wide table and exports
+// __wasm_signal, which dispatches into it; the first install registers that
+// export by name through wasix_32v1.callback_signal
+// (libc-top-half/musl/src/signal/sigaction.c:334). With no install here the
+// table holds only the startup dispositions, so a termination signal takes
+// musl's default action -- terminate_handler, which aborts (sigaction.c:32-36).
+//
+// The `libc` crate exposes no `signal` for this target, so declare the symbol.
+// musl's signal(3) installs with SA_RESTART and an empty mask
+// (src/signal/signal.c:19); the dispatcher then blocks the delivered signal for
+// the handler's duration unless SA_NODEFER (sigaction.c:203), which is the
+// re-entry guard native's sigfillset() mask buys. The handlers below do one
+// atomic store plus SetLatch, so nothing else is needed to stay signal-safe.
 #[cfg(target_family = "wasm")]
-fn pqsignal(_signum: i32, _handler: extern "C" fn(i32)) {}
+mod wasix_signal {
+    extern "C" {
+        fn signal(signo: i32, disp: usize) -> usize;
+        fn __SIG_IGN(signo: i32);
+    }
+
+    // musl's SIG_IGN is this no-op function, not the integer 1: the header drops
+    // the magic-value form for this libc because "1 is a valid function pointer
+    // on wasm" (libc-top-half/musl/include/signal.h:285-294). The dispatcher
+    // calls whatever is in the table, so the integer would trap.
+    pub(super) fn sig_ign() -> usize {
+        __SIG_IGN as usize
+    }
+
+    pub(super) fn install(signo: i32, disp: usize) {
+        // SAFETY: `disp` is an `extern "C" fn(i32)` pointer -- a real handler or
+        // __SIG_IGN -- which is the signature the dispatcher calls. The return
+        // value (previous disposition, or SIG_ERR) is not actionable here; the
+        // native install below ignores it the same way.
+        unsafe {
+            signal(signo, disp);
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn pqsignal(signum: i32, handler: extern "C" fn(i32)) {
+    wasix_signal::install(signum, handler as usize);
+}
+
+#[cfg(target_family = "wasm")]
+fn pqsignal_ignore(signum: i32) {
+    wasix_signal::install(signum, wasix_signal::sig_ign());
+}
 
 #[cfg(not(target_family = "wasm"))]
 fn pqsignal(signum: i32, handler: extern "C" fn(i32)) {
@@ -124,9 +168,6 @@ fn pqsignal(signum: i32, handler: extern "C" fn(i32)) {
         libc::sigaction(signum, &sa, std::ptr::null_mut());
     }
 }
-
-#[cfg(target_family = "wasm")]
-fn pqsignal_ignore(_signum: i32) {}
 
 #[cfg(not(target_family = "wasm"))]
 fn pqsignal_ignore(signum: i32) {

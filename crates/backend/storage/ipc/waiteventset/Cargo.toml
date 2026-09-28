@@ -8,6 +8,9 @@ publish.workspace = true
 name = "waiteventset"
 path = "src/lib.rs"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("wasmer"))'] }
+
 [dependencies]
 pg_clock = { path = "../../../../port/pg_clock" }
 types_core = { path = "../../../../_support/types/types_core" }

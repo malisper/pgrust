@@ -27,11 +27,20 @@ mod backend;
 #[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 #[path = "kqueue.rs"]
 mod backend;
-// wasm32: compile-clean stub; the functional WASI poll_oneoff backend is the
-// P5 boot increment (docs/design/dst-and-wasm.md §5).
-#[cfg(target_family = "wasm")]
+// WASIX shares Linux's readiness backend: its wasi-libc carries musl's
+// src/linux/epoll.c over the __wasi_epoll_* calls, and epoll needs no libc-crate
+// declarations beyond what wasm_epoll.rs re-declares (the libc crate's
+// target_os = "wasi" module is shared with wasip1 and lists no epoll surface).
+#[cfg(all(target_family = "wasm", target_vendor = "wasmer"))]
+#[path = "epoll.rs"]
+mod backend;
+// wasm32-wasip1: compile-clean stub; there is no socket or pipe to watch.
+#[cfg(all(target_family = "wasm", not(target_vendor = "wasmer")))]
 #[path = "wasm_stub.rs"]
 mod backend;
+// The epoll backend's libc items on this target (the libc crate binds none).
+#[cfg(all(target_family = "wasm", target_vendor = "wasmer"))]
+mod wasm_epoll;
 
 #[cfg(test)]
 mod tests;
@@ -117,9 +126,9 @@ pub fn InitializeWaitEventSupport() -> PgResult<()> {
 
     // The waiter wake pipe replaces C's self-pipe (created eagerly here to
     // keep the per-backend fd accounting where it always was).
-    // wasm32: no pipe(2) on WASI; the wasm backend blocks on time alone
-    // (single thread — no cross-thread wakes exist to route).
-    #[cfg(not(target_family = "wasm"))]
+    // wasm32-wasip1: no pipe(2) on WASI; the stub backend blocks on time alone
+    // (single thread — no cross-thread wakes exist to route). WASIX has both.
+    #[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
     {
         if let Err(errno) = waiter::ensure_wake_pipe() {
             return Err(Box::new(PgError::new(
@@ -156,14 +165,14 @@ pub fn WakeupPostmaster() {
     waiter::unpark_word(POSTMASTER_WAKER.load(Ordering::Acquire));
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_vendor = "wasmer"))]
 fn wakeup_read_fd() -> i32 {
     waiter::wake_read_fd()
 }
 
-// wasm32: no wake pipe exists; latch events carry no fd (the wasm backend
-// blocks on time alone and the generic loop re-checks latch.is_set).
-#[cfg(target_family = "wasm")]
+// wasm32-wasip1: no wake pipe exists; latch events carry no fd (the stub
+// backend blocks on time alone and the generic loop re-checks latch.is_set).
+#[cfg(all(target_family = "wasm", not(target_vendor = "wasmer")))]
 fn wakeup_read_fd() -> i32 {
     PGINVALID_SOCKET
 }

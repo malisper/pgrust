@@ -11,7 +11,9 @@
 //!
 //! Mechanism: one postmaster-lifetime sampler thread ("pg:memwatchdog").
 //! Every `pgrust.memory_watchdog_interval` (default 1s) it reads process
-//! RSS (/proc/self/status; allocator stats off-Linux), the cgroup v2
+//! RSS (/proc/self/status; the allocator hook off-Linux; else the accounted
+//! context footprint — the WASIX guest, where neither kernel signal exists),
+//! the cgroup v2
 //! `memory.current`/`memory.max` when present, the process-wide accounted
 //! context block bytes (`mcx::global_footprint`), and the allocator's
 //! committed bytes (installed hook, mimalloc `mi_process_info`). Against
@@ -179,15 +181,27 @@ struct Ledger {
     alloc: Option<AllocatorStats>,
 }
 
+// The usage basis, as a pure function of the three signals `collect` gathers, so the
+// WASIX-guest arm is testable without a fake /proc: on Linux `/proc/self/status` wins,
+// off-Linux with the allocator hook installed that hook's process RSS does, and with
+// NEITHER — the guest, where the hook is `#[cfg(not(target_family = "wasm"))]` and the
+// proc file is absent — the process-wide accounted context footprint is the only memory
+// number the guest still produces. Pre-fix this last arm returned 0, which made `tick`
+// short-circuit on `usage == 0` and left the watchdog armed but structurally blind.
+fn usage_basis(pm: Option<&ProcMem>, alloc: Option<AllocatorStats>, footprint: usize) -> u64 {
+    match (pm, alloc) {
+        (Some(m), _) => m.rss_kb * 1024,
+        (None, Some(a)) => a.current_rss as u64,
+        (None, None) => footprint as u64,
+    }
+}
+
 fn collect(limit_mb: i32) -> Ledger {
     let pm = proc_status();
     let cg = cgroup_mem();
     let alloc = allocator_stats();
-    let rss_bytes = match (pm, alloc) {
-        (Some(m), _) => m.rss_kb * 1024,
-        (None, Some(a)) => a.current_rss as u64,
-        (None, None) => 0,
-    };
+    let accounted = mcx::global_footprint::bytes();
+    let rss_bytes = usage_basis(pm.as_ref(), alloc, accounted);
     let (usage, limit, source) = if limit_mb > 0 {
         (rss_bytes, (limit_mb as u64) << 20, LimitSource::Guc)
     } else if let Some((current, Some(max))) = cg {
@@ -203,7 +217,7 @@ fn collect(limit_mb: i32) -> Ledger {
         source,
         pm,
         cg,
-        accounted: mcx::global_footprint::bytes(),
+        accounted,
         alloc,
     }
 }
@@ -452,5 +466,26 @@ mod tests {
         let s = allocator_stats().expect("installed");
         assert_eq!(s.current_rss, 42);
         assert_eq!(s.current_commit, 43);
+    }
+
+    #[test]
+    fn usage_basis_falls_through_proc_allocator_footprint() {
+        let p = ProcMem {
+            rss_kb: 100,
+            ..Default::default()
+        };
+        // /proc wins when present, regardless of the hook.
+        assert_eq!(usage_basis(Some(&p), None, 999), 100 * 1024);
+        // Off-Linux the allocator hook's process RSS is the basis.
+        assert_eq!(
+            usage_basis(None, Some(AllocatorStats { current_rss: 4096, ..Default::default() }), 7),
+            4096
+        );
+        // The WASIX guest: neither kernel signal exists, so the accounted context
+        // footprint is the usage basis (the number the guest's own memctx probe
+        // prints). Pre-fix this arm returned 0 and `tick` bailed on `usage == 0`,
+        // which is exactly the armed-and-blind reading pass 70 measured.
+        assert_eq!(usage_basis(None, None, 126_589_984), 126_589_984);
+        assert_eq!(usage_basis(None, None, 0), 0);
     }
 }
