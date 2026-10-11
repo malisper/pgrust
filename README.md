@@ -144,6 +144,10 @@ and cannot be said about the "46,066" figure are in
 [`docs/conformance/README.md`](docs/conformance/README.md); the gate contract
 is [`docs/conformance/regress-gate.md`](docs/conformance/regress-gate.md).
 
+The runner script and the `docs/conformance/` files are not yet in this
+repository. [`regress/README.md`](regress/README.md) lists what a fresh
+clone has and what it is missing.
+
 ## Unsafe Code
 
 pgrust uses unsafe code, but only for the specific things that need it.
