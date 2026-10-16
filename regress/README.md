@@ -27,6 +27,24 @@ does not contain. See issue #65.
   plus `schedule.extra`, appended after the upstream isolation schedule.
 - `regress/tap-overlay/recovery/`: overlay files for the recovery TAP tests.
 
+## Which corpus the recorded runs used
+
+The documents in the tree describe two different corpora:
+
+- The vendored tree and the top-level README name PostgreSQL 18.6, with 231
+  tests in `parallel_schedule`.
+- `proofs/TESTING-STRATEGY.md` section 1.1 and `proofs/COVERAGE.md` describe
+  runs against PostgreSQL 18.3, with 230 scheduled tests, read from an
+  out-of-tree path, `../pgrust-reference/vendor/postgres-src/src/test/regress`.
+
+According to
+`crates/postgres-18.6-reference/README-WHY-THIS-IS-HERE.md`, the reference
+moved from 18.3 to 18.6 on 2026-09-01. The latest dated pass recorded in
+`proofs/TESTING-STRATEGY.md` ("pg_regress ALL: 230/230 ok", about 2026-07-21)
+predates that move, so the run evidence in `proofs/` refers to the 18.3
+corpus. Nothing in the repository says which corpus produced the 46,066
+figure, and without the runner it cannot be recomputed from a clone.
+
 ## External prerequisites
 
 From `proofs/COVERAGE.md` ("How to regenerate") and

@@ -138,15 +138,11 @@ The regression suite we run is PostgreSQL's own `src/test/regress`, vendored
 unmodified at `crates/postgres-18.6-reference/src/test/regress` and driven by
 upstream `pg_regress` against a pgrust server (`scripts/pg-regress-fast.sh`;
 gate: every one of the 231 `parallel_schedule` files passes byte-for-byte
-against the vendor expected output). Prerequisites, the exact local and CI cluster
-commands, what the harness counts (files vs lines vs queries), and what can
-and cannot be said about the "46,066" figure are in
-[`docs/conformance/README.md`](docs/conformance/README.md); the gate contract
-is [`docs/conformance/regress-gate.md`](docs/conformance/regress-gate.md).
-
-The runner script and the `docs/conformance/` files are not yet in this
-repository. [`regress/README.md`](regress/README.md) lists what a fresh
-clone has and what it is missing.
+against the vendor expected output). The runner script, the exact local and
+CI cluster commands, what the harness counts (files vs lines vs queries) and
+the gate contract are not yet in this repository.
+[`regress/README.md`](regress/README.md) lists what a fresh clone has and
+what it is missing.
 
 ## Unsafe Code
 
