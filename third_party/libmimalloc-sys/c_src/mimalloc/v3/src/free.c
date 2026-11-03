@@ -205,11 +205,14 @@ static mi_decl_forceinline void mi_free_ex(void* p, size_t* usable, mi_page_t* p
 }
 
 void mi_free(void* p) mi_attr_noexcept {
+  // free(NULL) can be called by the dynamic loader before mimalloc initializes.
+  if (p == NULL) return;
   mi_page_t* const page = mi_validate_ptr_page(p,"mi_free");  
   mi_free_ex(p, NULL, page);
 }
 
 void mi_ufree(void* p, size_t* usable) mi_attr_noexcept {
+  if (p == NULL) return;
   mi_page_t* const page = mi_validate_ptr_page(p,"mi_ufree");  
   mi_free_ex(p, usable, page);
 }
