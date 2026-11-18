@@ -1,7 +1,7 @@
 <h1 align="center">pgrust</h1>
 
 <p align="center">
-  <strong>A Rust rewrite of Postgres.</strong>
+  <strong>A Postgres-compatible database, rewritten in Rust, built for fast analytics on your Postgres data.</strong>
 </p>
 
 <p align="center">
@@ -28,9 +28,10 @@
 >
 > **v0.4-beta is out:** [the release post](https://pgrust.com/blog/pgrust-v0-4-beta/) and [what's new](#whats-new-in-v04-beta).
 
-pgrust is a re-implementation of Postgres meant to show what Postgres would
-look like if it was built in 2026. It is wire compatible and even SQL dialect
-compatible with Postgres.
+pgrust is a drop-in replacement for Postgres built for fast analytics. It is
+wire compatible and SQL dialect compatible with Postgres 18, so your existing
+drivers, ORMs, `psql` and tools work unchanged. It is Postgres rebuilt the way
+it would be built in 2026.
 
 Every line is Rust, written to match the behavior of the C implementation.
 Rust makes it easy to re-architect several core Postgres pieces. pgrust has:
@@ -223,22 +224,34 @@ CREATE TABLE events (id bigint, kind text, val double precision, at timestamp)
   error saying the table is in the v0.3.x columnar format. Dump them with the
   v0.3 binary (`pg_dump`) and restore them into v0.4-beta.
 
+## When to use pgrust
+
+- **Analytics on your Postgres data without a separate warehouse.** Put
+  large tables in `pgrcolumnar` and query them with the same SQL, in the same
+  database as your application data.
+- **Speeding up slow Postgres queries** with large scans, joins and
+  aggregations, such as dashboards and reporting.
+- **One database for transactions and analytics**, instead of Postgres plus
+  ClickHouse or a warehouse kept in sync by a pipeline.
+
 ## Status
 
-We don't recommend running pgrust in production (yet), but we are
-successfully running it ourselves internally. Keep Postgres as the source
-of truth for data you can't afford to lose.
+We're working with a few early design partners and are targeting
+production readiness in Q1 2027. Testing and reliability are our top
+priority; see [Testing](#testing) for how we verify pgrust against
+Postgres. We run pgrust ourselves internally today.
 
-pgrust still has a lot of bugs. Our #1 priority right now is testing and
-reliability.
+## Extensions
 
-If you need production ready Postgres today, use Postgres.
+pgrust ships the most-used Postgres extensions built in: pgvector, pg_cron,
+pg_stat_statements, pg_trgm, hstore, pgcrypto, postgres_fdw and most of
+contrib. Install them with `CREATE EXTENSION` as usual.
 
-PostgreSQL extensions don't work out of the box: there is no stable
-extension ABI in pgrust yet. But pgrust ships a large number of them,
-including pgvector, pg_cron, pg_stat_statements, pg_trgm, hstore, pgcrypto,
-postgres_fdw and most of contrib. PL/Python, PL/Perl and PL/Tcl are not
-supported yet.
+pgrust doesn't load C extension binaries compiled for Postgres, but porting an
+existing extension to pgrust is straightforward, and we add new ones
+regularly. If you need an extension that isn't listed,
+[open an issue](https://github.com/malisper/pgrust/issues) and we'll
+prioritize it. PL/Python, PL/Perl and PL/Tcl are not supported yet.
 
 ## Performance
 
